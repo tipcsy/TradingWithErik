@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+data/m1/*.parquet
+data/m15/*.parquet
+.venv/
+venv/
