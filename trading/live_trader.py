@@ -30,9 +30,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core import mt5_connector
-from core.indicator_engine import compute_indicators
-from core.signal_detector import PairState, check_m15_signal, check_m1_entry
+from core.indicator_engine import atr as atr_indicator
 from core.risk_manager import calc_sl_tp_pips, calc_lot, calc_effective_slots, SlotManager
+from strategy import get_strategy
+from strategy.base import MarketData
 
 logging.basicConfig(
     level=logging.INFO,
@@ -81,17 +82,9 @@ class PairDashboardState:
     timeframe_remaining: dict = field(default_factory=dict)  # {percek: hátralévő mp}
 
     # ── Stratégia-specifikus cellák: {oszlop_kulcs: (szöveg, szín-név)} ───
+    # A stratégia tölti (compute_display); a GUI csak rajzolja. Stratégiacsere
+    # NEM igényli e dataclass módosítását.
     strategy_cells:   dict = field(default_factory=dict)
-
-    # ── Régi (stratégia-specifikus) mezők — Fázis 3-ban megszűnnek ───────
-    # A live_trader még ezeket írja; a GUI már a strategy_cells-ből olvas.
-    sma_direction:    str  = "—"
-    wpr_m15:          float = 0.0
-    m15_signal:       str  = "—"
-    m15_remaining_s:  int  = 0
-    wpr_m1:           float = 0.0
-    m1_signal:        str  = "—"
-    m1_remaining_s:   int  = 0
 
 
 # Globális dashboard állapot — a GUI ebből olvas
@@ -208,6 +201,16 @@ def log_trade(row: dict):
 # Egy pár állapota futás közben
 # ---------------------------------------------------------------------------
 
+def mt5_timeframe(minutes: int):
+    """Perc → MT5 timeframe konstans (stratégia-időkeretek feloldásához)."""
+    table = {
+        1:   mt5.TIMEFRAME_M1,   5:   mt5.TIMEFRAME_M5,
+        15:  mt5.TIMEFRAME_M15,  30:  mt5.TIMEFRAME_M30,
+        60:  mt5.TIMEFRAME_H1,   240: mt5.TIMEFRAME_H4,
+    }
+    return table.get(minutes, mt5.TIMEFRAME_M1)
+
+
 @dataclass
 class LivePairState:
     symbol:      str
@@ -215,33 +218,33 @@ class LivePairState:
     params:      dict
     trading_cfg: dict
     magic:       int
-    signal_state: PairState = field(default_factory=lambda: PairState(""))
-    prev_m1_wpr:  Optional[float] = None
-    last_m15_time: Optional[pd.Timestamp] = None
-    daily_pnl:    float = 0.0
-    daily_date:   str   = ""
-
-    def __post_init__(self):
-        self.signal_state = PairState(self.symbol)
+    strat_state: object = None    # a stratégia jelzésállapota (átlátszatlan)
+    daily_pnl:   float  = 0.0
+    daily_date:  str    = ""
 
 
 # ---------------------------------------------------------------------------
 # Fő kereskedési ciklus
 # ---------------------------------------------------------------------------
 
-def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float):
+def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
+                 strategy):
+    """Egy LIVE pár feldolgozása.
+
+    A JELZÉS a stratégiától jön (strategy.on_bar_close, ZÁRT gyertyán). A
+    pozíció-méretezés, SL/TP, pozíciókezelés és végrehajtás a motor/kockázati
+    réteg felelőssége — stratégia-független.
+    """
     symbol     = state.symbol
     pair_cfg   = state.pair_cfg
     params     = state.params
     trading_cfg = state.trading_cfg
     magic      = state.magic
     pip_size   = pair_cfg["pip_size"]
-    pv1_usd    = pair_cfg["pv1_usd"]
 
-    # Dashboard állapot inicializálás
+    # Dashboard state (a megjelenítendő cellákat a GUI tölti — itt csak
+    # végrehajtási tények: pozíció P&L, napi P&L).
     ds = dashboard.setdefault(symbol, PairDashboardState(symbol=symbol, trained=True))
-    ds.m15_remaining_s = seconds_to_candle_close(15)
-    ds.m1_remaining_s  = seconds_to_candle_close(1)
 
     # Session szűrő
     hour = datetime.now(timezone.utc).hour
@@ -262,66 +265,40 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float):
         log.debug("%s — napi veszteség limit elérve, kihagyva.", symbol)
         return
 
-    warmup = max(params["sma_period"], params["wpr_m15_period"], params["atr_period"]) + 5
+    # --- Piaci adat a stratégia időkereteire ---
+    bars = {}
+    for tf in strategy.timeframes():
+        wu = strategy.warmup_bars(params, tf.label)
+        df = get_candles(symbol, mt5_timeframe(tf.minutes), wu)
+        if df is None or len(df) < wu:
+            return
+        bars[tf.label] = df
+    md = MarketData(symbol=symbol, params=params, bars=bars)
 
-    # --- M15 adatok ---
-    df_m15 = get_candles(symbol, mt5.TIMEFRAME_M15, warmup)
-    if df_m15 is None or len(df_m15) < warmup:
-        return
+    # --- Jelzés a stratégiától (ZÁRT gyertyán, állapottartó) ---
+    state.strat_state, signal = strategy.on_bar_close(state.strat_state, md)
 
-    # --- M1 adatok ---
-    warmup_m1 = params["wpr_m1_period"] + 5
-    df_m1 = get_candles(symbol, mt5.TIMEFRAME_M1, warmup_m1)
-    if df_m1 is None or len(df_m1) < warmup_m1:
-        return
+    # --- ATR (méretezéshez) + spread (kapuhoz) — végrehajtási inputok ---
+    # Konvenció: az első deklarált időkeret a "fő" (magasabb) — ezen mérünk ATR-t.
+    primary = strategy.timeframes()[0].label
+    df_primary = bars[primary]
+    atr_ser = atr_indicator(df_primary["high"], df_primary["low"],
+                            df_primary["close"], params.get("atr_period", 14))
+    atr_val = atr_ser.iloc[-2] if len(atr_ser) >= 2 else float("nan")
+    if pd.isna(atr_val):
+        atr_val = None
 
-    # Indikátorok számítása
-    m15, m1 = compute_indicators(df_m15, df_m1, params)
-
-    # Utolsó zárt M15 gyertya (index -2: az utolsó zárt, -1: az aktuális nyitott)
-    m15_closed = m15.iloc[-2]
-    m15_time   = m15.index[-2]
-
-    if pd.isna(m15_closed["sma"]) or pd.isna(m15_closed["wpr"]) or pd.isna(m15_closed["atr"]):
-        return
-
-    # --- Spread ellenőrzés ---
-    sym_info = mt5.symbol_info(symbol)
-    if sym_info:
-        current_spread_pts = sym_info.spread  # MT5 pontban adja (pl. 12)
-        atr_pts = int(m15_closed["atr"] / sym_info.point)
+    spread_ok = True
+    sym_info  = mt5.symbol_info(symbol)
+    if sym_info and atr_val is not None and sym_info.point > 0:
+        current_spread_pts = sym_info.spread
+        atr_pts = int(atr_val / sym_info.point)
         ratio   = params.get("max_spread_atr_ratio", 0.20)
         max_spread_pts = max(1, int(atr_pts * ratio))
-        ds.spread_pts     = current_spread_pts
-        ds.max_spread_pts = max_spread_pts
-
-    # M15 állapot frissítése ha új gyertya zárult
-    if state.last_m15_time != m15_time:
-        state.last_m15_time = m15_time
-        state.signal_state = check_m15_signal(
-            state.signal_state,
-            close=m15_closed["close"],
-            sma=m15_closed["sma"],
-            wpr_m15=m15_closed["wpr"],
-            params=params,
-        )
-
-    # Dashboard frissítés (M15)
-    ds.sma_direction = state.signal_state.direction
-    ds.wpr_m15 = round(m15_closed["wpr"], 1)
-    if state.signal_state.m15_window_open:
-        ds.m15_signal = f"{state.signal_state.direction}{'▲' if state.signal_state.direction == 'BUY' else '▼'}"
-    else:
-        ds.m15_signal = "—"
-
-    # Utolsó zárt M1 gyertya
-    m1_closed = m1.iloc[-2]
-    m1_prev   = m1.iloc[-3] if len(m1) >= 3 else m1.iloc[-2]
-
-    if pd.isna(m1_closed["wpr"]) or pd.isna(m1_prev["wpr"]):
-        return
-
-    ds.wpr_m1 = round(m1_closed["wpr"], 1)
+        spread_ok = (current_spread_pts <= max_spread_pts)
+        if not spread_ok:
+            log.debug("%s — spread túl nagy: %d pt > %d pt max, kihagyva.",
+                      symbol, current_spread_pts, max_spread_pts)
 
     # --- Pozíció menedzsment ---
     open_positions = get_open_positions(magic)
@@ -394,38 +371,26 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float):
                     "pnl_usd": pnl,
                 })
 
-    # --- M1 belépési jelzés ---
-    spread_ok = (ds.max_spread_pts == 0 or ds.spread_pts <= ds.max_spread_pts)
-    if not spread_ok:
-        log.debug("%s — spread túl nagy: %d pt > %d pt max, kihagyva.",
-                  symbol, ds.spread_pts, ds.max_spread_pts)
+    # --- Belépés a stratégia jelzése alapján ---
+    if signal != "NONE" and atr_val is not None and slot_mgr.can_open() and spread_ok:
+        sl_pips, tp_pips = calc_sl_tp_pips(atr_val, {**params, "pip_size": pip_size})
+        eff_slots = calc_effective_slots(balance, sl_pips, pair_cfg, trading_cfg)
+        lot = calc_lot(balance, sl_pips, pair_cfg, trading_cfg, eff_slots)
 
-    if state.prev_m1_wpr is not None and slot_mgr.can_open() and spread_ok:
-        signal = check_m1_entry(state.signal_state, state.prev_m1_wpr, m1_closed["wpr"], params)
+        tick = mt5.symbol_info_tick(symbol)
+        if tick:
+            if signal == "BUY":
+                open_price = tick.ask
+                sl_price   = round(open_price - pip_to_price(sl_pips, pip_size), 5)
+                tp_price   = round(open_price + pip_to_price(tp_pips, pip_size), 5)
+            else:
+                open_price = tick.bid
+                sl_price   = round(open_price + pip_to_price(sl_pips, pip_size), 5)
+                tp_price   = round(open_price - pip_to_price(tp_pips, pip_size), 5)
 
-        if signal != "NONE":
-            atr_val = m15_closed["atr"]
-            sl_pips, tp_pips = calc_sl_tp_pips(atr_val, {**params, "pip_size": pip_size})
-            eff_slots = calc_effective_slots(balance, sl_pips, pair_cfg, trading_cfg)
-            lot = calc_lot(balance, sl_pips, pair_cfg, trading_cfg, eff_slots)
-
-            tick = mt5.symbol_info_tick(symbol)
-            if tick:
-                if signal == "BUY":
-                    open_price = tick.ask
-                    sl_price   = round(open_price - pip_to_price(sl_pips, pip_size), 5)
-                    tp_price   = round(open_price + pip_to_price(tp_pips, pip_size), 5)
-                else:
-                    open_price = tick.bid
-                    sl_price   = round(open_price + pip_to_price(sl_pips, pip_size), 5)
-                    tp_price   = round(open_price - pip_to_price(tp_pips, pip_size), 5)
-
-                ticket = open_position(symbol, signal, lot, sl_price, tp_price, magic)
-                if ticket:
-                    slot_mgr.add(ticket)
-                    ds.m1_signal = f"{signal}{'▲' if signal == 'BUY' else '▼'}"
-
-    state.prev_m1_wpr = m1_closed["wpr"]
+            ticket = open_position(symbol, signal, lot, sl_price, tp_price, magic)
+            if ticket:
+                slot_mgr.add(ticket)
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +400,7 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float):
 def run(cfg: dict, slot_mgr: SlotManager):
     magic       = cfg["broker"]["magic"]
     trading_cfg = cfg["trading"]
+    strategy    = get_strategy(cfg)
 
     all_pairs = {s: p for s, p in cfg["pairs"].items() if isinstance(p, dict)}
     pair_states: dict[str, LivePairState] = {}
@@ -457,6 +423,7 @@ def run(cfg: dict, slot_mgr: SlotManager):
                 params=params,
                 trading_cfg=trading_cfg,
                 magic=magic,
+                strat_state=strategy.new_signal_state(symbol),
             )
             log.info("%s — LIVE (params betöltve)", symbol)
         else:
@@ -483,6 +450,7 @@ def run(cfg: dict, slot_mgr: SlotManager):
                             params=params,
                             trading_cfg=trading_cfg,
                             magic=magic,
+                            strat_state=strategy.new_signal_state(symbol),
                         )
                         log.info("%s — Play: LIVE indítva", symbol)
                     else:
@@ -496,7 +464,7 @@ def run(cfg: dict, slot_mgr: SlotManager):
 
                 # LIVE: feldolgozás
                 if state_now == "LIVE" and symbol in pair_states:
-                    process_pair(pair_states[symbol], slot_mgr, balance)
+                    process_pair(pair_states[symbol], slot_mgr, balance, strategy)
 
             time.sleep(10)
 
