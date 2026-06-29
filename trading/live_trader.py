@@ -62,13 +62,15 @@ def load_pair_params(symbol: str) -> Optional[dict]:
 @dataclass
 class PairDashboardState:
     symbol:           str
-    sma_direction:    str  = "—"   # "BUY" | "SELL" | "—"
-    wpr_m15:          float = 0.0
-    m15_signal:       str  = "—"   # "BUY▲" | "SELL▼" | "—"
-    m15_remaining_s:  int  = 0     # másodperc az M15 gyertya zárásáig
-    wpr_m1:           float = 0.0
-    m1_signal:        str  = "—"   # utolsó M1 jel
-    m1_remaining_s:   int  = 0     # másodperc az M1 gyertya zárásáig
+
+    # ── Váz-szintű (stratégia-független) mezők ───────────────────────────
+    bid:              Optional[float] = None   # aktuális eladási ár
+    ask:              Optional[float] = None   # aktuális vételi ár
+    digits:           int  = 5                 # árformázás tizedesjegyek
+    prev_bid:         Optional[float] = None   # előző bid (tick-színezéshez)
+    prev_ask:         Optional[float] = None   # előző ask
+    day_open:         Optional[float] = None   # napi nyitóár (változás% alaphoz)
+    change_pct:       Optional[float] = None   # napi változás %-ban
     position_pnl:     Optional[float] = None   # None = nincs nyitott pozíció
     risk_free:        bool = False
     daily_pnl:        float = 0.0
@@ -76,6 +78,20 @@ class PairDashboardState:
     trained:          bool = False  # van-e optimalizált paraméter
     spread_pts:       int  = 0      # aktuális spread pontban (MT5 egység)
     max_spread_pts:   int  = 0      # megengedett max spread pontban
+    timeframe_remaining: dict = field(default_factory=dict)  # {percek: hátralévő mp}
+
+    # ── Stratégia-specifikus cellák: {oszlop_kulcs: (szöveg, szín-név)} ───
+    strategy_cells:   dict = field(default_factory=dict)
+
+    # ── Régi (stratégia-specifikus) mezők — Fázis 3-ban megszűnnek ───────
+    # A live_trader még ezeket írja; a GUI már a strategy_cells-ből olvas.
+    sma_direction:    str  = "—"
+    wpr_m15:          float = 0.0
+    m15_signal:       str  = "—"
+    m15_remaining_s:  int  = 0
+    wpr_m1:           float = 0.0
+    m1_signal:        str  = "—"
+    m1_remaining_s:   int  = 0
 
 
 # Globális dashboard állapot — a GUI ebből olvas

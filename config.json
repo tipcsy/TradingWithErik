@@ -1,4 +1,13 @@
 {
+  "strategy": {
+    "_comment": "Az aktív stratégia modul a strategy/ csomagból. Cseréhez csak ezt kell átírni + új modult írni.",
+    "name": "wpr_sma"
+  },
+  "dashboard": {
+    "_comment": "Felület frissítési ütem. live_refresh_sec: a FUTÓ párok WPR/ár frissítése (5-10 ajánlott). all_refresh_sec: minden pár teljes körű frissítése.",
+    "live_refresh_sec": 7,
+    "all_refresh_sec": 30
+  },
   "broker": {
     "name": "Vantage",
     "server": "VantageInternational-Demo",
