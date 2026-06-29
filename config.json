@@ -4,9 +4,10 @@
     "name": "wpr_sma"
   },
   "dashboard": {
-    "_comment": "Felület frissítési ütem. live_refresh_sec: a FUTÓ párok WPR/ár frissítése (5-10 ajánlott). all_refresh_sec: minden pár teljes körű frissítése.",
+    "_comment": "Felület frissítési ütem. live_refresh_sec: a FUTÓ párok WPR/ár frissítése (5-10 ajánlott). all_refresh_sec: minden pár teljes körű frissítése. watchdog_threshold_sec: ennyi mp blokkolás fölött figyelmeztet a fagyás-watchdog (data/ui_watchdog.log).",
     "live_refresh_sec": 7,
-    "all_refresh_sec": 30
+    "all_refresh_sec": 30,
+    "watchdog_threshold_sec": 2.0
   },
   "broker": {
     "name": "Vantage",

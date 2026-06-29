@@ -15,6 +15,7 @@ A táblázat OSZLOP-VEZÉRELT:
 
 import json
 import threading
+import time
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import ttk
@@ -281,8 +282,20 @@ class HeaderRow:
 
 
 # ---------------------------------------------------------------------------
-# Optimizer vezérlő — háttérszálon, queue-val, a stratégia seam-en át
+# Optimizer vezérlő — adat-előkészítés háttérSZÁLON, számítás külön PROCESSZBEN
 # ---------------------------------------------------------------------------
+
+class _LocalProgress:
+    """Tartalék haladásjelző, ha a process-pool nem érhető el (egy folyamatban).
+    A .put((symbol, done, total)) hívás közvetlenül a státusz dict-be ír."""
+    def __init__(self, status: dict):
+        self._status = status
+
+    def put(self, item):
+        symbol, done, total = item
+        pct = int(done / total * 100) if total else 0
+        self._status[symbol] = f"{done}/{total}  {pct}%"
+
 
 class OptimizerController:
     def __init__(self, cfg: dict, strategy, dashboard_ref: dict,
@@ -298,6 +311,61 @@ class OptimizerController:
         self._queue: list     = []
         self._running: set    = set()
 
+        # Process-pool + folyamatok közti progress-queue (lazán, háttérben)
+        self._pool        = None
+        self._manager     = None
+        self._progress_q  = None
+        self._pool_lock   = threading.Lock()
+        self._pool_failed = False
+        # Eager létrehozás háttérszálon, hogy az első OPT kattintás se akadjon
+        threading.Thread(target=self._ensure_pool, daemon=True,
+                         name="OptPoolInit").start()
+
+    # ── Process-pool életciklus ──────────────────────────────────────────
+    def _ensure_pool(self):
+        with self._pool_lock:
+            if self._pool is not None or self._pool_failed:
+                return
+            try:
+                import multiprocessing as mp
+                from concurrent.futures import ProcessPoolExecutor
+                self._manager    = mp.Manager()
+                self._progress_q = self._manager.Queue()
+                self._pool       = ProcessPoolExecutor(max_workers=self.max_parallel)
+                threading.Thread(target=self._drain_progress, daemon=True,
+                                 name="OptProgress").start()
+            except Exception:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "Process-pool nem hozható létre — szálon belüli tartalék.",
+                    exc_info=True)
+                self._pool = None
+                self._pool_failed = True
+
+    def _drain_progress(self):
+        """A gyermekfolyamatok haladását a fő státusz dict-be vezeti."""
+        while True:
+            try:
+                symbol, done, total = self._progress_q.get()
+            except Exception:
+                break
+            if symbol in self._running:
+                pct = int(done / total * 100) if total else 0
+                self.optimizer_status[symbol] = f"{done}/{total}  {pct}%"
+
+    def shutdown(self):
+        try:
+            if self._pool is not None:
+                self._pool.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+        try:
+            if self._manager is not None:
+                self._manager.shutdown()
+        except Exception:
+            pass
+
+    # ── Vezérlés ──────────────────────────────────────────────────────────
     def request_optimize(self, symbol: str):
         with self._lock:
             if self.instrument_state.get(symbol) != "STOPPED":
@@ -318,9 +386,11 @@ class OptimizerController:
         threading.Thread(target=self._run_worker, args=(symbol,), daemon=True).start()
 
     def _run_worker(self, symbol: str):
+        """HáttérSZÁL: adat-előkészítés (MT5, IO) → a CPU-nehéz optimalizálás
+        külön PROCESSZBE. A fő (UI) szál egyiket sem érinti → nem fagy."""
         try:
-            from ml.optimizer import optimize_pair, params_file
-            from trading.backtest import load_data, run_pair
+            from ml.optimizer import optimize_job, params_file
+            from trading.backtest import load_data
 
             opt_cfg     = self.cfg["optimizer"]
             method      = opt_cfg.get("method", "random")
@@ -332,7 +402,7 @@ class OptimizerController:
             pair_cfg    = self.cfg["pairs"][symbol]
             base_params = self.strategy.base_params(self.cfg)
 
-            # ── Adat előkészítés (MT5_LOCK alatt — GUI nem fagy) ──────────
+            # ── Adat előkészítés (MT5_LOCK alatt, háttérszálon) ───────────
             from core.mt5_connector import MT5_LOCK
             from tools.download_history import download_pair, _fill_gap
             from datetime import datetime as _dt, timezone as _tz
@@ -369,60 +439,60 @@ class OptimizerController:
 
             params_list = self.strategy.param_space(
                 self.cfg, base_params, method, max_trials)
-            total = len(params_list)
-            self.optimizer_status[symbol] = f"0/{total}  0%"
+            self.optimizer_status[symbol] = f"0/{len(params_list)}  0%"
 
-            def progress(done, tot, best_pnl):
-                pct = int(done / tot * 100) if tot else 0
-                self.optimizer_status[symbol] = f"{done}/{tot}  {pct}%"
+            # ── Számítás külön PROCESSZBEN (GIL-mentes), tartalék: szálon ──
+            self._ensure_pool()
+            args = (symbol, df_m15, df_m1, params_list, pair_cfg, trading_cfg,
+                    initial_bal, test_start)
+            if self._pool is not None:
+                fut   = self._pool.submit(optimize_job, *args, self._progress_q)
+                entry = fut.result()
+            else:
+                entry = optimize_job(*args, _LocalProgress(self.optimizer_status))
 
-            result = optimize_pair(
-                symbol, df_m15, df_m1, params_list, pair_cfg, trading_cfg,
-                initial_bal, test_start, progress_callback=progress,
-            )
-            if result is None:
-                self.optimizer_status[symbol] = "Hiba: nincs eredmény"
+            if "error" in entry:
+                self.optimizer_status[symbol] = f"Hiba: {entry['error']}"
+                if entry.get("traceback"):
+                    self._log_error(symbol, entry["traceback"])
                 return
 
-            test_result  = run_pair(symbol, df_m15, df_m1,
-                                    result["params"], pair_cfg, trading_cfg,
-                                    initial_bal, test_start=test_start)
-            test_summary = test_result.summary(initial_bal)
-
-            entry = {
-                "symbol":        symbol,
-                "optimized_at":  datetime.utcnow().isoformat(),
-                "train_summary": result["train_summary"],
-                "test_summary":  test_summary,
-                "params":        result["params"],
+            full = {
+                "symbol":       symbol,
+                "optimized_at": datetime.utcnow().isoformat(),
+                **entry,
             }
             out = params_file(symbol)
             tmp = out.with_suffix(".tmp")
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(entry, f, indent=2, ensure_ascii=False, default=str)
+                json.dump(full, f, indent=2, ensure_ascii=False, default=str)
             tmp.replace(out)
 
-            # Sikeres: a pár azonnal "tanított" lesz → Play aktiválható
+            # Sikeres: a pár azonnal "tanított" → Play aktiválható
             ds = self.dashboard_ref.get(symbol)
             if ds is not None:
                 ds.trained = True
             self.optimizer_status[symbol] = "Kész ✓"
 
         except Exception as e:
-            import traceback, logging as _logging
-            tb = traceback.format_exc()
-            _logging.getLogger(__name__).error("OPT hiba [%s]: %s\n%s", symbol, e, tb)
-            try:
-                with open(ROOT / "data" / "opt_error.log", "a", encoding="utf-8") as _ef:
-                    _ef.write(f"\n{'='*60}\n{datetime.now()} [{symbol}]\n{tb}\n")
-            except Exception:
-                pass
+            import traceback
+            self._log_error(symbol, traceback.format_exc())
             self.optimizer_status[symbol] = f"Hiba: {e}"
         finally:
             with self._lock:
                 self._running.discard(symbol)
                 self.instrument_state[symbol] = "STOPPED"
                 self._try_start_next()
+
+    @staticmethod
+    def _log_error(symbol: str, tb: str):
+        import logging as _logging
+        _logging.getLogger(__name__).error("OPT hiba [%s]:\n%s", symbol, tb)
+        try:
+            with open(ROOT / "data" / "opt_error.log", "a", encoding="utf-8") as _ef:
+                _ef.write(f"\n{'='*60}\n{datetime.now()} [{symbol}]\n{tb}\n")
+        except Exception:
+            pass
 
     def _try_start_next(self):
         while self._queue and len(self._running) < self.max_parallel:
@@ -1039,13 +1109,7 @@ class DashboardWindow:
                  font=self._small_font, insertbackground=FG_WHITE,
                  relief="flat").pack(padx=12, pady=(0, 6))
         in_config = set(self.rows.keys())
-        try:
-            import MetaTrader5 as mt5
-            syms = mt5.symbols_get()
-            all_syms = sorted(s.name for s in syms) if syms else []
-        except Exception:
-            all_syms = []
-        available = [s for s in all_syms if s not in in_config]
+        available: list = []   # háttérszálból töltődik
 
         frame_lb = tk.Frame(popup, bg=BG)
         frame_lb.pack(padx=12, fill="both", expand=True)
@@ -1064,12 +1128,36 @@ class DashboardWindow:
                 if q in s.upper():
                     listbox.insert("end", s)
         search_var.trace_add("write", refresh_list)
-        refresh_list()
 
-        lbl_info = tk.Label(popup, text="", bg=BG, fg=FG_GRAY, font=self._small_font)
+        lbl_info = tk.Label(popup, text="Szimbólumok betöltése...", bg=BG,
+                            fg=FG_GRAY, font=self._small_font)
         lbl_info.pack(pady=(4, 0))
-        if not available:
-            lbl_info.config(text="Minden MT5 szimbólum már szerepel a listában.", fg=FG_YELLOW)
+
+        # MT5 szimbólum-lekérés HÁTTÉRSZÁLON; a UI-t after(0)-val frissítjük.
+        def _load_syms():
+            try:
+                import MetaTrader5 as mt5
+                syms = mt5.symbols_get()
+                all_syms = sorted(s.name for s in syms) if syms else []
+            except Exception:
+                all_syms = []
+            result = [s for s in all_syms if s not in in_config]
+
+            def _apply():
+                if not popup.winfo_exists():
+                    return
+                available[:] = result
+                refresh_list()
+                if not result:
+                    lbl_info.config(
+                        text="Minden MT5 szimbólum már szerepel a listában.", fg=FG_YELLOW)
+                else:
+                    lbl_info.config(text=f"{len(result)} elérhető szimbólum.", fg=FG_GRAY)
+            try:
+                self.root.after(0, _apply)
+            except Exception:
+                pass
+        threading.Thread(target=_load_syms, daemon=True, name="MT5Symbols").start()
 
         def add_selected():
             sel = listbox.curselection()
@@ -1091,26 +1179,42 @@ class DashboardWindow:
     def _add_instrument(self, symbol: str):
         if symbol in self.rows:
             return
-        pip_size, pv1_usd, spread_pips = 0.0001, 10.0, 1.5
-        try:
-            import MetaTrader5 as _mt5
-            from core.mt5_connector import MT5_LOCK
-            with MT5_LOCK:
-                info = _mt5.symbol_info(symbol)
-            if info:
-                d = info.digits
-                if d in (4, 5):
-                    pip_size = info.point * 10
-                elif d in (2, 3):
-                    pip_size = info.point * 100
-                else:
-                    pip_size = info.point
-                tv, ts = info.trade_tick_value, info.trade_tick_size
-                pv1_usd = round(tv / ts * pip_size, 4) if ts > 0 else tv
-                spread_pips = round(info.spread * info.point / pip_size, 1) if pip_size > 0 else 1.5
-        except Exception:
-            pass
 
+        # MT5 symbol_info lekérés HÁTTÉRSZÁLON (MT5_LOCK alatt), majd a config-írás
+        # és a widget-építés a FŐ szálon (tkinter csak onnan biztonságos).
+        def _work():
+            pip_size, pv1_usd, spread_pips = 0.0001, 10.0, 1.5
+            try:
+                import MetaTrader5 as _mt5
+                from core.mt5_connector import MT5_LOCK
+                with MT5_LOCK:
+                    info = _mt5.symbol_info(symbol)
+                if info:
+                    d = info.digits
+                    if d in (4, 5):
+                        pip_size = info.point * 10
+                    elif d in (2, 3):
+                        pip_size = info.point * 100
+                    else:
+                        pip_size = info.point
+                    tv, ts = info.trade_tick_value, info.trade_tick_size
+                    pv1_usd = round(tv / ts * pip_size, 4) if ts > 0 else tv
+                    spread_pips = round(info.spread * info.point / pip_size, 1) \
+                                  if pip_size > 0 else 1.5
+            except Exception:
+                pass
+            try:
+                self.root.after(
+                    0, lambda: self._finalize_add_instrument(
+                        symbol, pip_size, pv1_usd, spread_pips))
+            except Exception:
+                pass
+        threading.Thread(target=_work, daemon=True, name="MT5AddInstr").start()
+
+    def _finalize_add_instrument(self, symbol, pip_size, pv1_usd, spread_pips):
+        """A fő szálon fut: config-írás + dashboard state + új tábla-sor."""
+        if symbol in self.rows:
+            return
         self.cfg["pairs"][symbol] = {
             "enabled": False, "pip_size": pip_size, "pv1_usd": pv1_usd,
             "backtest_spread_pips": spread_pips, "sess_start": 0, "sess_end": 24,
@@ -1169,12 +1273,17 @@ class DashboardWindow:
                        connected=getattr(self, "_connected", True))
 
     def _handle_connect(self):
-        try:
-            from core import mt5_connector
-            if mt5_connector.connect(self.cfg):
-                self._update_connection_ui(mt5_connector.connection_info(self.cfg))
-        except Exception as e:
-            self.lbl_conn.config(text=f"● Hiba: {e}", fg=FG_RED)
+        # A connect() blokkoló MT5-login — háttérszálon, hogy a UI ne fagyjon.
+        # Az eredményt a bg-poller (5 mp) és a _refresh úgyis felkapja a cache-ből.
+        self.lbl_conn.config(text="● Kapcsolódás...", fg=FG_YELLOW)
+
+        def _work():
+            try:
+                from core import mt5_connector
+                mt5_connector.connect(self.cfg)
+            except Exception:
+                pass
+        threading.Thread(target=_work, daemon=True, name="MT5Connect").start()
 
     # ── Publikus API ──────────────────────────────────────────────────────
     def set_balance(self, balance: float):
@@ -1382,8 +1491,10 @@ class DashboardWindow:
 
         if not hasattr(self, "_conn_tick"):
             self._conn_tick = 0
+            self._last_heartbeat = time.monotonic()
             self._start_bg_poller()
             self._start_market_data_poll()
+            self._start_watchdog()
         self._conn_tick += 1
 
         cache     = getattr(self, "_mt5_cache", {})
@@ -1445,10 +1556,49 @@ class DashboardWindow:
             self.lbl_status.config(
                 text=f"Utolsó frissítés: {now.strftime('%H:%M:%S')}  |  LIVE: {live_count}")
 
+        # Heartbeat: a teljes tick lefutott → a fő szál él
+        self._last_heartbeat = time.monotonic()
         self.root.after(1000, self._refresh)
 
+    # ── Fagyás-watchdog ──────────────────────────────────────────────────
+    def _start_watchdog(self):
+        """Háttérszál: jelzi, ha a fő (UI) szál túl sokáig nem lélegzett.
+        A küszöb fölötti késés = a fő szálon blokkoló hívás (fejlesztői jelzés)."""
+        if hasattr(self, "_watchdog_running"):
+            return
+        self._watchdog_running = True
+        threshold = self.cfg.get("dashboard", {}).get("watchdog_threshold_sec", 2.0)
+
+        def _loop():
+            import logging as _logging
+            log = _logging.getLogger("ui.watchdog")
+            warned = False
+            while getattr(self, "_watchdog_running", False):
+                lag = time.monotonic() - getattr(self, "_last_heartbeat", time.monotonic())
+                if lag > threshold:
+                    if not warned:
+                        msg = f"⚠ A FŐ SZÁL {lag:.1f} mp-ig nem frissült (blokkoló hívás?)."
+                        log.warning(msg)
+                        try:
+                            with open(ROOT / "data" / "ui_watchdog.log", "a",
+                                      encoding="utf-8") as f:
+                                f.write(f"{datetime.now()}  {msg}\n")
+                        except Exception:
+                            pass
+                        warned = True
+                else:
+                    warned = False
+                time.sleep(0.5)
+        threading.Thread(target=_loop, daemon=True, name="UIWatchdog").start()
+
     def run(self):
-        self.root.mainloop()
+        try:
+            self.root.mainloop()
+        finally:
+            try:
+                self._opt_ctrl.shutdown()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------

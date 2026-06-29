@@ -664,6 +664,49 @@ def run_optimizer(cfg: dict, symbols: Optional[list[str]] = None):
         )
 
 
+# ---------------------------------------------------------------------------
+# Külön PROCESSZBEN futtatható feladat (GIL-mentes — a GUI sosem fagy tőle)
+# ---------------------------------------------------------------------------
+
+def optimize_job(symbol, df_m15, df_m1, params_list, pair_cfg, trading_cfg,
+                 initial_balance, test_start, progress_q=None) -> dict:
+    """Egy pár teljes optimalizálása + out-of-sample teszt, MT5-függetlenül.
+
+    Külön folyamatban (ProcessPoolExecutor) is futtatható: minden bemenet
+    picklezhető (DataFrame-ek, dict-ek), nincs MT5 vagy tkinter függés.
+    A haladást a progress_q-ra teszi (symbol, done, total) hármasként; ez lehet
+    multiprocessing Manager().Queue() VAGY bármi, aminek van .put() metódusa.
+
+    Visszaad: {"train_summary","test_summary","params"} vagy {"error": "..."}.
+    """
+    def _progress(done, total, best_pnl):
+        if progress_q is not None:
+            try:
+                progress_q.put((symbol, done, total))
+            except Exception:
+                pass
+
+    try:
+        result = optimize_pair(
+            symbol, df_m15, df_m1, params_list, pair_cfg, trading_cfg,
+            initial_balance, test_start, progress_callback=_progress,
+        )
+        if result is None:
+            return {"error": "nincs eredmény"}
+        test_result  = run_pair(symbol, df_m15, df_m1, result["params"],
+                                pair_cfg, trading_cfg, initial_balance,
+                                test_start=test_start)
+        test_summary = test_result.summary(initial_balance)
+        return {
+            "train_summary": result["train_summary"],
+            "test_summary":  test_summary,
+            "params":        result["params"],
+        }
+    except Exception as e:
+        import traceback
+        return {"error": f"{e}", "traceback": traceback.format_exc()}
+
+
 if __name__ == "__main__":
     cfg_path = ROOT / "config.json"
     with open(cfg_path, encoding="utf-8") as f:
