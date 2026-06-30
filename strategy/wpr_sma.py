@@ -87,9 +87,12 @@ class WprSmaStrategy(Strategy):
         return 50
 
     def compute_display(self, md: MarketData) -> dict[str, Cell]:
-        """Megjelenítési cellák. A WPR-t a FORMÁLÓDÓ gyertyán mutatjuk (élő,
-        ezért gyakori frissítésnél mozog), de a JELZÉSEKET a ZÁRT gyertyára
-        számoljuk — pont mint az éles logika."""
+        """Megjelenítési cellák.
+
+        A WPR-t a FORMÁLÓDÓ gyertyán mutatjuk (élő, gyakori frissítésnél mozog).
+        A JELZÉSEKET viszont a ZÁRT gyertyák során VÉGIGJÁTSZVA számoljuk —
+        így az M15 jelzési ablak állapota PONTOS (egyetlen gyertyából nem lehet
+        rekonstruálni). Ez ugyanazt az állapotot adja, mint az éles motor."""
         empty = {
             "sma_dir":  Cell("—", "muted"),
             "wpr_m15":  Cell("—", "muted"),
@@ -99,7 +102,7 @@ class WprSmaStrategy(Strategy):
         }
         df_m15 = md.bars.get("M15")
         df_m1  = md.bars.get("M1")
-        if df_m15 is None or df_m1 is None or len(df_m15) < 2 or len(df_m1) < 3:
+        if df_m15 is None or df_m1 is None or len(df_m15) < 3 or len(df_m1) < 3:
             return empty
 
         try:
@@ -107,43 +110,43 @@ class WprSmaStrategy(Strategy):
         except Exception:
             return empty
 
-        m15_closed  = m15.iloc[-2]
-        m15_forming = m15.iloc[-1]
-        m1_closed   = m1.iloc[-2]
-        m1_forming  = m1.iloc[-1]
-        m1_prev     = m1.iloc[-3]
-
-        if any(pd.isna(m15_closed.get(k)) for k in ("sma", "wpr", "atr")):
+        # ── M15 jelzési állapot rekonstrukciója a ZÁRT gyertyák végigjátszásával
+        closes = m15["close"].values
+        smas   = m15["sma"].values
+        wprs15 = m15["wpr"].values
+        state  = PairState(md.symbol)
+        seen_closed = False
+        for i in range(len(m15) - 1):            # az utolsó sor a formálódó gyertya
+            s, w = smas[i], wprs15[i]
+            if math.isnan(s) or math.isnan(w):
+                continue
+            state = check_m15_signal(state, close=float(closes[i]), sma=float(s),
+                                     wpr_m15=float(w), params=md.params)
+            seen_closed = True
+        if not seen_closed:
             return empty
-
-        # Jelzések ZÁRT gyertyán (friss állapotból — közelítés a nem-LIVE
-        # pároknál; a LIVE pároknál az éles motor tartja a valódi állapotot).
-        state = check_m15_signal(
-            PairState(md.symbol),
-            close=float(m15_closed["close"]),
-            sma=float(m15_closed["sma"]),
-            wpr_m15=float(m15_closed["wpr"]),
-            params=md.params,
-        )
         direction = state.direction
 
-        # WPR a formálódó gyertyán; ha az NaN, essünk vissza a zártra (spike-szűrés)
-        wpr_m15_disp = _clamp_wpr(m15_forming.get("wpr"))
+        # ── M1 belépési jel az utolsó két ZÁRT M1 gyertyából, a valós M15 ablakkal
+        m1_wprs = m1["wpr"].values
+        m1_signal = "NONE"
+        if len(m1_wprs) >= 3:
+            prev_w, cur_w = m1_wprs[-3], m1_wprs[-2]   # -1 a formálódó
+            if not math.isnan(prev_w) and not math.isnan(cur_w):
+                m1_signal = check_m1_entry(state, float(prev_w), float(cur_w), md.params)
+
+        # ── WPR a formálódó gyertyán; ha NaN, vissza a zártra (spike-szűrés) ──
+        wpr_m15_disp = _clamp_wpr(wprs15[-1])
         if math.isnan(wpr_m15_disp):
-            wpr_m15_disp = _clamp_wpr(m15_closed.get("wpr"))
-        wpr_m1_disp = _clamp_wpr(m1_forming.get("wpr"))
+            wpr_m15_disp = _clamp_wpr(wprs15[-2])
+        wpr_m1_disp = _clamp_wpr(m1_wprs[-1])
         if math.isnan(wpr_m1_disp):
-            wpr_m1_disp = _clamp_wpr(m1_closed.get("wpr"))
+            wpr_m1_disp = _clamp_wpr(m1_wprs[-2])
 
         sma_cell = Cell(direction, "green" if direction == "BUY"
                         else "red" if direction == "SELL" else "muted")
         if direction == "NONE":
             sma_cell = Cell("—", "muted")
-
-        m1_signal = "NONE"
-        if not pd.isna(m1_closed.get("wpr")) and not pd.isna(m1_prev.get("wpr")):
-            m1_signal = check_m1_entry(state, float(m1_prev["wpr"]),
-                                       float(m1_closed["wpr"]), md.params)
 
         return {
             "sma_dir": sma_cell,

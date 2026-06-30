@@ -86,8 +86,10 @@ def daily_pnl() -> Optional[float]:
 
 def open_positions_by_symbol() -> dict:
     """
-    Visszaadja az MT5-ben nyitott pozíciókat szimbólum szerint.
-    {symbol: {"pnl": float, "direction": "BUY"|"SELL", "risk_free": False}}
+    Visszaadja az MT5-ben nyitott pozíciókat szimbólum szerint AGGREGÁLVA.
+    Egy szimbólumon több pozíció is lehet → összegzett P&L + darabszám.
+    {symbol: {"pnl": float, "count": int, "direction": "BUY"|"SELL"|"MIX",
+              "risk_free": False}}
     """
     try:
         with MT5_LOCK:
@@ -96,11 +98,14 @@ def open_positions_by_symbol() -> dict:
             return {}
         result = {}
         for pos in positions:
-            result[pos.symbol] = {
-                "pnl":       round(pos.profit, 2),
-                "direction": "BUY" if pos.type == 0 else "SELL",
-                "risk_free": False,
-            }
+            agg = result.setdefault(pos.symbol, {
+                "pnl": 0.0, "count": 0, "direction": None, "risk_free": False})
+            agg["pnl"]   += pos.profit
+            agg["count"] += 1
+            d = "BUY" if pos.type == 0 else "SELL"
+            agg["direction"] = d if agg["direction"] in (None, d) else "MIX"
+        for agg in result.values():
+            agg["pnl"] = round(agg["pnl"], 2)
         return result
     except Exception:
         return {}

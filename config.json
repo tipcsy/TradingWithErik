@@ -4,7 +4,8 @@
     "name": "wpr_sma"
   },
   "dashboard": {
-    "_comment": "Felület frissítési ütem. live_refresh_sec: a FUTÓ párok WPR/ár frissítése (5-10 ajánlott). all_refresh_sec: minden pár teljes körű frissítése. watchdog_threshold_sec: ennyi mp blokkolás fölött figyelmeztet a fagyás-watchdog (data/ui_watchdog.log).",
+    "_comment": "Felület frissítési ütem. price_refresh_sec: BID/ASK/spread MINDEN párra (1-5 ajánlott). live_refresh_sec: indikátor (WPR) a FUTÓ pároknál. all_refresh_sec: indikátor minden párra. watchdog_threshold_sec: ennyi mp blokkolás fölött figyelmeztet a fagyás-watchdog (data/ui_watchdog.log).",
+    "price_refresh_sec": 3,
     "live_refresh_sec": 7,
     "all_refresh_sec": 30,
     "watchdog_threshold_sec": 2.0
@@ -151,12 +152,36 @@
       "step": 0.05
     },
     "_comment_market": "Piaci minőség szűrők — az Optuna instrumentumonként optimalizálja",
-    "atr_min_pct": {"min": 0.2, "max": 1.0, "step": 0.1},
-    "atr_max_pct": {"min": 1.2, "max": 4.0, "step": 0.2},
-    "trade_hour_start": {"min": 0, "max": 12, "step": 1},
-    "trade_hour_end": {"min": 12, "max": 24, "step": 1},
-    "skip_monday_hours": {"min": 0, "max": 4, "step": 1},
-    "skip_friday_hour": {"min": 18, "max": 24, "step": 1},
+    "atr_min_pct": {
+      "min": 0.2,
+      "max": 1.0,
+      "step": 0.1
+    },
+    "atr_max_pct": {
+      "min": 1.2,
+      "max": 4.0,
+      "step": 0.2
+    },
+    "trade_hour_start": {
+      "min": 0,
+      "max": 12,
+      "step": 1
+    },
+    "trade_hour_end": {
+      "min": 12,
+      "max": 24,
+      "step": 1
+    },
+    "skip_monday_hours": {
+      "min": 0,
+      "max": 4,
+      "step": 1
+    },
+    "skip_friday_hour": {
+      "min": 18,
+      "max": 24,
+      "step": 1
+    },
     "_comment_method": "Optimalizálási módszer: optuna | random | grid",
     "method": "optuna",
     "max_trials": 500,
@@ -576,6 +601,14 @@
       "pip_size": 0.1,
       "pv1_usd": 0.0878,
       "backtest_spread_pips": 1.5,
+      "sess_start": 0,
+      "sess_end": 24
+    },
+    "HUBS": {
+      "enabled": false,
+      "pip_size": 1.0,
+      "pv1_usd": 0.8771,
+      "backtest_spread_pips": 0.0,
       "sess_start": 0,
       "sess_end": 24
     }

@@ -73,6 +73,7 @@ class PairDashboardState:
     day_open:         Optional[float] = None   # napi nyitóár (változás% alaphoz)
     change_pct:       Optional[float] = None   # napi változás %-ban
     position_pnl:     Optional[float] = None   # None = nincs nyitott pozíció
+    pos_count:        int  = 0                  # nyitott pozíciók száma e szimbólumon
     risk_free:        bool = False
     daily_pnl:        float = 0.0
     enabled:          bool = True

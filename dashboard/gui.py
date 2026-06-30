@@ -45,14 +45,16 @@ from strategy.base import Column
 # Fix (váz-szintű) oszlopok
 # ---------------------------------------------------------------------------
 
+# Instrumentum-szintű (stratégia-független) oszlopok — elöl
 LEADING_COLUMNS = [
-    Column("symbol", "Instrumentum", 11, "w",      kind="fixed"),
-    Column("bid",    "BID",           9, "center", kind="fixed"),
-    Column("ask",    "ASK",           9, "center", kind="fixed"),
-    Column("change", "Vált.%",        7, "center", kind="fixed"),
+    Column("symbol", "Symbol",  10, "w",      kind="fixed"),
+    Column("bid",    "BID",      9, "center", kind="fixed"),
+    Column("ask",    "ASK",      9, "center", kind="fixed"),
+    Column("change", "Vált.%",   7, "center", kind="fixed"),
+    Column("spread", "Spread",   9, "center", kind="fixed"),
 ]
+# Pozíció- és vezérlés-szintű oszlopok — hátul
 TRAILING_COLUMNS = [
-    Column("spread",   "Spread",      9, "center", kind="fixed"),
     Column("position", "Pozíció",    10, "center", kind="fixed"),
     Column("daily",    "Napi P&L",    9, "center", kind="fixed"),
     Column("opt",      "Opt státusz",12, "center", kind="fixed"),
@@ -105,7 +107,11 @@ def _fixed_cell(key: str, ds, opt_status: str, inst_state: str) -> tuple[str, st
         return (f"{sp}" if sp > 0 else "—"), "muted"
     if key == "position":
         if ds.position_pnl is not None:
-            txt = f"{ds.position_pnl:+.2f}$" + (" ✦" if ds.risk_free else "")
+            txt = f"{ds.position_pnl:+.2f}$"
+            if getattr(ds, "pos_count", 0) > 1:
+                txt += f" ×{ds.pos_count}"
+            if ds.risk_free:
+                txt += " ✦"
             return txt, ("green" if ds.position_pnl >= 0 else "red")
         return "—", "muted"
     if key == "daily":
@@ -892,8 +898,9 @@ class DashboardWindow:
 
         # Frissítési ütemezés (config-vezérelt)
         dash_cfg = cfg.get("dashboard", {})
-        self._fast_refresh_sec = dash_cfg.get("live_refresh_sec", 7)
-        self._all_refresh_sec  = dash_cfg.get("all_refresh_sec", 30)
+        self._price_refresh_sec = dash_cfg.get("price_refresh_sec", 3)   # ár MINDEN párra
+        self._fast_refresh_sec  = dash_cfg.get("live_refresh_sec", 7)    # indikátor: LIVE
+        self._all_refresh_sec   = dash_cfg.get("all_refresh_sec", 30)    # indikátor: mind
 
         max_par = cfg.get("optimizer", {}).get("max_parallel_optimizers", 2)
         self._opt_ctrl = OptimizerController(
@@ -1327,18 +1334,33 @@ class DashboardWindow:
     def _market_data_loop(self):
         import time as _time
         _time.sleep(5)  # UI stabilizálódjon
-        fast = max(2, self._fast_refresh_sec)
-        slow_every = max(1, round(self._all_refresh_sec / fast))
+        price_sec  = max(1, self._price_refresh_sec)
+        live_every = max(1, round(self._fast_refresh_sec / price_sec))
+        all_every  = max(1, round(self._all_refresh_sec  / price_sec))
         counter = 0
         while getattr(self, "_poll_running", False):
             # MT5 nem thread-safe — ne fusson míg optimizer dolgozik
             if not self._opt_ctrl._running:
-                if counter % slow_every == 0:
-                    targets = list(self.dashboard_ref.keys())   # minden pár (lassú kör)
+                all_syms = [s for s in self.dashboard_ref
+                            if isinstance(self.cfg["pairs"].get(s), dict)]
+                # 1) Olcsó ár-frissítés MINDEN párra (gyakran) — ez tartja
+                #    naprakészen a BID/ASK/Vált.%/Spread-et minden instrumentumon.
+                for sym in all_syms:
+                    if self._opt_ctrl._running:
+                        break
+                    try:
+                        self._refresh_price(sym)
+                    except Exception:
+                        pass
+                # 2) Drága indikátor-számítás: minden pár ritkán, LIVE gyakrabban.
+                if counter % all_every == 0:
+                    ind_targets = all_syms
+                elif counter % live_every == 0:
+                    ind_targets = [s for s, st in self.instrument_state.items()
+                                   if st == "LIVE"]
                 else:
-                    targets = [s for s, st in self.instrument_state.items()
-                               if st == "LIVE"]                 # csak LIVE (gyors kör)
-                for sym in targets:
+                    ind_targets = []
+                for sym in ind_targets:
                     if self._opt_ctrl._running:
                         break
                     try:
@@ -1346,7 +1368,33 @@ class DashboardWindow:
                     except Exception:
                         pass
             counter += 1
-            _time.sleep(fast)
+            _time.sleep(price_sec)
+
+    def _refresh_price(self, symbol: str):
+        """Olcsó ár-frissítés: BID/ASK/tizedes/spread + napi változás%.
+        Bars/indikátor NÉLKÜL → minden párra futtatható gyakran. A symbol_select
+        biztosítja, hogy a (akár letiltott) szimbólum is streameljen MT5-ben."""
+        try:
+            import MetaTrader5 as _mt5
+            from core.mt5_connector import MT5_LOCK
+        except Exception:
+            return
+        ds = self.dashboard_ref.get(symbol)
+        if ds is None:
+            return
+        with MT5_LOCK:
+            _mt5.symbol_select(symbol, True)
+            tick = _mt5.symbol_info_tick(symbol)
+            info = _mt5.symbol_info(symbol)
+        if tick and tick.bid:
+            ds.prev_bid, ds.prev_ask = ds.bid, ds.ask
+            ds.bid, ds.ask = tick.bid, tick.ask
+        if info:
+            ds.digits     = info.digits
+            ds.spread_pts = info.spread
+        ref = ds.bid if ds.bid is not None else ds.ask
+        if ref is not None and ds.day_open:
+            ds.change_pct = (ref - ds.day_open) / ds.day_open * 100.0
 
     # MT5 timeframe leképezés perc → konstans (lazán, futásidőben)
     @staticmethod
@@ -1380,6 +1428,10 @@ class DashboardWindow:
             with open(params_f, encoding="utf-8") as f:
                 params = json.load(f).get("params", {})
             ds.trained = True
+            # Külsőleg (más app által) optimalizált párt is "vegyük észre":
+            # ha nem épp most optimalizál, jelezzük késznek.
+            if self.instrument_state.get(symbol) not in ("OPTIMIZING", "QUEUED"):
+                self.optimizer_status[symbol] = "Kész ✓"
         else:
             params = self.strategy.base_params(self.cfg)
             ds.trained = False
@@ -1388,17 +1440,20 @@ class DashboardWindow:
 
         timeframes = self.strategy.timeframes()
 
+        primary = timeframes[0].label  # a "fő" időkeret (ATR-hez)
+
         with MT5_LOCK:
+            _mt5.symbol_select(symbol, True)   # streameljen akkor is, ha letiltott
             raw_bars = {}
             for tf in timeframes:
                 warmup = self.strategy.warmup_bars(params, tf.label)
                 raw_bars[tf.label] = _mt5.copy_rates_from_pos(
                     symbol, self._mt5_timeframe(_mt5, tf.minutes), 0, warmup)
-            tick = _mt5.symbol_info_tick(symbol)
             info = _mt5.symbol_info(symbol)
             d1   = _mt5.copy_rates_from_pos(symbol, _mt5.TIMEFRAME_D1, 0, 1)
 
-        # Ha nincs adat (pl. demo / offline) → ne írjuk felül a meglévő cellákat.
+        # Ha nincs gyertyaadat (pl. demo / offline) → ne írjuk felül a cellákat.
+        # (Az ár ettől függetlenül friss marad a _refresh_price révén.)
         if any(raw_bars[tf.label] is None for tf in timeframes):
             return
 
@@ -1416,36 +1471,25 @@ class DashboardWindow:
         except Exception:
             pass
 
-        # Ár + tick irány
-        if tick:
-            ds.prev_bid, ds.prev_ask = ds.bid, ds.ask
-            ds.bid, ds.ask = tick.bid, tick.ask
-
-        # Spread + tizedesek + max spread (ATR-alapú)
-        if info:
-            ds.digits = info.digits
-            ds.spread_pts = info.spread
+        # Max spread (ATR-alapú) — a fő időkeret ATR-jéből
+        if info and info.point > 0:
             try:
                 from core.indicator_engine import atr as _atr
-                m15 = bars.get("M15")
-                if m15 is not None and len(m15) > 2:
-                    atr_ser = _atr(m15["high"], m15["low"], m15["close"],
+                dfp = bars.get(primary)
+                if dfp is not None and len(dfp) > 2:
+                    atr_ser = _atr(dfp["high"], dfp["low"], dfp["close"],
                                    params.get("atr_period", 14))
                     atr_val = atr_ser.iloc[-2]
-                    if atr_val == atr_val and info.point > 0:   # not NaN
+                    if atr_val == atr_val:   # not NaN
                         atr_pts = int(atr_val / info.point)
                         ratio   = params.get("max_spread_atr_ratio", 0.20)
                         ds.max_spread_pts = max(1, int(atr_pts * ratio))
             except Exception:
                 pass
 
-        # Napi változás%
+        # Napi nyitóár (változás% alaphoz) — a _refresh_price ebből számol
         if d1 is not None and len(d1) > 0:
-            day_open = float(d1[-1]["open"])
-            ds.day_open = day_open
-            ref = ds.bid if ds.bid is not None else ds.ask
-            if ref is not None and day_open:
-                ds.change_pct = (ref - day_open) / day_open * 100.0
+            ds.day_open = float(d1[-1]["open"])
 
     # ── Account háttérszál ────────────────────────────────────────────────
     def _start_bg_poller(self):
@@ -1530,7 +1574,7 @@ class DashboardWindow:
                               fg=FG_RED if limit_hit else FG_GREEN)
 
         if mt5_positions is not None:
-            occupied = len(mt5_positions)
+            occupied = sum(p.get("count", 1) for p in mt5_positions.values())
             self._free_slots = max(0, self._max_slots - occupied)
             free = self._free_slots
             self.lbl_slots.config(text=f"Szabad slotok: {free}/{self._max_slots}",
@@ -1545,6 +1589,7 @@ class DashboardWindow:
                 if ds is not None and mt5_positions is not None:
                     pos = mt5_positions.get(symbol)
                     ds.position_pnl = pos["pnl"] if pos else None
+                    ds.pos_count    = pos.get("count", 1) if pos else 0
                     ds.risk_free    = pos["risk_free"] if pos else False
                 if ds is not None:
                     row.update(ds, inst_state, opt_status,
