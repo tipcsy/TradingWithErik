@@ -337,27 +337,24 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
             slot_mgr.set_risk_free(ticket)
             is_rf = True
 
-        # Breakeven ellenőrzés (risky módban AZONNAL, amint profitban van)
+        # Breakeven ellenőrzés (risky módban AZONNAL, amint profitban van).
+        # A tényleges SL nem pontos BE, hanem BE + spread puffer (lásd
+        # mt5_connector.move_to_breakeven): spread×2 → ×1 → pontos BE fallback.
         be_pct = params.get("breakeven_pct", 0.5)
         if (risky or be_pct > 0) and not is_rf:
             if pos.type == mt5.ORDER_TYPE_BUY:
                 be_price = (pos.price_open if risky
                             else pos.price_open + (pos.tp - pos.price_open) * be_pct)
-                if pos.price_current >= be_price:
-                    if modify_sl(ticket, pos.price_open):
-                        slot_mgr.set_risk_free(ticket)
-                        pstate["be_done"] = True
-                        log.info("✦ %s #%d — breakeven beállítva%s", symbol, ticket,
-                                 " (risky)" if risky else "")
+                trigger = pos.price_current >= be_price
             else:
                 be_price = (pos.price_open if risky
                             else pos.price_open - (pos.price_open - pos.tp) * be_pct)
-                if pos.price_current <= be_price:
-                    if modify_sl(ticket, pos.price_open):
-                        slot_mgr.set_risk_free(ticket)
-                        pstate["be_done"] = True
-                        log.info("✦ %s #%d — breakeven beállítva%s", symbol, ticket,
-                                 " (risky)" if risky else "")
+                trigger = pos.price_current <= be_price
+            if trigger and mt5_connector.move_to_breakeven(ticket):
+                slot_mgr.set_risk_free(ticket)
+                pstate["be_done"] = True
+                log.info("✦ %s #%d — breakeven (+spread) beállítva%s", symbol, ticket,
+                         " (risky)" if risky else "")
 
         # Trailing stop (kockázatmentes után, és csak ha kézzel nincs kikapcsolva);
         # risky módban feleződő távolság

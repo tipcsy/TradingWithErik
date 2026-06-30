@@ -1781,11 +1781,12 @@ class DashboardWindow:
                     if p["ticket"] == ticket), None)
         if not pos:
             return
-        entry, orig_sl = pos["price_open"], pos["sl"]
+        orig_sl = pos["sl"]
         def _w():
             from core import mt5_connector
             from trading.live_trader import position_state
-            if mt5_connector.modify_position_sl(ticket, entry):
+            # BE + spread puffer (spread×2 → ×1 → pontos BE), nem pontos entry
+            if mt5_connector.move_to_breakeven(ticket):
                 st = position_state.setdefault(
                     ticket, {"original_sl": orig_sl, "trailing_enabled": True, "be_done": False})
                 st["be_done"] = True

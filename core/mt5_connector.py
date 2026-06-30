@@ -190,6 +190,42 @@ def modify_position_sl(ticket: int, new_sl: float) -> bool:
         return False
 
 
+def move_to_breakeven(ticket: int) -> bool:
+    """SL áthelyezése breakeven + puffer szintre, a spread-költség fedezésére.
+
+    A puffer SOSEM pontos BE: elsőként entry ± spread×2, ha a bróker nem
+    engedi (túl közel a piachoz / min stop távolság), akkor entry ± spread×1,
+    végső esetben pontos entry. Az első sikeres szint nyer.
+    BUY: SL = entry + puffer (a piac alatt) | SELL: SL = entry − puffer.
+    """
+    try:
+        with MT5_LOCK:
+            pos = mt5.positions_get(ticket=ticket)
+            if not pos:
+                return False
+            p = pos[0]
+            info = mt5.symbol_info(p.symbol)
+            digits       = info.digits if info else 5
+            spread_price = (info.spread * info.point) if info else 0.0
+            entry = p.price_open
+            sign  = 1 if p.type == 0 else -1   # BUY:+ , SELL:-
+            for mult in (2, 1, 0):
+                sl = round(entry + sign * mult * spread_price, digits)
+                req = {
+                    "action":   mt5.TRADE_ACTION_SLTP,
+                    "symbol":   p.symbol,
+                    "position": ticket,
+                    "sl":       sl,
+                    "tp":       p.tp,
+                }
+                res = mt5.order_send(req)
+                if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    return True
+        return False
+    except Exception:
+        return False
+
+
 def is_connected() -> bool:
     try:
         with MT5_LOCK:
