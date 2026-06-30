@@ -440,13 +440,43 @@ def run(cfg: dict, slot_mgr: SlotManager):
             if not trained:
                 log.info("%s — STOPPED (nincs params, futtatsd az optimalizálást)", symbol)
 
-    # Induló szinkronizáció: a már (korábbról) nyitott pozíciókat vegyük fel a
-    # slot-kezelőbe, hogy újraindítás után se nyisson a limit fölé.
+    # ── Induló helyreállítás (újraindítás után) ──────────────────────────
+    # A bot a MAGIC szám alapján megtalálja a saját, már nyitott pozícióit:
+    #   1) felveszi őket a slot-kezelőbe (ne nyisson a limit fölé),
+    #   2) az SL helyzetéből kikövetkezteti a kockázatmentes állapotot
+    #      (ha az SL már az entry-n túl van profit-irányban → risk-free),
+    #   3) a nyitott pozíciójú párokat LIVE-ba teszi, hogy a motor tovább
+    #      kezelje őket (breakeven, trailing, zárás-detektálás).
+    recovered_syms: set[str] = set()
     for _p in get_open_positions(magic):
         slot_mgr.add(_p.ticket)
+        if _p.sl and _p.sl != 0.0:
+            if _p.type == mt5.ORDER_TYPE_BUY and _p.sl >= _p.price_open:
+                slot_mgr.set_risk_free(_p.ticket)
+            elif _p.type == mt5.ORDER_TYPE_SELL and _p.sl <= _p.price_open:
+                slot_mgr.set_risk_free(_p.ticket)
+        recovered_syms.add(_p.symbol)
+
+    for _sym in recovered_syms:
+        _pcfg = all_pairs.get(_sym)
+        if not isinstance(_pcfg, dict) or _sym in pair_states:
+            continue
+        _params = load_pair_params(_sym)
+        if _params:
+            pair_states[_sym] = LivePairState(
+                symbol=_sym, pair_cfg=_pcfg, params=_params,
+                trading_cfg=trading_cfg, magic=magic,
+                strat_state=strategy.new_signal_state(_sym))
+            instrument_state[_sym] = "LIVE"
+            log.info("%s — helyreállítva LIVE-ba (nyitott pozíció a magic alatt)", _sym)
+        else:
+            log.warning("%s — nyitott pozíció, de nincs params! Kézi kezelés szükséges.",
+                        _sym)
+
     if slot_mgr.all_tickets():
-        log.info("Induláskor %d már nyitott pozíció felvéve a slot-kezelőbe.",
-                 len(slot_mgr.all_tickets()))
+        rf = sum(1 for t in slot_mgr.all_tickets() if slot_mgr.is_risk_free(t))
+        log.info("Induláskor %d nyitott pozíció helyreállítva (%d kockázatmentes).",
+                 len(slot_mgr.all_tickets()), rf)
 
     log.info("Élő kereskedés indul | %d LIVE pár", len(pair_states))
 
