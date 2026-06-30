@@ -162,8 +162,12 @@ class WprSmaStrategy(Strategy):
         return WprSmaState(symbol)
 
     def on_bar_close(self, state: WprSmaState, md: MarketData) -> tuple[WprSmaState, str]:
-        """A process_pair() jelzéslogikájának pontos mása, állapottartással.
-        Visszaad: (state, "BUY"|"SELL"|"NONE")."""
+        """ZÁRT gyertyán, állapottartó jelzéslogika. Visszaad: (state, jel).
+
+        ELSŐ híváskor (indítás/restart után) BEMELEGÍT: visszajátssza a zárt
+        M15 gyertyákat, hogy a jelzési ablak állapota azonnal megegyezzen a
+        kijelzéssel — különben a motor "nem látja" a már folyamatban lévő
+        szetupot, és nem lép be (miközben a tábla BUY▲/SELL▼-t mutat)."""
         df_m15 = md.bars.get("M15")
         df_m1  = md.bars.get("M1")
         if df_m15 is None or df_m1 is None or len(df_m15) < 2 or len(df_m1) < 3:
@@ -180,8 +184,22 @@ class WprSmaStrategy(Strategy):
         if pd.isna(m1_closed.get("wpr")) or pd.isna(m1_prev.get("wpr")):
             return state, "NONE"
 
-        # M15 állapot csak ÚJ M15 gyertyazáráskor frissül
-        if state.last_m15_time != m15_time:
+        if state.last_m15_time is None:
+            # ── BEMELEGÍTÉS: a teljes zárt M15 előzmény visszajátszása ──
+            closes = m15["close"].values
+            smas   = m15["sma"].values
+            wprs   = m15["wpr"].values
+            for i in range(len(m15) - 1):          # az utolsó sor a formálódó
+                if math.isnan(smas[i]) or math.isnan(wprs[i]):
+                    continue
+                state.signal = check_m15_signal(
+                    state.signal, close=float(closes[i]), sma=float(smas[i]),
+                    wpr_m15=float(wprs[i]), params=md.params)
+            state.last_m15_time = m15_time
+            # az utolsó M1 átmenet (prev=−3, cur=−2) is kiértékelhető legyen
+            state.prev_m1_wpr = float(m1_prev["wpr"])
+        elif state.last_m15_time != m15_time:
+            # Inkrementális: csak ÚJ M15 gyertyazáráskor
             state.last_m15_time = m15_time
             state.signal = check_m15_signal(
                 state.signal,
