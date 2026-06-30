@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core import mt5_connector
+from core import risky_mode
 from core.indicator_engine import atr as atr_indicator
 from core.risk_manager import calc_sl_tp_pips, calc_lot, calc_effective_slots, SlotManager
 from strategy import get_strategy
@@ -75,6 +76,7 @@ class PairDashboardState:
     position_pnl:     Optional[float] = None   # None = nincs nyitott pozíció
     pos_count:        int  = 0                  # nyitott pozíciók száma e szimbólumon
     risk_free:        bool = False
+    risky:            bool = False              # Risky mód aktív-e (instabil piac)
     daily_pnl:        float = 0.0
     enabled:          bool = True
     trained:          bool = False  # van-e optimalizált paraméter
@@ -247,6 +249,16 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
     # végrehajtási tények: pozíció P&L, napi P&L).
     ds = dashboard.setdefault(symbol, PairDashboardState(symbol=symbol, trained=True))
 
+    # Risky mód: instabil piac → óvatosabb kockázat. Hatások:
+    #   • feleződő kockázat (account_risk_pct × 0.5), amennyiben a min_lot engedi
+    #   • azonnali SL→BE (amint profitban van)
+    #   • feleződő trailing-távolság
+    risky = risky_mode.is_risky(symbol)
+    ds.risky = risky
+    risk_trading_cfg = (
+        {**trading_cfg, "account_risk_pct": trading_cfg["account_risk_pct"] * 0.5}
+        if risky else trading_cfg)
+
     # Session szűrő
     hour = datetime.now(timezone.utc).hour
     sess_start = pair_cfg.get("sess_start", 0)
@@ -310,29 +322,31 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         pnl    = pos.profit
         is_rf  = slot_mgr.is_risk_free(ticket)
 
-        # Breakeven ellenőrzés
+        # Breakeven ellenőrzés (risky módban AZONNAL, amint profitban van)
         be_pct = params.get("breakeven_pct", 0.5)
-        if be_pct > 0 and not is_rf:
+        if (risky or be_pct > 0) and not is_rf:
             if pos.type == mt5.ORDER_TYPE_BUY:
-                tp_dist  = pos.tp - pos.price_open
-                be_price = pos.price_open + tp_dist * be_pct
+                be_price = (pos.price_open if risky
+                            else pos.price_open + (pos.tp - pos.price_open) * be_pct)
                 if pos.price_current >= be_price:
                     if modify_sl(ticket, pos.price_open):
                         slot_mgr.set_risk_free(ticket)
-                        log.info("✦ %s #%d — breakeven beállítva", symbol, ticket)
+                        log.info("✦ %s #%d — breakeven beállítva%s", symbol, ticket,
+                                 " (risky)" if risky else "")
             else:
-                tp_dist  = pos.price_open - pos.tp
-                be_price = pos.price_open - tp_dist * be_pct
+                be_price = (pos.price_open if risky
+                            else pos.price_open - (pos.price_open - pos.tp) * be_pct)
                 if pos.price_current <= be_price:
                     if modify_sl(ticket, pos.price_open):
                         slot_mgr.set_risk_free(ticket)
-                        log.info("✦ %s #%d — breakeven beállítva", symbol, ticket)
+                        log.info("✦ %s #%d — breakeven beállítva%s", symbol, ticket,
+                                 " (risky)" if risky else "")
 
-        # Trailing stop (csak kockázatmentes után)
+        # Trailing stop (csak kockázatmentes után); risky módban feleződő távolság
         is_rf = slot_mgr.is_risk_free(ticket)
         if is_rf:
             trail_act  = params.get("trail_activation_pips", 8)
-            trail_dist = params.get("trail_distance_pips", 6)
+            trail_dist = params.get("trail_distance_pips", 6) * (0.5 if risky else 1.0)
             if pos.type == mt5.ORDER_TYPE_BUY:
                 trail_trigger = pos.price_open + pip_to_price(trail_act, pip_size)
                 if pos.price_current >= trail_trigger:
@@ -383,8 +397,8 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
     if (signal != "NONE" and not already_open and atr_val is not None
             and slot_mgr.can_open() and spread_ok):
         sl_pips, tp_pips = calc_sl_tp_pips(atr_val, {**params, "pip_size": pip_size})
-        eff_slots = calc_effective_slots(balance, sl_pips, pair_cfg, trading_cfg)
-        lot = calc_lot(balance, sl_pips, pair_cfg, trading_cfg, eff_slots)
+        eff_slots = calc_effective_slots(balance, sl_pips, pair_cfg, risk_trading_cfg)
+        lot = calc_lot(balance, sl_pips, pair_cfg, risk_trading_cfg, eff_slots)
 
         tick = mt5.symbol_info_tick(symbol)
         if tick:
@@ -410,6 +424,9 @@ def run(cfg: dict, slot_mgr: SlotManager):
     magic       = cfg["broker"]["magic"]
     trading_cfg = cfg["trading"]
     strategy    = get_strategy(cfg)
+    risky_mode.load()                      # induló risky állapot
+    last_risky_reload = time.time()
+    risky_reload_sec  = cfg.get("trading", {}).get("risky_reload_sec", 3600)
 
     all_pairs = {s: p for s, p in cfg["pairs"].items() if isinstance(p, dict)}
     pair_states: dict[str, LivePairState] = {}
@@ -483,6 +500,11 @@ def run(cfg: dict, slot_mgr: SlotManager):
     while True:
         try:
             balance = mt5_connector.account_balance()
+
+            # Risky állapot óránkénti újraolvasása (külső program írhatja)
+            if time.time() - last_risky_reload >= risky_reload_sec:
+                risky_mode.load()
+                last_risky_reload = time.time()
 
             for symbol, pair_cfg in all_pairs.items():
                 state_now = instrument_state.get(symbol, "STOPPED")

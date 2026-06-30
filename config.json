@@ -37,7 +37,9 @@
     "global_session_start_utc": 10,
     "global_session_end_utc": 21,
     "_comment_breach": "Mit tegyen ha a min_lot kockázat meghaladja a célt: always_trade | ai_decide | skip",
-    "min_lot_breach_action": "always_trade"
+    "min_lot_breach_action": "always_trade",
+    "_comment_risky": "Risky mód (data/risky_mode.json) újraolvasási gyakorisága mp-ben — külső program is írhatja a fájlt. A gombnyomás azonnal ment.",
+    "risky_reload_sec": 3600
   },
   "position_mgmt": {
     "_comment": "Kockázatmentesítés és trailing stop beállításai",

@@ -39,6 +39,7 @@ from dashboard.theme import (
 )
 from strategy import get_strategy
 from strategy.base import Column
+from core import risky_mode
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +133,7 @@ def _fixed_cell(key: str, ds, opt_status: str, inst_state: str) -> tuple[str, st
 
 class PairRow:
     def __init__(self, parent: tk.Frame, symbol: str, row_idx: int, columns: list,
-                 on_run, on_opt, on_delete, mono_font, small_font):
+                 on_run, on_opt, on_delete, on_risky, mono_font, small_font):
         self.symbol  = symbol
         self.columns = columns
         self._bg     = BG_ROW_ODD if row_idx % 2 == 0 else BG_ROW_EVEN
@@ -153,6 +154,10 @@ class PairRow:
                                  bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
                                  relief="flat", command=lambda: on_run(symbol))
         self.btn_run.pack(side="left", padx=1)
+        self.btn_risky = tk.Button(self.frame, text="R", width=2,
+                                   bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
+                                   relief="flat", command=lambda: on_risky(symbol))
+        self.btn_risky.pack(side="left", padx=1)
         self.btn_opt = tk.Button(self.frame, text="OPT", width=4,
                                  bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
                                  relief="flat", command=lambda: on_opt(symbol))
@@ -191,6 +196,12 @@ class PairRow:
             lbl.config(bg=bg)
 
         sym_lbl = self.labels["symbol"]
+
+        # Risky gomb — bármely állapotban kapcsolható; narancs, ha aktív
+        if getattr(ds, "risky", False):
+            self.btn_risky.config(text="R", bg=FG_ORANGE, fg="#1e1e2e", state="normal")
+        else:
+            self.btn_risky.config(text="R", bg=BTN_DIS_BG, fg=FG_GRAY, state="normal")
 
         # ── Offline ───────────────────────────────────────────────────────
         if not connected and inst_state not in ("OPTIMIZING", "QUEUED"):
@@ -1031,6 +1042,7 @@ class DashboardWindow:
             ("■ LIVE", FG_GREEN), ("■ STOPPED", FG_GRAY),
             ("■ Nem tanított", FG_GRAY_DIM),
             ("■ Optimalizálás", FG_YELLOW), ("✦ Kockázatmentes", FG_CYAN),
+            ("R Risky", FG_ORANGE),
         ]:
             tk.Label(legend, text=text, bg=BG, fg=col, font=small_font, padx=6).pack(side="left")
 
@@ -1087,7 +1099,7 @@ class DashboardWindow:
             self.rows[symbol] = PairRow(
                 self._table_frame, symbol, idx, self._columns,
                 on_run=self._handle_run, on_opt=self._handle_opt,
-                on_delete=self._handle_delete,
+                on_delete=self._handle_delete, on_risky=self._handle_risky,
                 mono_font=mono_font, small_font=small_font)
 
         self._apply_filter_sort()
@@ -1304,7 +1316,7 @@ class DashboardWindow:
         self.rows[symbol] = PairRow(
             self._table_frame, symbol, idx, self._columns,
             on_run=self._handle_run, on_opt=self._handle_opt,
-            on_delete=self._handle_delete,
+            on_delete=self._handle_delete, on_risky=self._handle_risky,
             mono_font=self._mono_font, small_font=self._small_font)
         self._apply_filter_sort()
 
@@ -1354,6 +1366,19 @@ class DashboardWindow:
             row.update(ds, self.instrument_state.get(symbol, "STOPPED"),
                        self.optimizer_status.get(symbol, ""),
                        connected=getattr(self, "_connected", True))
+
+    def _handle_risky(self, symbol: str):
+        """Risky mód váltása — azonnal menti a data/risky_mode.json-ba."""
+        from core import risky_mode
+        new_val = risky_mode.toggle(symbol)
+        ds = self.dashboard_ref.get(symbol)
+        if ds is not None:
+            ds.risky = new_val
+            row = self.rows.get(symbol)
+            if row is not None:
+                row.update(ds, self.instrument_state.get(symbol, "STOPPED"),
+                           self.optimizer_status.get(symbol, ""),
+                           connected=getattr(self, "_connected", False))
 
     def _handle_delete(self, symbol: str):
         """Instrumentum törlése a config-ból és a táblából (megerősítéssel).
@@ -1639,10 +1664,15 @@ class DashboardWindow:
         if not hasattr(self, "_conn_tick"):
             self._conn_tick = 0
             self._last_heartbeat = time.monotonic()
+            risky_mode.load()                 # induló risky állapot
             self._start_bg_poller()
             self._start_market_data_poll()
             self._start_watchdog()
         self._conn_tick += 1
+
+        # Risky állapot periodikus újraolvasása (külső program írhatja)
+        if self._conn_tick % 60 == 0:
+            risky_mode.load()
 
         cache     = getattr(self, "_mt5_cache", {})
         connected = cache.get("connected", False)
@@ -1695,6 +1725,7 @@ class DashboardWindow:
                     ds.pos_count    = pos.get("count", 1) if pos else 0
                     ds.risk_free    = pos["risk_free"] if pos else False
                 if ds is not None:
+                    ds.risky = risky_mode.is_risky(symbol)
                     row.update(ds, inst_state, opt_status,
                                connected=getattr(self, "_connected", False))
                 if inst_state == "LIVE":
