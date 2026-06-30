@@ -917,6 +917,161 @@ class PortfolioBacktestTab:
 
 
 # ---------------------------------------------------------------------------
+# Pozíciók fül — nyitott pozíciók kezelése
+# ---------------------------------------------------------------------------
+
+POSITION_COLUMNS = [
+    ("symbol",  "Symbol", 10, "w"),
+    ("type",    "Irány",   6, "center"),
+    ("volume",  "Lot",     6, "center"),
+    ("open",    "Nyitó",  10, "center"),
+    ("current", "Akt.",   10, "center"),
+    ("sl",      "SL",     10, "center"),
+    ("tp",      "TP",     10, "center"),
+    ("orig_sl", "Er. SL", 10, "center"),
+    ("pnl",     "P&L",     9, "center"),
+]
+
+
+class PositionRow:
+    def __init__(self, parent, ticket, mono_font, small_font,
+                 on_be, on_trail, on_panic):
+        self.ticket = ticket
+        self.frame = tk.Frame(parent, bg=BG_ROW_EVEN)
+        self.labels = {}
+        for key, hdr, w, anchor in POSITION_COLUMNS:
+            lbl = tk.Label(self.frame, text="—", width=w, anchor=anchor,
+                           bg=BG_ROW_EVEN, fg=FG_WHITE, font=mono_font, padx=4, pady=2)
+            lbl.pack(side="left")
+            self.labels[key] = lbl
+        self.btn_be = tk.Button(self.frame, text="BE", width=4, font=small_font,
+                                relief="flat", bg=BTN_OPT_BG, fg="#ffffff",
+                                command=lambda: on_be(ticket))
+        self.btn_be.pack(side="left", padx=1)
+        self.btn_trail = tk.Button(self.frame, text="Trail", width=5, font=small_font,
+                                   relief="flat", bg=BTN_DIS_BG, fg=FG_GRAY,
+                                   command=lambda: on_trail(ticket))
+        self.btn_trail.pack(side="left", padx=1)
+        self.btn_panic = tk.Button(self.frame, text="Zár", width=4, font=small_font,
+                                   relief="flat", bg=BTN_STOP_BG, fg="#ffffff",
+                                   command=lambda: on_panic(ticket))
+        self.btn_panic.pack(side="left", padx=(1, 4))
+
+    def update(self, pos, pstate, digits):
+        self.labels["symbol"].config(text=pos["symbol"])
+        t = pos["type"]
+        self.labels["type"].config(text=t, fg=FG_GREEN if t == "BUY" else FG_RED)
+        self.labels["volume"].config(text=f'{pos["volume"]:.2f}', fg=FG_WHITE)
+        self.labels["open"].config(text=_fmt_price(pos["price_open"], digits), fg=FG_GRAY)
+        self.labels["current"].config(text=_fmt_price(pos["price_current"], digits), fg=FG_WHITE)
+
+        sl, tp = pos["sl"], pos["tp"]
+        orig = pstate.get("original_sl", sl) if pstate else sl
+        be_done = bool(pstate and pstate.get("be_done"))
+        moved = bool(sl and orig and abs(sl - orig) > 1e-9)
+        self.labels["sl"].config(text=_fmt_price(sl, digits) if sl else "—",
+                                 fg=FG_CYAN if be_done else FG_WHITE)
+        self.labels["tp"].config(text=_fmt_price(tp, digits) if tp else "—", fg=FG_GRAY)
+        # Eredeti SL: fehér, de ha a trailing már elmozdította → szürke
+        self.labels["orig_sl"].config(text=_fmt_price(orig, digits) if orig else "—",
+                                      fg=FG_GRAY if moved else FG_WHITE)
+        pnl = pos["profit"]
+        self.labels["pnl"].config(text=f"{pnl:+.2f}$", fg=FG_GREEN if pnl >= 0 else FG_RED)
+
+        # Gombok állapota (aktív-e?)
+        self.btn_be.config(text="BE ✓" if be_done else "BE",
+                           bg=BTN_PLAY_BG if be_done else BTN_OPT_BG)
+        trail_on = bool(pstate.get("trailing_enabled", True)) if pstate else True
+        self.btn_trail.config(bg=FG_GREEN if trail_on else BTN_DIS_BG,
+                              fg="#1e1e2e" if trail_on else FG_GRAY)
+
+
+class PositionsTab:
+    def __init__(self, parent, cfg, mono_font, small_font, header_font,
+                 positions_provider, pos_state, digits_provider,
+                 on_be, on_trail, on_panic, on_close_all):
+        self.parent = parent
+        self.cfg = cfg
+        self._mono, self._small, self._header = mono_font, small_font, header_font
+        self._positions_provider = positions_provider
+        self._pos_state = pos_state
+        self._digits_provider = digits_provider
+        self._on_be, self._on_trail, self._on_panic = on_be, on_trail, on_panic
+        self._on_close_all = on_close_all
+        self._rows: dict[int, PositionRow] = {}
+        self._build_ui()
+
+    def _build_ui(self):
+        p = self.parent
+        p.configure(bg=BG)
+        top = tk.Frame(p, bg=BG, pady=4)
+        top.pack(fill="x", padx=8)
+        tk.Button(top, text="⚠  ÖSSZES ZÁRÁSA", font=self._small,
+                  bg=BTN_STOP_BG, fg="#ffffff", relief="flat", cursor="hand2",
+                  command=self._on_close_all).pack(side="left")
+        self._lbl_total = tk.Label(top, text="Összes P&L: —", bg=BG,
+                                   fg=FG_WHITE, font=self._header)
+        self._lbl_total.pack(side="right", padx=8)
+
+        self._lbl_breakdown = tk.Label(p, text="", bg=BG, fg=FG_GRAY,
+                                       font=self._small, anchor="w", justify="left")
+        self._lbl_breakdown.pack(fill="x", padx=10, pady=(0, 4))
+
+        # Fejléc
+        hdr = tk.Frame(p, bg=BG_HEADER)
+        hdr.pack(fill="x", padx=2)
+        for key, label, w, anchor in POSITION_COLUMNS:
+            tk.Label(hdr, text=label, width=w, anchor=anchor, bg=BG_HEADER,
+                     fg=FG_BLUE, font=self._header, padx=4, pady=3).pack(side="left")
+        tk.Label(hdr, text="Vezérlés", width=16, bg=BG_HEADER, fg=FG_BLUE,
+                 font=self._header).pack(side="left")
+        tk.Frame(p, bg=FG_GRAY_DIM, height=1).pack(fill="x", padx=2)
+
+        self._rows_frame = tk.Frame(p, bg=BG)
+        self._rows_frame.pack(fill="both", expand=True, padx=2)
+
+    def refresh(self):
+        positions = self._positions_provider() or []
+        seen = set()
+        for pos in positions:
+            tid = pos["ticket"]
+            seen.add(tid)
+            row = self._rows.get(tid)
+            if row is None:
+                row = PositionRow(self._rows_frame, tid, self._mono, self._small,
+                                  self._on_be, self._on_trail, self._on_panic)
+                self._rows[tid] = row
+            row.update(pos, self._pos_state.get(tid), self._digits_provider(pos["symbol"]))
+
+        for tid in list(self._rows):
+            if tid not in seen:
+                self._rows[tid].frame.destroy()
+                del self._rows[tid]
+
+        # Rendezett újracsomagolás (szimbólum szerint)
+        for r in self._rows.values():
+            r.frame.pack_forget()
+        for pos in sorted(positions, key=lambda x: (x["symbol"], x["ticket"])):
+            self._rows[pos["ticket"]].frame.pack(fill="x", padx=2)
+
+        # Összesítés + instrumentumonkénti bontás
+        total = sum(p["profit"] for p in positions)
+        by_sym: dict[str, list] = {}
+        for p in positions:
+            a = by_sym.setdefault(p["symbol"], [0.0, 0])
+            a[0] += p["profit"]
+            a[1] += 1
+        self._lbl_total.config(
+            text=f"Összes P&L: {total:+.2f}$   |   {len(positions)} pozíció",
+            fg=FG_GREEN if total >= 0 else FG_RED)
+        if by_sym:
+            parts = [f"{s}: {v[0]:+.2f}$ ({v[1]})" for s, v in sorted(by_sym.items())]
+            self._lbl_breakdown.config(text="   |   ".join(parts), fg=FG_GRAY)
+        else:
+            self._lbl_breakdown.config(text="Nincs nyitott pozíció.", fg=FG_GRAY)
+
+
+# ---------------------------------------------------------------------------
 # Fő Dashboard ablak
 # ---------------------------------------------------------------------------
 
@@ -1004,6 +1159,17 @@ class DashboardWindow:
         live_frame = tk.Frame(self._notebook, bg=BG)
         self._notebook.add(live_frame, text="  Live Dashboard  ")
         self._build_live_tab(live_frame, mono_font, header_font, small_font)
+
+        pos_frame = tk.Frame(self._notebook, bg=BG)
+        self._notebook.add(pos_frame, text="  Pozíciók  ")
+        from trading.live_trader import position_state as _pos_state
+        self._pos_tab = PositionsTab(
+            pos_frame, cfg, mono_font, small_font, header_font,
+            positions_provider=lambda: getattr(self, "_mt5_cache", {}).get("positions_detail", []),
+            pos_state=_pos_state,
+            digits_provider=lambda sym: getattr(self.dashboard_ref.get(sym), "digits", 5),
+            on_be=self._pos_be, on_trail=self._pos_trail,
+            on_panic=self._pos_panic, on_close_all=self._pos_close_all)
 
         bt_frame = tk.Frame(self._notebook, bg=BG_BT)
         self._notebook.add(bt_frame, text="  Portfólió Backtest  ")
@@ -1583,6 +1749,54 @@ class DashboardWindow:
         self.optimizer_status.pop(symbol, None)
         self._apply_filter_sort()
 
+    # ── Pozíciókezelő handlerek (Pozíciók fül) ──────────────────────────
+    def _pos_panic(self, ticket: int):
+        from tkinter import messagebox
+        if not messagebox.askyesno("Pozíció zárása",
+                                   f"Biztosan lezárod a #{ticket} pozíciót?"):
+            return
+        def _w():
+            from core import mt5_connector
+            mt5_connector.close_position(ticket)
+        threading.Thread(target=_w, daemon=True, name="PanicClose").start()
+
+    def _pos_close_all(self):
+        from tkinter import messagebox
+        positions = getattr(self, "_mt5_cache", {}).get("positions_detail", [])
+        if not positions:
+            return
+        if not messagebox.askyesno(
+                "ÖSSZES pozíció zárása",
+                f"Biztosan lezárod MIND a {len(positions)} nyitott pozíciót?"):
+            return
+        tickets = [p["ticket"] for p in positions]
+        def _w():
+            from core import mt5_connector
+            for t in tickets:
+                mt5_connector.close_position(t)
+        threading.Thread(target=_w, daemon=True, name="CloseAll").start()
+
+    def _pos_be(self, ticket: int):
+        pos = next((p for p in getattr(self, "_mt5_cache", {}).get("positions_detail", [])
+                    if p["ticket"] == ticket), None)
+        if not pos:
+            return
+        entry, orig_sl = pos["price_open"], pos["sl"]
+        def _w():
+            from core import mt5_connector
+            from trading.live_trader import position_state
+            if mt5_connector.modify_position_sl(ticket, entry):
+                st = position_state.setdefault(
+                    ticket, {"original_sl": orig_sl, "trailing_enabled": True, "be_done": False})
+                st["be_done"] = True
+        threading.Thread(target=_w, daemon=True, name="ManualBE").start()
+
+    def _pos_trail(self, ticket: int):
+        from trading.live_trader import position_state
+        st = position_state.setdefault(
+            ticket, {"original_sl": 0.0, "trailing_enabled": True, "be_done": False})
+        st["trailing_enabled"] = not st.get("trailing_enabled", True)
+
     def _handle_connect(self):
         # A connect() blokkoló MT5-login — háttérszálon, hogy a UI ne fagyjon.
         # Az eredményt a bg-poller (5 mp) és a _refresh úgyis felkapja a cache-ből.
@@ -1800,23 +2014,27 @@ class DashboardWindow:
         if hasattr(self, "_bg_poller_running"):
             return
         self._bg_poller_running = True
-        self._mt5_cache = {"connected": False, "info": {}, "daily_pnl": None, "positions": {}}
+        self._mt5_cache = {"connected": False, "info": {}, "daily_pnl": None,
+                           "positions": {}, "positions_detail": []}
 
         def _loop():
             import time as _t
             while getattr(self, "_bg_poller_running", False):
                 try:
                     from core.mt5_connector import (
-                        connection_info, daily_pnl as _dpnl, open_positions_by_symbol)
+                        connection_info, daily_pnl as _dpnl,
+                        open_positions_by_symbol, open_positions_detailed)
                     info = connection_info(self.cfg)
                     self._mt5_cache["connected"] = info.get("connected", False)
                     self._mt5_cache["info"]      = info
                     if info.get("connected"):
                         self._mt5_cache["daily_pnl"] = _dpnl()
                         self._mt5_cache["positions"] = open_positions_by_symbol()
+                        self._mt5_cache["positions_detail"] = open_positions_detailed()
                     else:
                         self._mt5_cache["daily_pnl"] = None
                         self._mt5_cache["positions"] = {}
+                        self._mt5_cache["positions_detail"] = []
                 except Exception:
                     pass
                 _t.sleep(5)
@@ -1913,6 +2131,13 @@ class DashboardWindow:
         if hasattr(self, "lbl_status"):
             self.lbl_status.config(
                 text=f"Utolsó frissítés: {now.strftime('%H:%M:%S')}  |  LIVE: {live_count}")
+
+        # Pozíciók fül frissítése
+        if hasattr(self, "_pos_tab"):
+            try:
+                self._pos_tab.refresh()
+            except Exception:
+                pass
 
         # Heartbeat: a teljes tick lefutott → a fő szál él
         self._last_heartbeat = time.monotonic()

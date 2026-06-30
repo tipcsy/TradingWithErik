@@ -111,6 +111,85 @@ def open_positions_by_symbol() -> dict:
         return {}
 
 
+def open_positions_detailed() -> list:
+    """Per-ticket részletes nyitott pozíciók (összes, magic-tól függetlenül).
+    A pozíciókezelő fül ezt használja."""
+    try:
+        with MT5_LOCK:
+            positions = mt5.positions_get()
+        if not positions:
+            return []
+        out = []
+        for p in positions:
+            out.append({
+                "ticket":        p.ticket,
+                "symbol":        p.symbol,
+                "type":          "BUY" if p.type == 0 else "SELL",
+                "volume":        p.volume,
+                "price_open":    p.price_open,
+                "price_current": p.price_current,
+                "sl":            p.sl,
+                "tp":            p.tp,
+                "profit":        round(p.profit + p.swap, 2),
+                "magic":         p.magic,
+            })
+        return out
+    except Exception:
+        return []
+
+
+def close_position(ticket: int) -> bool:
+    """Egy pozíció azonnali piaci zárása (Pánik gomb)."""
+    try:
+        with MT5_LOCK:
+            pos = mt5.positions_get(ticket=ticket)
+            if not pos:
+                return False
+            p = pos[0]
+            tick = mt5.symbol_info_tick(p.symbol)
+            if tick is None:
+                return False
+            close_type = mt5.ORDER_TYPE_SELL if p.type == 0 else mt5.ORDER_TYPE_BUY
+            price = tick.bid if p.type == 0 else tick.ask
+            req = {
+                "action":       mt5.TRADE_ACTION_DEAL,
+                "symbol":       p.symbol,
+                "volume":       p.volume,
+                "type":         close_type,
+                "position":     ticket,
+                "price":        price,
+                "magic":        p.magic,
+                "comment":      "panic_close",
+                "type_time":    mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_IOC,
+            }
+            res = mt5.order_send(req)
+        return res is not None and res.retcode == mt5.TRADE_RETCODE_DONE
+    except Exception:
+        return False
+
+
+def modify_position_sl(ticket: int, new_sl: float) -> bool:
+    """Egy pozíció SL szintjének módosítása (TP marad)."""
+    try:
+        with MT5_LOCK:
+            pos = mt5.positions_get(ticket=ticket)
+            if not pos:
+                return False
+            p = pos[0]
+            req = {
+                "action":   mt5.TRADE_ACTION_SLTP,
+                "symbol":   p.symbol,
+                "position": ticket,
+                "sl":       new_sl,
+                "tp":       p.tp,
+            }
+            res = mt5.order_send(req)
+        return res is not None and res.retcode == mt5.TRADE_RETCODE_DONE
+    except Exception:
+        return False
+
+
 def is_connected() -> bool:
     try:
         with MT5_LOCK:

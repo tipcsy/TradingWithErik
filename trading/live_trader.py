@@ -100,6 +100,12 @@ instrument_state: dict[str, str] = {}
 # Optimizer státusz szöveg per pár (progress, "Várakozik...", "Kész ✓")
 optimizer_status: dict[str, str] = {}
 
+# Per-ticket pozíció-állapot (GUI ↔ motor megosztott):
+#   {ticket: {"original_sl": float, "trailing_enabled": bool, "be_done": bool}}
+# A motor tölti/karbantartja; a Pozíciók fül ebből olvas és ezt billenti
+# (trailing ki/be, kézi BE jelzése).
+position_state: dict[int, dict] = {}
+
 
 # ---------------------------------------------------------------------------
 # MT5 segédfüggvények
@@ -322,6 +328,15 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         pnl    = pos.profit
         is_rf  = slot_mgr.is_risk_free(ticket)
 
+        # Megosztott pozíció-állapot (GUI ↔ motor): eredeti SL, trailing toggle, BE
+        pstate = position_state.setdefault(ticket, {
+            "original_sl": pos.sl, "trailing_enabled": True, "be_done": is_rf})
+        # Kézi BE (a Pozíciók fülről): ha be_done jelölt, de a slot-kezelő még
+        # nem tudja, szinkronizáljuk (slot felszabadul, trailing indulhat).
+        if pstate.get("be_done") and not is_rf:
+            slot_mgr.set_risk_free(ticket)
+            is_rf = True
+
         # Breakeven ellenőrzés (risky módban AZONNAL, amint profitban van)
         be_pct = params.get("breakeven_pct", 0.5)
         if (risky or be_pct > 0) and not is_rf:
@@ -331,6 +346,7 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
                 if pos.price_current >= be_price:
                     if modify_sl(ticket, pos.price_open):
                         slot_mgr.set_risk_free(ticket)
+                        pstate["be_done"] = True
                         log.info("✦ %s #%d — breakeven beállítva%s", symbol, ticket,
                                  " (risky)" if risky else "")
             else:
@@ -339,12 +355,14 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
                 if pos.price_current <= be_price:
                     if modify_sl(ticket, pos.price_open):
                         slot_mgr.set_risk_free(ticket)
+                        pstate["be_done"] = True
                         log.info("✦ %s #%d — breakeven beállítva%s", symbol, ticket,
                                  " (risky)" if risky else "")
 
-        # Trailing stop (csak kockázatmentes után); risky módban feleződő távolság
+        # Trailing stop (kockázatmentes után, és csak ha kézzel nincs kikapcsolva);
+        # risky módban feleződő távolság
         is_rf = slot_mgr.is_risk_free(ticket)
-        if is_rf:
+        if is_rf and pstate.get("trailing_enabled", True):
             trail_act  = params.get("trail_activation_pips", 8)
             trail_dist = params.get("trail_distance_pips", 6) * (0.5 if risky else 1.0)
             if pos.type == mt5.ORDER_TYPE_BUY:
@@ -382,6 +400,7 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
                 ds.position_pnl  = None
                 ds.risk_free      = False
                 slot_mgr.remove(ticket)
+                position_state.pop(ticket, None)
                 log.info("📋 %s #%d zárt | P&L: %.2f$", symbol, ticket, pnl)
                 log_trade({
                     "time":    datetime.now(timezone.utc).isoformat(),
