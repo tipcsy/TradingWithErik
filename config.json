@@ -12,6 +12,18 @@
     "_comment_countdown": "Mely időkeretek visszaszámlálója látszik a felső sávban (percben). Üres/hiányzó = a stratégia összes időkerete.",
     "countdown_timeframes": [15, 1]
   },
+  "quality": {
+    "_comment": "Optimalizált instrumentum minősítési küszöbei (Minőség oszlop). Legrosszabb-elv: a pár a legrosszabb elért kategóriát kapja.",
+    "min_trades": 15,
+    "maxdd_mid": 0.18,
+    "maxdd_weak": 0.25,
+    "maxdd_bad": 0.35,
+    "pf_mid": 1.4,
+    "pf_weak": 1.2,
+    "pf_bad": 1.0,
+    "winrate_weak": 0.35,
+    "winrate_good": 0.45
+  },
   "broker": {
     "name": "Vantage",
     "server": "VantageInternational-Demo",

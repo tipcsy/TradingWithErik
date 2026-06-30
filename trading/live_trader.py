@@ -80,6 +80,8 @@ class PairDashboardState:
     daily_pnl:        float = 0.0
     enabled:          bool = True
     trained:          bool = False  # van-e optimalizált paraméter
+    opt_grade:        Optional[tuple] = None  # (minősítő_szöveg, szín-név)
+    opt_grade_reason: str  = ""               # mi húzza le a minősítést
     spread_pts:       int  = 0      # aktuális spread pontban (MT5 egység)
     max_spread_pts:   int  = 0      # megengedett max spread pontban
     timeframe_remaining: dict = field(default_factory=dict)  # {percek: hátralévő mp}

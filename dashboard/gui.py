@@ -58,6 +58,7 @@ LEADING_COLUMNS = [
 TRAILING_COLUMNS = [
     Column("position", "Pozíció",    10, "center", kind="fixed"),
     Column("daily",    "Napi P&L",    9, "center", kind="fixed"),
+    Column("quality",  "Minőség",     9, "center", kind="fixed"),
     Column("opt",      "Opt státusz",12, "center", kind="fixed"),
 ]
 
@@ -117,6 +118,11 @@ def _fixed_cell(key: str, ds, opt_status: str, inst_state: str) -> tuple[str, st
         return "—", "muted"
     if key == "daily":
         return f"{ds.daily_pnl:+.2f}$", ("green" if ds.daily_pnl >= 0 else "red")
+    if key == "quality":
+        g = getattr(ds, "opt_grade", None)
+        if g:
+            return g[0], g[1]
+        return "—", "muted"
     if key == "opt":
         txt = opt_status or "—"
         if inst_state in ("OPTIMIZING", "QUEUED"):
@@ -1604,12 +1610,33 @@ class DashboardWindow:
 
         ts = data.get("test_summary", {})
         if ts:
-            tk.Label(popup,
-                     text=f"Teszt: {ts.get('trades',0)} trade   "
-                          f"P&L {ts.get('total_pnl',0):+.0f}$   "
-                          f"Win {ts.get('win_rate',0)*100:.0f}%   "
-                          f"MaxDD {ts.get('max_drawdown',0)*100:.1f}%",
-                     bg=BG, fg=FG_CYAN, font=self._small_font).pack(anchor="w", padx=10, pady=(10, 2))
+            from core.quality import grade, metric_colors
+            gtxt, gcol, greason = grade(ts, self.cfg)
+            mc = metric_colors(ts, self.cfg)
+            hdr = tk.Frame(popup, bg=BG)
+            hdr.pack(anchor="w", padx=10, pady=(10, 2))
+            tk.Label(hdr, text=f"Minősítés: {gtxt}", bg=BG, fg=sem_color(gcol),
+                     font=self._header_font).pack(side="left")
+            if greason:
+                tk.Label(hdr, text=f"  ({greason})", bg=BG, fg=FG_GRAY,
+                         font=self._small_font).pack(side="left")
+
+            metrics = tk.Frame(popup, bg=BG)
+            metrics.pack(anchor="w", padx=10, pady=(0, 4))
+
+            def _metric(label, value, color):
+                cell = tk.Frame(metrics, bg=BG)
+                cell.pack(side="left", padx=(0, 12))
+                tk.Label(cell, text=label, bg=BG, fg=FG_GRAY,
+                         font=self._small_font).pack(side="left")
+                tk.Label(cell, text=value, bg=BG, fg=sem_color(color),
+                         font=self._small_font).pack(side="left")
+            _metric("Trade ", str(ts.get("trades", 0)), "white")
+            _metric("P&L ", f"{ts.get('total_pnl',0):+.0f}$", mc.get("total_pnl", "white"))
+            _metric("Win ", f"{ts.get('win_rate',0)*100:.0f}%", mc.get("win_rate", "white"))
+            _metric("PF ", f"{ts.get('profit_factor',0):.2f}", mc.get("profit_factor", "white"))
+            _metric("MaxDD ", f"{ts.get('max_drawdown',0)*100:.1f}%", mc.get("max_drawdown", "white"))
+
         tk.Label(popup, text="Kézi módosítás — a következő Play-nél lép életbe:",
                  bg=BG, fg=FG_GRAY, font=self._small_font).pack(anchor="w", padx=10)
 
@@ -1945,8 +1972,14 @@ class DashboardWindow:
         params_f = PARAMS_DIR / f"{symbol}.json"
         if params_f.exists():
             with open(params_f, encoding="utf-8") as f:
-                params = json.load(f).get("params", {})
+                data = json.load(f)
+            params = data.get("params", {})
             ds.trained = True
+            # Minősítés a test_summary (out-of-sample) alapján
+            from core.quality import grade
+            txt, col, reason = grade(data.get("test_summary", {}), self.cfg)
+            ds.opt_grade = (txt, col)
+            ds.opt_grade_reason = reason
             # Külsőleg (más app által) optimalizált párt is "vegyük észre":
             # ha nem épp most optimalizál, jelezzük késznek.
             if self.instrument_state.get(symbol) not in ("OPTIMIZING", "QUEUED"):
@@ -1954,6 +1987,8 @@ class DashboardWindow:
         else:
             params = self.strategy.base_params(self.cfg)
             ds.trained = False
+            ds.opt_grade = None
+            ds.opt_grade_reason = ""
             if not params.get("sma_period"):
                 return
 
@@ -2212,6 +2247,17 @@ def _demo_dashboard(cfg: dict):
         inst_state[symbol] = st
         opt_status[symbol] = "Kész ✓" if trained else ""
 
+        # Valós minősítés a test_summary alapján (ha optimalizált)
+        grade_cell, grade_reason = None, ""
+        if trained:
+            try:
+                from core.quality import grade as _grade
+                _data = json.load(open(params_dir / f"{symbol}.json", encoding="utf-8"))
+                gtxt, gcol, greason = _grade(_data.get("test_summary", {}), cfg)
+                grade_cell, grade_reason = (gtxt, gcol), greason
+            except Exception:
+                pass
+
         base = round(random.uniform(0.9, 1.6), 5)
         ds = PairDashboardState(
             symbol=symbol, enabled=trained, trained=trained,
@@ -2220,6 +2266,7 @@ def _demo_dashboard(cfg: dict):
             change_pct=round(random.uniform(-0.6, 0.6), 2),
             spread_pts=random.randint(6, 18), max_spread_pts=random.randint(12, 25),
             position_pnl=None, risk_free=False, daily_pnl=0.0,
+            opt_grade=grade_cell, opt_grade_reason=grade_reason,
         )
         # Stratégia-cellák szimulálása (csak LIVE pároknál mutatunk értéket)
         if st == "LIVE":
