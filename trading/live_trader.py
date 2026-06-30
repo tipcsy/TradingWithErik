@@ -350,9 +350,13 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         ds.position_pnl = pnl
         ds.risk_free     = slot_mgr.is_risk_free(ticket)
 
-    # Lezárt pozíciók észlelése (eltűnt a listából)
+    # Lezárt pozíciók észlelése — a GLOBÁLIS nyitott halmazhoz mérve!
+    # (Korábbi hiba: az aktuális szimbólum pozícióihoz mértünk, így egy MÁSIK
+    #  pár feldolgozása tévesen "lezártnak" vette és kivette e pár ticketjeit a
+    #  slot-kezelőből → felszabadult a slot → korlátlan túlnyitás ugyanarra a párra.)
+    all_open_tickets = {p.ticket for p in open_positions}
     for ticket in slot_mgr.all_tickets():
-        still_open = any(p.ticket == ticket for p in symbol_positions)
+        still_open = ticket in all_open_tickets
         if not still_open:
             # Lezárva — kereskedési napló
             history = mt5.history_deals_get(position=ticket)
@@ -373,7 +377,11 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
                 })
 
     # --- Belépés a stratégia jelzése alapján ---
-    if signal != "NONE" and atr_val is not None and slot_mgr.can_open() and spread_ok:
+    # Egy szimbólumon EGYSZERRE csak egy pozíció lehet — soha ne halmozzon
+    # ugyanarra a párra (ez okozta a 8 GBPAUD-pozíciót 4 slotra).
+    already_open = len(symbol_positions) > 0
+    if (signal != "NONE" and not already_open and atr_val is not None
+            and slot_mgr.can_open() and spread_ok):
         sl_pips, tp_pips = calc_sl_tp_pips(atr_val, {**params, "pip_size": pip_size})
         eff_slots = calc_effective_slots(balance, sl_pips, pair_cfg, trading_cfg)
         lot = calc_lot(balance, sl_pips, pair_cfg, trading_cfg, eff_slots)
@@ -431,6 +439,14 @@ def run(cfg: dict, slot_mgr: SlotManager):
             instrument_state[symbol] = "STOPPED"
             if not trained:
                 log.info("%s — STOPPED (nincs params, futtatsd az optimalizálást)", symbol)
+
+    # Induló szinkronizáció: a már (korábbról) nyitott pozíciókat vegyük fel a
+    # slot-kezelőbe, hogy újraindítás után se nyisson a limit fölé.
+    for _p in get_open_positions(magic):
+        slot_mgr.add(_p.ticket)
+    if slot_mgr.all_tickets():
+        log.info("Induláskor %d már nyitott pozíció felvéve a slot-kezelőbe.",
+                 len(slot_mgr.all_tickets()))
 
     log.info("Élő kereskedés indul | %d LIVE pár", len(pair_states))
 
