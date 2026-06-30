@@ -51,5 +51,6 @@
     "trade_hour_end": 24,
     "skip_monday_hours": 2,
     "skip_friday_hour": 24
-  }
+  },
+  "manually_edited_at": "2026-06-30T13:20:10.564508"
 }

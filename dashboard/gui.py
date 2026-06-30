@@ -1329,6 +1329,28 @@ class DashboardWindow:
             mono_font=self._mono_font, small_font=self._small_font)
         self._apply_filter_sort()
 
+    # ── JSON szintaxis-színezés (Text widgethez) ─────────────────────────
+    @staticmethod
+    def _highlight_json(text):
+        import re
+        content = text.get("1.0", "end-1c")
+        for tag in ("json_key", "json_str", "json_num", "json_bool"):
+            text.tag_remove(tag, "1.0", "end")
+        token = re.compile(
+            r'"(?:\\.|[^"\\])*"'                  # idézőjeles szöveg
+            r'|-?\d+\.?\d*(?:[eE][+-]?\d+)?'      # szám
+            r'|\b(?:true|false|null)\b')          # logikai / null
+        for m in token.finditer(content):
+            s, e, tok = m.start(), m.end(), m.group()
+            if tok[0] == '"':
+                after = content[e:e + 8].lstrip()
+                tag = "json_key" if after.startswith(":") else "json_str"
+            elif tok in ("true", "false", "null"):
+                tag = "json_bool"
+            else:
+                tag = "json_num"
+            text.tag_add(tag, f"1.0+{s}c", f"1.0+{e}c")
+
     # ── Beállítás-szerkesztő (config.json) ───────────────────────────────
     def _show_settings(self):
         popup = tk.Toplevel(self.root)
@@ -1350,7 +1372,24 @@ class DashboardWindow:
                        font=self._mono_font, wrap="none", yscrollcommand=sb.set)
         text.pack(side="left", fill="both", expand=True)
         sb.config(command=text.yview)
+        # JSON szintaxis-színezés
+        text.tag_configure("json_key",  foreground=FG_BLUE)
+        text.tag_configure("json_str",  foreground=FG_GREEN)
+        text.tag_configure("json_num",  foreground=FG_ORANGE)
+        text.tag_configure("json_bool", foreground=FG_CYAN)
         text.insert("1.0", json.dumps(self.cfg, indent=2, ensure_ascii=False))
+        self._highlight_json(text)
+
+        # Élő újraszínezés szerkesztés közben (debounce-olva, hogy ne akadjon)
+        def _schedule_hl(_event=None):
+            prev = getattr(self, "_hl_after_id", None)
+            if prev:
+                try:
+                    popup.after_cancel(prev)
+                except Exception:
+                    pass
+            self._hl_after_id = popup.after(200, lambda: self._highlight_json(text))
+        text.bind("<KeyRelease>", _schedule_hl)
 
         lbl_err = tk.Label(popup, text="", bg=BG, fg=FG_RED, font=self._small_font)
         lbl_err.pack(anchor="w", padx=10)
