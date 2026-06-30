@@ -133,7 +133,7 @@ def _fixed_cell(key: str, ds, opt_status: str, inst_state: str) -> tuple[str, st
 
 class PairRow:
     def __init__(self, parent: tk.Frame, symbol: str, row_idx: int, columns: list,
-                 on_run, on_opt, on_delete, on_risky, mono_font, small_font):
+                 on_run, on_opt, on_delete, on_risky, on_name_click, mono_font, small_font):
         self.symbol  = symbol
         self.columns = columns
         self._bg     = BG_ROW_ODD if row_idx % 2 == 0 else BG_ROW_EVEN
@@ -148,6 +148,10 @@ class PairRow:
                            bg=self._bg, fg=FG_GRAY, font=mono_font, padx=4, pady=3)
             lbl.pack(side="left")
             self.labels[col.key] = lbl
+
+        # A Symbol cellára kattintva → optimalizált paraméterek szerkesztője
+        self.labels["symbol"].config(cursor="hand2")
+        self.labels["symbol"].bind("<Button-1>", lambda e: on_name_click(symbol))
 
         # Egy gomb a futtatáshoz (Play↔Stop morph) és egy az OPT-hoz (OPT↔STOP morph)
         self.btn_run = tk.Button(self.frame, text="▶", width=3,
@@ -1035,6 +1039,9 @@ class DashboardWindow:
         tk.Button(toolbar, text="  +  Instrumentum", font=small_font,
                   bg=BTN_OPT_BG, fg=BTN_OPT_FG, relief="flat", cursor="hand2",
                   command=self._show_add_instrument).pack(side="right", padx=4)
+        tk.Button(toolbar, text="  ⚙  Beállítás", font=small_font,
+                  bg=BG_INACTIVE, fg=FG_WHITE, relief="flat", cursor="hand2",
+                  command=self._show_settings).pack(side="right", padx=4)
 
         legend = tk.Frame(parent, bg=BG, pady=2)
         legend.pack(fill="x", padx=6)
@@ -1100,6 +1107,7 @@ class DashboardWindow:
                 self._table_frame, symbol, idx, self._columns,
                 on_run=self._handle_run, on_opt=self._handle_opt,
                 on_delete=self._handle_delete, on_risky=self._handle_risky,
+                on_name_click=self._show_instrument_params,
                 mono_font=mono_font, small_font=small_font)
 
         self._apply_filter_sort()
@@ -1317,8 +1325,140 @@ class DashboardWindow:
             self._table_frame, symbol, idx, self._columns,
             on_run=self._handle_run, on_opt=self._handle_opt,
             on_delete=self._handle_delete, on_risky=self._handle_risky,
+            on_name_click=self._show_instrument_params,
             mono_font=self._mono_font, small_font=self._small_font)
         self._apply_filter_sort()
+
+    # ── Beállítás-szerkesztő (config.json) ───────────────────────────────
+    def _show_settings(self):
+        popup = tk.Toplevel(self.root)
+        popup.title("Beállítások — config.json")
+        popup.configure(bg=BG)
+        popup.geometry("720x640")
+        popup.grab_set()
+        tk.Label(popup, text="config.json szerkesztése (mentéskor JSON-validálás):",
+                 bg=BG, fg=FG_BLUE, font=self._header_font).pack(anchor="w", padx=10, pady=(10, 2))
+        tk.Label(popup, text="Megjegyzés: a kereskedési paraméterek menet közben "
+                 "érvényesülnek; a párok listája / stratégia újraindítást igényel.",
+                 bg=BG, fg=FG_GRAY, font=self._small_font).pack(anchor="w", padx=10)
+
+        txt_frame = tk.Frame(popup, bg=BG)
+        txt_frame.pack(fill="both", expand=True, padx=10, pady=4)
+        sb = tk.Scrollbar(txt_frame)
+        sb.pack(side="right", fill="y")
+        text = tk.Text(txt_frame, bg=BG_HEADER, fg=FG_WHITE, insertbackground=FG_WHITE,
+                       font=self._mono_font, wrap="none", yscrollcommand=sb.set)
+        text.pack(side="left", fill="both", expand=True)
+        sb.config(command=text.yview)
+        text.insert("1.0", json.dumps(self.cfg, indent=2, ensure_ascii=False))
+
+        lbl_err = tk.Label(popup, text="", bg=BG, fg=FG_RED, font=self._small_font)
+        lbl_err.pack(anchor="w", padx=10)
+
+        def save():
+            try:
+                new = json.loads(text.get("1.0", "end"))
+            except Exception as e:
+                lbl_err.config(text=f"Érvénytelen JSON: {e}")
+                return
+            try:
+                with open(ROOT / "config.json", "w", encoding="utf-8") as f:
+                    json.dump(new, f, indent=2, ensure_ascii=False)
+            except Exception as e:
+                lbl_err.config(text=f"Mentési hiba: {e}")
+                return
+            # In-place frissítés → a live_trader ugyanazt a dict-et látja
+            self.cfg.clear()
+            self.cfg.update(new)
+            popup.destroy()
+
+        btns = tk.Frame(popup, bg=BG)
+        btns.pack(pady=10)
+        tk.Button(btns, text="Mentés", bg=BTN_PLAY_BG, fg=BTN_PLAY_FG, relief="flat",
+                  font=self._small_font, command=save).pack(side="left", padx=6)
+        tk.Button(btns, text="Mégse", bg=BTN_DIS_BG, fg=BTN_DIS_FG, relief="flat",
+                  font=self._small_font, command=popup.destroy).pack(side="left", padx=6)
+
+    # ── Optimalizált paraméterek szerkesztője (instrumentum nevére kattintva) ─
+    def _show_instrument_params(self, symbol: str):
+        from ml.optimizer import PARAMS_DIR
+        pf = PARAMS_DIR / f"{symbol}.json"
+        if not pf.exists():
+            return   # csak optimalizált párra
+        try:
+            with open(pf, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return
+        params = data.get("params", {})
+
+        popup = tk.Toplevel(self.root)
+        popup.title(f"{symbol} — optimalizált paraméterek")
+        popup.configure(bg=BG)
+        popup.grab_set()
+
+        ts = data.get("test_summary", {})
+        if ts:
+            tk.Label(popup,
+                     text=f"Teszt: {ts.get('trades',0)} trade   "
+                          f"P&L {ts.get('total_pnl',0):+.0f}$   "
+                          f"Win {ts.get('win_rate',0)*100:.0f}%   "
+                          f"MaxDD {ts.get('max_drawdown',0)*100:.1f}%",
+                     bg=BG, fg=FG_CYAN, font=self._small_font).pack(anchor="w", padx=10, pady=(10, 2))
+        tk.Label(popup, text="Kézi módosítás — a következő Play-nél lép életbe:",
+                 bg=BG, fg=FG_GRAY, font=self._small_font).pack(anchor="w", padx=10)
+
+        form = tk.Frame(popup, bg=BG)
+        form.pack(fill="both", expand=True, padx=10, pady=6)
+        entries = {}
+        keys = sorted(k for k in params if not k.startswith("_"))
+        for i, k in enumerate(keys):
+            tk.Label(form, text=k, bg=BG, fg=FG_WHITE, font=self._small_font,
+                     anchor="w", width=24).grid(row=i, column=0, sticky="w", pady=1)
+            e = tk.Entry(form, width=14, bg=BG_HEADER, fg=FG_WHITE,
+                         font=self._small_font, insertbackground=FG_WHITE)
+            e.insert(0, str(params[k]))
+            e.grid(row=i, column=1, padx=6, pady=1)
+            entries[k] = e
+
+        lbl_err = tk.Label(popup, text="", bg=BG, fg=FG_RED, font=self._small_font)
+        lbl_err.pack(anchor="w", padx=10)
+
+        def save():
+            new_params = dict(params)
+            for k, e in entries.items():
+                v = e.get().strip()
+                orig = params[k]
+                try:
+                    if isinstance(orig, bool):
+                        new_params[k] = v.lower() in ("true", "1", "igen", "yes")
+                    elif isinstance(orig, int):
+                        new_params[k] = int(float(v))
+                    elif isinstance(orig, float):
+                        new_params[k] = float(v)
+                    else:
+                        new_params[k] = v
+                except ValueError:
+                    lbl_err.config(text=f"Hibás érték: {k} = {v!r}")
+                    return
+            data["params"] = new_params
+            data["manually_edited_at"] = datetime.utcnow().isoformat()
+            try:
+                tmp = pf.with_suffix(".tmp")
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+                tmp.replace(pf)
+            except Exception as ex:
+                lbl_err.config(text=f"Mentési hiba: {ex}")
+                return
+            popup.destroy()
+
+        btns = tk.Frame(popup, bg=BG)
+        btns.pack(pady=10)
+        tk.Button(btns, text="Mentés", bg=BTN_PLAY_BG, fg=BTN_PLAY_FG, relief="flat",
+                  font=self._small_font, command=save).pack(side="left", padx=6)
+        tk.Button(btns, text="Mégse", bg=BTN_DIS_BG, fg=BTN_DIS_FG, relief="flat",
+                  font=self._small_font, command=popup.destroy).pack(side="left", padx=6)
 
     # ── Gomb handlerek ────────────────────────────────────────────────────
     def _handle_run(self, symbol: str):
