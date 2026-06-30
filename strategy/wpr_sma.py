@@ -67,14 +67,14 @@ class WprSmaStrategy(Strategy):
         return [Timeframe("M15", 15), Timeframe("M1", 1)]
 
     def columns(self) -> list[Column]:
+        # A visszaszámlálók (gyertyazárásig hátralévő idő) a VÁZ közös felső
+        # sávjába kerülnek (minden instrumentumnál azonosak) — nem oszlopként.
         return [
             StrategyColumn("sma_dir",  "SMA irány",  8),
             StrategyColumn("wpr_m15",  "M15 WPR",    7),
             StrategyColumn("sig_m15",  "M15 jelzés", 9),
-            CountdownColumn(15,        "M15 hátr.",  7),
             StrategyColumn("wpr_m1",   "M1 WPR",     7),
             StrategyColumn("sig_m1",   "M1 jelzés",  8),
-            CountdownColumn(1,         "M1 hátr.",   7),
         ]
 
     def warmup_bars(self, params: dict, timeframe_label: str) -> int:

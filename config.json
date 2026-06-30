@@ -8,7 +8,9 @@
     "price_refresh_sec": 3,
     "live_refresh_sec": 7,
     "all_refresh_sec": 30,
-    "watchdog_threshold_sec": 2.0
+    "watchdog_threshold_sec": 2.0,
+    "_comment_countdown": "Mely időkeretek visszaszámlálója látszik a felső sávban (percben). Üres/hiányzó = a stratégia összes időkerete.",
+    "countdown_timeframes": [15, 1]
   },
   "broker": {
     "name": "Vantage",

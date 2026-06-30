@@ -1033,13 +1033,52 @@ class DashboardWindow:
             ("■ Optimalizálás", FG_YELLOW), ("✦ Kockázatmentes", FG_CYAN),
         ]:
             tk.Label(legend, text=text, bg=BG, fg=col, font=small_font, padx=6).pack(side="left")
+
+        # ── Visszaszámláló-sáv (közös, minden instrumentumnál azonos) ───────
+        # Config-vezérelt: dashboard.countdown_timeframes (percek listája) vagy
+        # üres → a stratégia összes időkerete.
+        strat_tfs = {tf.minutes: tf.label for tf in self.strategy.timeframes()}
+        cd_cfg = self.cfg.get("dashboard", {}).get("countdown_timeframes")
+        if cd_cfg:
+            self._countdown_tfs = [(m, strat_tfs.get(m, f"{m}p")) for m in cd_cfg
+                                   if m in strat_tfs]
+        else:
+            self._countdown_tfs = [(tf.minutes, tf.label) for tf in self.strategy.timeframes()]
+        self._countdown_lbls = {}
+        for minutes, label in self._countdown_tfs:
+            lbl = tk.Label(legend, text=f"{label} zárás: --:--", bg=BG,
+                           fg=FG_CYAN, font=header_font, padx=8)
+            lbl.pack(side="right")
+            self._countdown_lbls[minutes] = lbl
+
         tk.Frame(parent, bg=FG_GRAY_DIM, height=1).pack(fill="x", padx=2, pady=2)
 
-        self._table_frame = tk.Frame(parent, bg=BG)
-        self._table_frame.pack(fill="both", expand=True, padx=2)
+        # ── Görgethető tábla: rögzített fejléc + scrollozható sorok ─────────
+        table_holder = tk.Frame(parent, bg=BG)
+        table_holder.pack(fill="both", expand=True, padx=2)
+
+        header_holder = tk.Frame(table_holder, bg=BG)
+        header_holder.pack(fill="x")
         self._header_row = HeaderRow(
-            self._table_frame, self._columns, header_font, small_font,
+            header_holder, self._columns, header_font, small_font,
             on_col_click=self._on_header_click)
+
+        canvas = tk.Canvas(table_holder, bg=BG, highlightthickness=0)
+        vsb = tk.Scrollbar(table_holder, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        self._table_frame = tk.Frame(canvas, bg=BG)   # ide kerülnek a sorok
+        canvas.create_window((0, 0), window=self._table_frame, anchor="nw")
+        self._table_frame.bind(
+            "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        # Egérgörgő csak akkor görget, ha a kurzor a tábla fölött van
+        def _on_wheel(e):
+            canvas.yview_scroll(int(-e.delta / 120), "units")
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_wheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
 
         self.rows: dict[str, PairRow] = {}
         for idx, (symbol, pair_cfg) in enumerate(self.cfg["pairs"].items()):
@@ -1584,13 +1623,16 @@ class DashboardWindow:
         now = datetime.now(timezone.utc)
         self.lbl_time.config(text=now.strftime("%Y-%m-%d %H:%M:%S UTC"))
 
-        # Visszaszámlálók a stratégia időkereteire
+        # Visszaszámlálók a stratégia időkereteire (közös felső sáv + per-pár állapot)
         try:
             from trading.live_trader import seconds_to_candle_close
             for tf in self.strategy.timeframes():
                 rem = seconds_to_candle_close(tf.minutes)
                 for ds in self.dashboard_ref.values():
                     ds.timeframe_remaining[tf.minutes] = rem
+                lbl = getattr(self, "_countdown_lbls", {}).get(tf.minutes)
+                if lbl is not None:
+                    lbl.config(text=f"{tf.label} zárás: {rem//60}:{rem%60:02d}")
         except Exception:
             pass
 
