@@ -186,6 +186,8 @@
     "method": "optuna",
     "max_trials": 500,
     "max_parallel_optimizers": 2,
+    "_comment_timeout": "Egy optimalizálás max ideje mp-ben; ennyi után beragadás-védelem zárja le (a UI nem ragad be).",
+    "timeout_sec": 1800,
     "_comment_wf": "Walk-forward: n_splits ablak, mindegyikben train_months tanítás + test_months validálás",
     "wf_n_splits": 4,
     "wf_train_months": 6,

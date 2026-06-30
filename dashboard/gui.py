@@ -132,7 +132,7 @@ def _fixed_cell(key: str, ds, opt_status: str, inst_state: str) -> tuple[str, st
 
 class PairRow:
     def __init__(self, parent: tk.Frame, symbol: str, row_idx: int, columns: list,
-                 on_play, on_stop, on_opt, mono_font, small_font):
+                 on_run, on_opt, on_delete, mono_font, small_font):
         self.symbol  = symbol
         self.columns = columns
         self._bg     = BG_ROW_ODD if row_idx % 2 == 0 else BG_ROW_EVEN
@@ -148,24 +148,25 @@ class PairRow:
             lbl.pack(side="left")
             self.labels[col.key] = lbl
 
-        self.btn_play = tk.Button(self.frame, text="▶", width=3,
-                                  bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
-                                  relief="flat", command=lambda: on_play(symbol))
-        self.btn_play.pack(side="left", padx=1)
-        self.btn_stop = tk.Button(self.frame, text="■", width=3,
-                                  bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
-                                  relief="flat", command=lambda: on_stop(symbol))
-        self.btn_stop.pack(side="left", padx=1)
+        # Egy gomb a futtatáshoz (Play↔Stop morph) és egy az OPT-hoz (OPT↔STOP morph)
+        self.btn_run = tk.Button(self.frame, text="▶", width=3,
+                                 bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
+                                 relief="flat", command=lambda: on_run(symbol))
+        self.btn_run.pack(side="left", padx=1)
         self.btn_opt = tk.Button(self.frame, text="OPT", width=4,
                                  bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
                                  relief="flat", command=lambda: on_opt(symbol))
-        self.btn_opt.pack(side="left", padx=(1, 4))
+        self.btn_opt.pack(side="left", padx=1)
+        self.btn_del = tk.Button(self.frame, text="✕", width=2,
+                                 bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
+                                 relief="flat", command=lambda: on_delete(symbol))
+        self.btn_del.pack(side="left", padx=(1, 4))
 
-    def _set_btn(self, btn, enabled, active_bg, active_fg):
+    def _morph_btn(self, btn, text, enabled, active_bg, active_fg):
         if enabled:
-            btn.config(bg=active_bg, fg=active_fg, state="normal")
+            btn.config(text=text, bg=active_bg, fg=active_fg, state="normal")
         else:
-            btn.config(bg=BTN_DIS_BG, fg=BTN_DIS_FG, state="disabled")
+            btn.config(text=text, bg=BTN_DIS_BG, fg=BTN_DIS_FG, state="disabled")
 
     def _blank_all(self, fg, except_keys=()):
         for col in self.columns:
@@ -196,9 +197,9 @@ class PairRow:
             sym_lbl.config(text=self.symbol, fg=FG_GRAY_DIM,
                            font=("Courier", 9, "italic"))
             self._blank_all(FG_GRAY_DIM)
-            self._set_btn(self.btn_play, False, BTN_PLAY_BG, BTN_PLAY_FG)
-            self._set_btn(self.btn_stop, False, BTN_STOP_BG, BTN_STOP_FG)
-            self._set_btn(self.btn_opt,  False, BTN_OPT_BG,  BTN_OPT_FG)
+            self._morph_btn(self.btn_run, "▶",   False, BTN_PLAY_BG, BTN_PLAY_FG)
+            self._morph_btn(self.btn_opt, "OPT", False, BTN_OPT_BG,  BTN_OPT_FG)
+            self._morph_btn(self.btn_del, "✕",   False, BG_INACTIVE, FG_RED)
             return
 
         # ── Optimalizálás / sorban áll ──────────────────────────────────────
@@ -208,9 +209,13 @@ class PairRow:
             self._blank_all(FG_GRAY_DIM, except_keys=("opt",))
             txt, col = _fixed_cell("opt", ds, opt_status, inst_state)
             self.labels["opt"].config(text=txt, fg=sem_color(col))
-            self._set_btn(self.btn_play, False, BTN_PLAY_BG, BTN_PLAY_FG)
-            self._set_btn(self.btn_stop, False, BTN_STOP_BG, BTN_STOP_FG)
-            self._set_btn(self.btn_opt,  False, BTN_OPT_BG,  BTN_OPT_FG)
+            self._morph_btn(self.btn_run, "▶", False, BTN_PLAY_BG, BTN_PLAY_FG)
+            # QUEUED → STOP (sorból törlés); OPTIMIZING (fut) → nem szakítható meg
+            if inst_state == "QUEUED":
+                self._morph_btn(self.btn_opt, "STOP", True, BTN_STOP_BG, BTN_STOP_FG)
+            else:
+                self._morph_btn(self.btn_opt, "…", False, BTN_OPT_BG, BTN_OPT_FG)
+            self._morph_btn(self.btn_del, "✕", False, BG_INACTIVE, FG_RED)
             return
 
         # ── LIVE / STOPPED ──────────────────────────────────────────────────
@@ -243,13 +248,14 @@ class PairRow:
 
         # Gombok
         if inst_state == "LIVE":
-            self._set_btn(self.btn_play, False, BTN_PLAY_BG, BTN_PLAY_FG)
-            self._set_btn(self.btn_stop, not has_position, BTN_STOP_BG, BTN_STOP_FG)
-            self._set_btn(self.btn_opt,  False, BTN_OPT_BG,  BTN_OPT_FG)
+            # Play→Stop morph; nyitott pozícióval nem állítható le
+            self._morph_btn(self.btn_run, "■", not has_position, BTN_STOP_BG, BTN_STOP_FG)
+            self._morph_btn(self.btn_opt, "OPT", False, BTN_OPT_BG, BTN_OPT_FG)
+            self._morph_btn(self.btn_del, "✕",  False, BG_INACTIVE, FG_RED)
         else:  # STOPPED
-            self._set_btn(self.btn_play, trained, BTN_PLAY_BG, BTN_PLAY_FG)
-            self._set_btn(self.btn_stop, False,   BTN_STOP_BG, BTN_STOP_FG)
-            self._set_btn(self.btn_opt,  True,    BTN_OPT_BG,  BTN_OPT_FG)
+            self._morph_btn(self.btn_run, "▶",  trained, BTN_PLAY_BG, BTN_PLAY_FG)
+            self._morph_btn(self.btn_opt, "OPT", True,   BTN_OPT_BG,  BTN_OPT_FG)
+            self._morph_btn(self.btn_del, "✕",   True,   BG_INACTIVE, FG_RED)
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +391,15 @@ class OptimizerController:
                 self.instrument_state[symbol] = "QUEUED"
                 self.optimizer_status[symbol] = "Várakozik..."
 
+    def cancel_queued(self, symbol: str):
+        """Sorban álló (QUEUED) optimalizálás visszavonása. A MÁR FUTÓ nem
+        szakítható meg — azt az időtúllépés-védelem zárja le, ha elakad."""
+        with self._lock:
+            if symbol in self._queue:
+                self._queue.remove(symbol)
+                self.instrument_state[symbol] = "STOPPED"
+                self.optimizer_status[symbol] = ""
+
     def _start(self, symbol: str):
         self._running.add(symbol)
         self.instrument_state[symbol] = "OPTIMIZING"
@@ -451,9 +466,16 @@ class OptimizerController:
             self._ensure_pool()
             args = (symbol, df_m15, df_m1, params_list, pair_cfg, trading_cfg,
                     initial_bal, test_start)
+            timeout_sec = opt_cfg.get("timeout_sec", 1800)   # beragadás-védelem
             if self._pool is not None:
-                fut   = self._pool.submit(optimize_job, *args, self._progress_q)
-                entry = fut.result()
+                from concurrent.futures import TimeoutError as _FutTimeout
+                fut = self._pool.submit(optimize_job, *args, self._progress_q)
+                try:
+                    entry = fut.result(timeout=timeout_sec)
+                except _FutTimeout:
+                    fut.cancel()
+                    self.optimizer_status[symbol] = "Hiba: időtúllépés"
+                    return   # a finally visszaállítja STOPPED-ra → UI nem ragad be
             else:
                 entry = optimize_job(*args, _LocalProgress(self.optimizer_status))
 
@@ -1025,8 +1047,9 @@ class DashboardWindow:
                 continue
             self.rows[symbol] = PairRow(
                 self._table_frame, symbol, idx, self._columns,
-                on_play=self._handle_play, on_stop=self._handle_stop,
-                on_opt=self._handle_opt, mono_font=mono_font, small_font=small_font)
+                on_run=self._handle_run, on_opt=self._handle_opt,
+                on_delete=self._handle_delete,
+                mono_font=mono_font, small_font=small_font)
 
         self._apply_filter_sort()
 
@@ -1241,11 +1264,20 @@ class DashboardWindow:
         idx = len(self.rows)
         self.rows[symbol] = PairRow(
             self._table_frame, symbol, idx, self._columns,
-            on_play=self._handle_play, on_stop=self._handle_stop,
-            on_opt=self._handle_opt, mono_font=self._mono_font, small_font=self._small_font)
+            on_run=self._handle_run, on_opt=self._handle_opt,
+            on_delete=self._handle_delete,
+            mono_font=self._mono_font, small_font=self._small_font)
         self._apply_filter_sort()
 
     # ── Gomb handlerek ────────────────────────────────────────────────────
+    def _handle_run(self, symbol: str):
+        """A futtató gomb (Play↔Stop morph) kezelője."""
+        st = self.instrument_state.get(symbol)
+        if st == "STOPPED":
+            self._handle_play(symbol)
+        elif st == "LIVE":
+            self._handle_stop(symbol)
+
     def _handle_play(self, symbol: str):
         ds = self.dashboard_ref.get(symbol)
         if ds is None or not ds.trained:
@@ -1269,15 +1301,44 @@ class DashboardWindow:
             self._on_stop(symbol)
 
     def _handle_opt(self, symbol: str):
-        if self.instrument_state.get(symbol) != "STOPPED":
+        """OPT↔STOP morph: STOPPED → optimalizálás indítása; QUEUED → sorból törlés."""
+        st = self.instrument_state.get(symbol)
+        if st == "STOPPED":
+            self._opt_ctrl.request_optimize(symbol)
+        elif st == "QUEUED":
+            self._opt_ctrl.cancel_queued(symbol)
+        else:
             return
-        self._opt_ctrl.request_optimize(symbol)
         row = self.rows.get(symbol)
         ds  = self.dashboard_ref.get(symbol)
         if row and ds:
             row.update(ds, self.instrument_state.get(symbol, "STOPPED"),
-                       self.optimizer_status.get(symbol, "Indul..."),
+                       self.optimizer_status.get(symbol, ""),
                        connected=getattr(self, "_connected", True))
+
+    def _handle_delete(self, symbol: str):
+        """Instrumentum törlése a config-ból és a táblából (megerősítéssel).
+        Csak megállított (STOPPED) párra engedélyezett."""
+        if self.instrument_state.get(symbol) != "STOPPED":
+            return
+        from tkinter import messagebox
+        if not messagebox.askyesno(
+                "Törlés megerősítése",
+                f"Biztosan törlöd a(z) {symbol} instrumentumot a listából?"):
+            return
+        self.cfg["pairs"].pop(symbol, None)
+        try:
+            with open(ROOT / "config.json", "w", encoding="utf-8") as f:
+                json.dump(self.cfg, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+        row = self.rows.pop(symbol, None)
+        if row is not None:
+            row.frame.destroy()
+        self.dashboard_ref.pop(symbol, None)
+        self.instrument_state.pop(symbol, None)
+        self.optimizer_status.pop(symbol, None)
+        self._apply_filter_sort()
 
     def _handle_connect(self):
         # A connect() blokkoló MT5-login — háttérszálon, hogy a UI ne fagyjon.
