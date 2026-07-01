@@ -68,10 +68,14 @@ def cmd_live():
     time.sleep(1)
 
     # Dashboard főszálon (tkinter csak főszálból futhat)
+    def on_slots_change(new_max):
+        slot_mgr.max_slots = new_max
+
     win = DashboardWindow(
         cfg, dashboard, instrument_state, optimizer_status,
         on_play_pair=None,   # instrument_state váltás elegendő, a run() loop felkapja
         on_stop_pair=None,
+        on_slots_change=on_slots_change,
     )
 
     def update_header():

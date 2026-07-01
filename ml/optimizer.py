@@ -431,6 +431,7 @@ def optimize_pair(
     best_score = -float("inf")
     best_params = None
     best_summary = None
+    all_rows: list[dict] = []   # minden kombináció eredménye → CSV export
 
     for i, params in enumerate(params_list):
         try:
@@ -472,6 +473,22 @@ def optimize_pair(
             }
 
             s = score(summary)
+
+            # Sor az eredménytáblázathoz: score + metrikák + a próbált paraméterek
+            row = {
+                "score":         round(s, 2),
+                "trades":        summary["trades"],
+                "win_rate":      round(summary["win_rate"], 4),
+                "total_pnl":     round(summary["total_pnl"], 2),
+                "max_drawdown":  round(summary["max_drawdown"], 4),
+                "profit_factor": (round(summary["profit_factor"], 3)
+                                  if summary["profit_factor"] != float("inf") else "inf"),
+            }
+            for pk, pv in params.items():
+                if not pk.startswith("_"):
+                    row[pk] = pv
+            all_rows.append(row)
+
             if s > best_score:
                 best_score = s
                 best_params = params
@@ -494,6 +511,19 @@ def optimize_pair(
     if progress_callback:
         best_pnl = best_summary["total_pnl"] if best_summary else 0
         progress_callback(len(params_list), len(params_list), best_pnl)
+
+    # ── Teljes eredménytáblázat mentése CSV-be (score szerint csökkenő) ──────
+    # Excelben közvetlenül megnyitható (utf-8-sig BOM). A felhasználó így látja
+    # az összes vizsgált kombinációt, nem csak a legjobbat.
+    if all_rows:
+        try:
+            df_res = pd.DataFrame(all_rows).sort_values("score", ascending=False)
+            out_csv = PARAMS_DIR / f"{symbol}_trials.csv"
+            df_res.to_csv(out_csv, index=False, encoding="utf-8-sig")
+            log.info("  %s — %d kombináció eredménye mentve: %s",
+                     symbol, len(all_rows), out_csv.name)
+        except Exception as e:
+            log.debug("%s — trials CSV mentés hiba: %s", symbol, e)
 
     return {"params": best_params, "train_summary": best_summary} if best_params else None
 

@@ -334,9 +334,12 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         pnl    = pos.profit
         is_rf  = slot_mgr.is_risk_free(ticket)
 
-        # Megosztott pozíció-állapot (GUI ↔ motor): eredeti SL, trailing toggle, BE
+        # Megosztott pozíció-állapot (GUI ↔ motor): eredeti SL, trailing toggle, BE,
+        # trail_distance (None = az optimalizált paramétert használjuk; szám = kézi
+        # felülírás a Pozíciók fülről)
         pstate = position_state.setdefault(ticket, {
-            "original_sl": pos.sl, "trailing_enabled": True, "be_done": is_rf})
+            "original_sl": pos.sl, "trailing_enabled": True, "be_done": is_rf,
+            "trail_distance": None})
         # Kézi BE (a Pozíciók fülről): ha be_done jelölt, de a slot-kezelő még
         # nem tudja, szinkronizáljuk (slot felszabadul, trailing indulhat).
         if pstate.get("be_done") and not is_rf:
@@ -367,7 +370,11 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         is_rf = slot_mgr.is_risk_free(ticket)
         if is_rf and pstate.get("trailing_enabled", True):
             trail_act  = params.get("trail_activation_pips", 8)
-            trail_dist = params.get("trail_distance_pips", 6) * (0.5 if risky else 1.0)
+            # Kézi felülírás (Pozíciók fül) elsőbbséget élvez az optimalizált érték előtt
+            dist_override = pstate.get("trail_distance")
+            base_dist  = dist_override if dist_override is not None \
+                         else params.get("trail_distance_pips", 6)
+            trail_dist = base_dist * (0.5 if risky else 1.0)
             if pos.type == mt5.ORDER_TYPE_BUY:
                 trail_trigger = pos.price_open + pip_to_price(trail_act, pip_size)
                 if pos.price_current >= trail_trigger:

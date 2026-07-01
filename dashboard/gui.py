@@ -941,8 +941,11 @@ POSITION_COLUMNS = [
 
 class PositionRow:
     def __init__(self, parent, ticket, mono_font, small_font,
-                 on_be, on_trail, on_panic):
+                 on_be, on_trail, on_panic, on_name_click, on_trail_dist):
         self.ticket = ticket
+        self._symbol = None
+        self._on_name_click = on_name_click
+        self._on_trail_dist = on_trail_dist
         self.frame = tk.Frame(parent, bg=BG_ROW_EVEN)
         self.labels = {}
         for key, hdr, w, anchor in POSITION_COLUMNS:
@@ -950,6 +953,11 @@ class PositionRow:
                            bg=BG_ROW_EVEN, fg=FG_WHITE, font=mono_font, padx=4, pady=2)
             lbl.pack(side="left")
             self.labels[key] = lbl
+        # Symbol cellára kattintva → optimalizált paraméterek (mint a Live fülön)
+        self.labels["symbol"].config(cursor="hand2")
+        self.labels["symbol"].bind(
+            "<Button-1>",
+            lambda e: self._symbol and self._on_name_click(self._symbol))
         self.btn_be = tk.Button(self.frame, text="BE", width=4, font=small_font,
                                 relief="flat", bg=BTN_OPT_BG, fg="#ffffff",
                                 command=lambda: on_be(ticket))
@@ -958,12 +966,31 @@ class PositionRow:
                                    relief="flat", bg=BTN_DIS_BG, fg=FG_GRAY,
                                    command=lambda: on_trail(ticket))
         self.btn_trail.pack(side="left", padx=1)
+        # Trail távolság (pip) — kézzel szerkeszthető; Enter/fókuszvesztés menti
+        self._trail_var = tk.StringVar()
+        self.ent_trail = tk.Entry(self.frame, textvariable=self._trail_var, width=4,
+                                  font=small_font, bg=BG_HEADER, fg=FG_WHITE,
+                                  insertbackground=FG_WHITE, relief="flat",
+                                  justify="center")
+        self.ent_trail.pack(side="left", padx=1)
+        self.ent_trail.bind("<Return>",   self._apply_trail_dist)
+        self.ent_trail.bind("<FocusOut>", self._apply_trail_dist)
         self.btn_panic = tk.Button(self.frame, text="Zár", width=4, font=small_font,
                                    relief="flat", bg=BTN_STOP_BG, fg="#ffffff",
                                    command=lambda: on_panic(ticket))
         self.btn_panic.pack(side="left", padx=(1, 4))
 
-    def update(self, pos, pstate, digits):
+    def _apply_trail_dist(self, _event=None):
+        raw = self._trail_var.get().strip().replace(",", ".")
+        try:
+            val = float(raw)
+        except ValueError:
+            return
+        if val > 0:
+            self._on_trail_dist(self.ticket, val)
+
+    def update(self, pos, pstate, digits, trail_default=None):
+        self._symbol = pos["symbol"]
         self.labels["symbol"].config(text=pos["symbol"])
         t = pos["type"]
         self.labels["type"].config(text=t, fg=FG_GREEN if t == "BUY" else FG_RED)
@@ -991,11 +1018,25 @@ class PositionRow:
         self.btn_trail.config(bg=FG_GREEN if trail_on else BTN_DIS_BG,
                               fg="#1e1e2e" if trail_on else FG_GRAY)
 
+        # Trail távolság mező: a kézi felülírás, ha van; egyébként az optimalizált
+        # alapérték. Gépelés közben (fókuszban) NEM írjuk felül.
+        override = pstate.get("trail_distance") if pstate else None
+        eff = override if override is not None else trail_default
+        try:
+            focused = self.ent_trail.focus_get() is self.ent_trail
+        except Exception:
+            focused = False
+        if not focused:
+            self._trail_var.set(f"{eff:.1f}" if eff is not None else "")
+        # Vizuális jelzés: kézi felülírás = cián, alapérték = halványabb
+        self.ent_trail.config(fg=FG_CYAN if override is not None else FG_GRAY)
+
 
 class PositionsTab:
     def __init__(self, parent, cfg, mono_font, small_font, header_font,
                  positions_provider, pos_state, digits_provider,
-                 on_be, on_trail, on_panic, on_close_all):
+                 on_be, on_trail, on_panic, on_close_all,
+                 on_name_click, on_trail_dist, trail_default_provider):
         self.parent = parent
         self.cfg = cfg
         self._mono, self._small, self._header = mono_font, small_font, header_font
@@ -1004,6 +1045,9 @@ class PositionsTab:
         self._digits_provider = digits_provider
         self._on_be, self._on_trail, self._on_panic = on_be, on_trail, on_panic
         self._on_close_all = on_close_all
+        self._on_name_click = on_name_click
+        self._on_trail_dist = on_trail_dist
+        self._trail_default_provider = trail_default_provider
         self._rows: dict[int, PositionRow] = {}
         self._build_ui()
 
@@ -1029,8 +1073,8 @@ class PositionsTab:
         for key, label, w, anchor in POSITION_COLUMNS:
             tk.Label(hdr, text=label, width=w, anchor=anchor, bg=BG_HEADER,
                      fg=FG_BLUE, font=self._header, padx=4, pady=3).pack(side="left")
-        tk.Label(hdr, text="Vezérlés", width=16, bg=BG_HEADER, fg=FG_BLUE,
-                 font=self._header).pack(side="left")
+        tk.Label(hdr, text="Vezérlés (BE / Trail / táv / Zár)", width=30, anchor="w",
+                 bg=BG_HEADER, fg=FG_BLUE, font=self._header).pack(side="left")
         tk.Frame(p, bg=FG_GRAY_DIM, height=1).pack(fill="x", padx=2)
 
         self._rows_frame = tk.Frame(p, bg=BG)
@@ -1045,9 +1089,12 @@ class PositionsTab:
             row = self._rows.get(tid)
             if row is None:
                 row = PositionRow(self._rows_frame, tid, self._mono, self._small,
-                                  self._on_be, self._on_trail, self._on_panic)
+                                  self._on_be, self._on_trail, self._on_panic,
+                                  self._on_name_click, self._on_trail_dist)
                 self._rows[tid] = row
-            row.update(pos, self._pos_state.get(tid), self._digits_provider(pos["symbol"]))
+            trail_def = self._trail_default_provider(pos["symbol"])
+            row.update(pos, self._pos_state.get(tid),
+                       self._digits_provider(pos["symbol"]), trail_def)
 
         for tid in list(self._rows):
             if tid not in seen:
@@ -1084,13 +1131,15 @@ class PositionsTab:
 class DashboardWindow:
     def __init__(self, cfg: dict, dashboard_ref: dict,
                  instrument_state: dict, optimizer_status: dict,
-                 on_play_pair, on_stop_pair, strategy=None):
+                 on_play_pair, on_stop_pair, strategy=None,
+                 on_slots_change=None):
         self.cfg              = cfg
         self.dashboard_ref    = dashboard_ref
         self.instrument_state = instrument_state
         self.optimizer_status = optimizer_status
         self._on_play         = on_play_pair
         self._on_stop         = on_stop_pair
+        self._on_slots_change = on_slots_change
         self.strategy         = strategy or get_strategy(cfg)
         self._columns         = build_columns(self.strategy)
 
@@ -1144,7 +1193,14 @@ class DashboardWindow:
         self.lbl_daily.pack(side="left", padx=10)
         self.lbl_slots   = tk.Label(info_bar, text="Szabad slotok: —/—",
                                     bg=BG_HEADER, fg=FG_WHITE, font=info_font)
-        self.lbl_slots.pack(side="left", padx=10)
+        self.lbl_slots.pack(side="left", padx=(10, 2))
+        # Max slotszám állítása a felületről (csökkenteni csak a foglaltakig lehet)
+        tk.Button(info_bar, text="▼", font=small_font, width=2,
+                  bg=BG_INACTIVE, fg=FG_WHITE, relief="flat", cursor="hand2",
+                  command=lambda: self._change_slots(-1)).pack(side="left", padx=1)
+        tk.Button(info_bar, text="▲", font=small_font, width=2,
+                  bg=BG_INACTIVE, fg=FG_WHITE, relief="flat", cursor="hand2",
+                  command=lambda: self._change_slots(+1)).pack(side="left", padx=(1, 10))
         self.lbl_limit   = tk.Label(info_bar, text="Napi limit: OK",
                                     bg=BG_HEADER, fg=FG_GREEN, font=info_font)
         self.lbl_limit.pack(side="left", padx=10)
@@ -1175,7 +1231,10 @@ class DashboardWindow:
             pos_state=_pos_state,
             digits_provider=lambda sym: getattr(self.dashboard_ref.get(sym), "digits", 5),
             on_be=self._pos_be, on_trail=self._pos_trail,
-            on_panic=self._pos_panic, on_close_all=self._pos_close_all)
+            on_panic=self._pos_panic, on_close_all=self._pos_close_all,
+            on_name_click=self._show_instrument_params,
+            on_trail_dist=self._pos_trail_dist,
+            trail_default_provider=self._trail_default)
 
         bt_frame = tk.Frame(self._notebook, bg=BG_BT)
         self._notebook.add(bt_frame, text="  Portfólió Backtest  ")
@@ -1370,13 +1429,14 @@ class DashboardWindow:
                  font=self._small_font, insertbackground=FG_WHITE,
                  relief="flat").pack(padx=12, pady=(0, 6))
         in_config = set(self.rows.keys())
-        available: list = []   # háttérszálból töltődik
+        available: list = []      # háttérszálból töltődik: [(name, description), ...]
+        shown_names: list = []    # a listbox aktuális soraival igazított névlista
 
         frame_lb = tk.Frame(popup, bg=BG)
         frame_lb.pack(padx=12, fill="both", expand=True)
         scrollbar = tk.Scrollbar(frame_lb)
         scrollbar.pack(side="right", fill="y")
-        listbox = tk.Listbox(frame_lb, width=30, height=18, bg=BG_HEADER, fg=FG_WHITE,
+        listbox = tk.Listbox(frame_lb, width=46, height=18, bg=BG_HEADER, fg=FG_WHITE,
                              selectbackground=BTN_OPT_BG, font=self._small_font,
                              relief="flat", yscrollcommand=scrollbar.set)
         listbox.pack(side="left", fill="both", expand=True)
@@ -1385,9 +1445,14 @@ class DashboardWindow:
         def refresh_list(*_):
             q = search_var.get().upper()
             listbox.delete(0, "end")
-            for s in available:
-                if q in s.upper():
-                    listbox.insert("end", s)
+            shown_names.clear()
+            for name, desc in available:
+                # Keresés névre ÉS leírásra is
+                if q and q not in name.upper() and q not in (desc or "").upper():
+                    continue
+                label = f"{name:<12} {desc}" if desc else name
+                listbox.insert("end", label)
+                shown_names.append(name)
         search_var.trace_add("write", refresh_list)
 
         lbl_info = tk.Label(popup, text="Szimbólumok betöltése...", bg=BG,
@@ -1399,10 +1464,11 @@ class DashboardWindow:
             try:
                 import MetaTrader5 as mt5
                 syms = mt5.symbols_get()
-                all_syms = sorted(s.name for s in syms) if syms else []
+                pairs = sorted(((s.name, getattr(s, "description", "")) for s in syms),
+                               key=lambda x: x[0]) if syms else []
             except Exception:
-                all_syms = []
-            result = [s for s in all_syms if s not in in_config]
+                pairs = []
+            result = [(n, d) for n, d in pairs if n not in in_config]
 
             def _apply():
                 if not popup.winfo_exists():
@@ -1413,7 +1479,8 @@ class DashboardWindow:
                     lbl_info.config(
                         text="Minden MT5 szimbólum már szerepel a listában.", fg=FG_YELLOW)
                 else:
-                    lbl_info.config(text=f"{len(result)} elérhető szimbólum.", fg=FG_GRAY)
+                    lbl_info.config(text=f"{len(result)} elérhető szimbólum "
+                                         f"(név + leírás).", fg=FG_GRAY)
             try:
                 self.root.after(0, _apply)
             except Exception:
@@ -1424,7 +1491,7 @@ class DashboardWindow:
             sel = listbox.curselection()
             if not sel:
                 return
-            self._add_instrument(listbox.get(sel[0]))
+            self._add_instrument(shown_names[sel[0]])
             popup.destroy()
 
         btn_frame = tk.Frame(popup, bg=BG)
@@ -1445,12 +1512,14 @@ class DashboardWindow:
         # és a widget-építés a FŐ szálon (tkinter csak onnan biztonságos).
         def _work():
             pip_size, pv1_usd, spread_pips = 0.0001, 10.0, 1.5
+            description = ""
             try:
                 import MetaTrader5 as _mt5
                 from core.mt5_connector import MT5_LOCK
                 with MT5_LOCK:
                     info = _mt5.symbol_info(symbol)
                 if info:
+                    description = getattr(info, "description", "") or ""
                     d = info.digits
                     if d in (4, 5):
                         pip_size = info.point * 10
@@ -1467,18 +1536,20 @@ class DashboardWindow:
             try:
                 self.root.after(
                     0, lambda: self._finalize_add_instrument(
-                        symbol, pip_size, pv1_usd, spread_pips))
+                        symbol, pip_size, pv1_usd, spread_pips, description))
             except Exception:
                 pass
         threading.Thread(target=_work, daemon=True, name="MT5AddInstr").start()
 
-    def _finalize_add_instrument(self, symbol, pip_size, pv1_usd, spread_pips):
+    def _finalize_add_instrument(self, symbol, pip_size, pv1_usd, spread_pips,
+                                 description=""):
         """A fő szálon fut: config-írás + dashboard state + új tábla-sor."""
         if symbol in self.rows:
             return
         self.cfg["pairs"][symbol] = {
             "enabled": False, "pip_size": pip_size, "pv1_usd": pv1_usd,
             "backtest_spread_pips": spread_pips, "sess_start": 0, "sess_end": 24,
+            "description": description,
         }
         try:
             with open(ROOT / "config.json", "w", encoding="utf-8") as f:
@@ -1685,10 +1756,25 @@ class DashboardWindow:
                 return
             popup.destroy()
 
+        # Az optimalizálás által mentett teljes eredménytáblázat (ha van)
+        trials_csv = PARAMS_DIR / f"{symbol}_trials.csv"
+
+        def open_trials():
+            if not trials_csv.exists():
+                lbl_err.config(text="Nincs trials CSV — futtass optimalizálást előbb.")
+                return
+            try:
+                import os
+                os.startfile(str(trials_csv))   # Windows: alapértelmezett app (Excel)
+            except Exception as ex:
+                lbl_err.config(text=f"Megnyitási hiba: {ex}")
+
         btns = tk.Frame(popup, bg=BG)
         btns.pack(pady=10)
         tk.Button(btns, text="Mentés", bg=BTN_PLAY_BG, fg=BTN_PLAY_FG, relief="flat",
                   font=self._small_font, command=save).pack(side="left", padx=6)
+        tk.Button(btns, text="Trials CSV", bg=BTN_BT_BG, fg=BTN_BT_FG, relief="flat",
+                  font=self._small_font, command=open_trials).pack(side="left", padx=6)
         tk.Button(btns, text="Mégse", bg=BTN_DIS_BG, fg=BTN_DIS_FG, relief="flat",
                   font=self._small_font, command=popup.destroy).pack(side="left", padx=6)
 
@@ -1822,8 +1908,32 @@ class DashboardWindow:
     def _pos_trail(self, ticket: int):
         from trading.live_trader import position_state
         st = position_state.setdefault(
-            ticket, {"original_sl": 0.0, "trailing_enabled": True, "be_done": False})
+            ticket, {"original_sl": 0.0, "trailing_enabled": True, "be_done": False,
+                     "trail_distance": None})
         st["trailing_enabled"] = not st.get("trailing_enabled", True)
+
+    def _pos_trail_dist(self, ticket: int, value: float):
+        """Kézi trail-távolság beállítása egy ticketre (Pozíciók fül)."""
+        from trading.live_trader import position_state
+        st = position_state.setdefault(
+            ticket, {"original_sl": 0.0, "trailing_enabled": True, "be_done": False,
+                     "trail_distance": None})
+        st["trail_distance"] = value
+
+    def _trail_default(self, symbol: str) -> Optional[float]:
+        """Egy szimbólum optimalizált trail-távolsága (a Pozíciók fül mezőjéhez).
+        Ha nincs optimalizált érték, a position_mgmt alapérték."""
+        from ml.optimizer import PARAMS_DIR
+        pf = PARAMS_DIR / f"{symbol}.json"
+        if pf.exists():
+            try:
+                with open(pf, encoding="utf-8") as f:
+                    params = json.load(f).get("params", {})
+                if "trail_distance_pips" in params:
+                    return float(params["trail_distance_pips"])
+            except Exception:
+                pass
+        return self.cfg.get("position_mgmt", {}).get("trail_distance_pips")
 
     def _handle_connect(self):
         # A connect() blokkoló MT5-login — háttérszálon, hogy a UI ne fagyjon.
@@ -1845,6 +1955,33 @@ class DashboardWindow:
     def set_slots(self, free: int, max_s: int):
         self._free_slots = free
         self._max_slots  = max_s
+
+    def _change_slots(self, delta: int):
+        """Max slotszám növelése/csökkentése a felületről.
+        Csökkenteni csak a jelenleg FOGLALT (nyitott) slotok számáig lehet —
+        egy nyitott pozíciót sosem 'zárunk ki' a limit alá szorítással."""
+        occupied = max(0, self._max_slots - self._free_slots)
+        new_max  = self._max_slots + delta
+        if new_max < 1 or new_max < occupied:
+            return
+        self._max_slots  = new_max
+        self._free_slots = max(0, new_max - occupied)
+        # A motor SlotManager-ének frissítése (élő módban)
+        if self._on_slots_change:
+            try:
+                self._on_slots_change(new_max)
+            except Exception:
+                pass
+        # Perzisztálás a config.json-ba
+        self.cfg["trading"]["max_open_slots"] = new_max
+        try:
+            with open(ROOT / "config.json", "w", encoding="utf-8") as f:
+                json.dump(self.cfg, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+        self.lbl_slots.config(
+            text=f"Szabad slotok: {self._free_slots}/{self._max_slots}",
+            fg=FG_GREEN if self._free_slots > 0 else FG_RED)
 
     # ── Kapcsolat UI ────────────────────────────────────────────────────
     def _update_connection_ui(self, info: dict):
