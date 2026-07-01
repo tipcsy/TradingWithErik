@@ -84,12 +84,25 @@ def daily_pnl() -> Optional[float]:
         return None
 
 
+def _pos_risk_free(p) -> bool:
+    """Kockázatmentes-e a pozíció: az SL már a belépőn TÚL van a profit irányában.
+    Ugyanaz az elv, mint a SlotManager induló helyreállításánál — így a kijelzés és
+    a slot-számolás egyezik a motor logikájával."""
+    if not p.sl or p.sl == 0.0:
+        return False
+    if p.type == 0:                 # BUY
+        return p.sl >= p.price_open
+    return p.sl <= p.price_open     # SELL
+
+
 def open_positions_by_symbol() -> dict:
     """
     Visszaadja az MT5-ben nyitott pozíciókat szimbólum szerint AGGREGÁLVA.
     Egy szimbólumon több pozíció is lehet → összegzett P&L + darabszám.
-    {symbol: {"pnl": float, "count": int, "direction": "BUY"|"SELL"|"MIX",
-              "risk_free": False}}
+    {symbol: {"pnl": float, "count": int, "occupied": int,
+              "direction": "BUY"|"SELL"|"MIX", "risk_free": bool}}
+      - occupied: a NEM kockázatmentes pozíciók száma (ennyi slotot foglal valóban)
+      - risk_free: True, ha a szimbólum teljes kitettsége kockázatmentes
     """
     try:
         with MT5_LOCK:
@@ -99,13 +112,17 @@ def open_positions_by_symbol() -> dict:
         result = {}
         for pos in positions:
             agg = result.setdefault(pos.symbol, {
-                "pnl": 0.0, "count": 0, "direction": None, "risk_free": False})
+                "pnl": 0.0, "count": 0, "occupied": 0,
+                "direction": None, "risk_free": False})
             agg["pnl"]   += pos.profit
             agg["count"] += 1
+            if not _pos_risk_free(pos):
+                agg["occupied"] += 1
             d = "BUY" if pos.type == 0 else "SELL"
             agg["direction"] = d if agg["direction"] in (None, d) else "MIX"
         for agg in result.values():
             agg["pnl"] = round(agg["pnl"], 2)
+            agg["risk_free"] = (agg["occupied"] == 0)   # minden pozíció kockázatmentes
         return result
     except Exception:
         return {}
@@ -132,6 +149,7 @@ def open_positions_detailed() -> list:
                 "tp":            p.tp,
                 "profit":        round(p.profit + p.swap, 2),
                 "magic":         p.magic,
+                "risk_free":     _pos_risk_free(p),
             })
         return out
     except Exception:

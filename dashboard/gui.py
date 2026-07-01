@@ -2469,7 +2469,10 @@ class DashboardWindow:
                               fg=FG_RED if limit_hit else FG_GREEN)
 
         if mt5_positions is not None:
-            occupied = sum(p.get("count", 1) for p in mt5_positions.values())
+            # Csak a NEM kockázatmentes pozíciók foglalnak slotot (a kockázatmentes
+            # felszabadítja) — egyezik a motor SlotManager-ének logikájával.
+            occupied = sum(p.get("occupied", p.get("count", 1))
+                           for p in mt5_positions.values())
             self._free_slots = max(0, self._max_slots - occupied)
             free = self._free_slots
             self.lbl_slots.config(text=f"Szabad slotok: {free}/{self._max_slots}",
