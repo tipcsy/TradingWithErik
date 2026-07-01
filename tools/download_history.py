@@ -224,7 +224,28 @@ def download_pair(symbol: str, tf_str: str, start: datetime, overwrite: bool, en
     ohlcv = _download_via_ticks(symbol, tf_str, start, end)
 
     if ohlcv.empty:
-        log.warning("%s %s — nincs letölthető adat.", symbol, tf_str)
+        # Fallback: natív bar letöltés (ha tick adat nem elérhető, pl. crypto CFD-k)
+        log.info("%s %s — tick adat nem elérhető, próba natív barral...", symbol, tf_str)
+        tf_mt5 = TF_MAP[tf_str]
+        with _MT5_LOCK:
+            raw = mt5.copy_rates_range(
+                symbol, tf_mt5,
+                start.replace(tzinfo=None),
+                end.replace(tzinfo=None),
+            )
+        if raw is not None and len(raw) > 0:
+            df_fb = pd.DataFrame(raw)
+            df_fb["time"] = pd.to_datetime(df_fb["time"], unit="s", utc=True)
+            df_fb = df_fb.set_index("time")
+            ohlcv = df_fb[["open", "high", "low", "close", "tick_volume"]].rename(
+                columns={"tick_volume": "volume"}
+            )
+            log.info("%s %s — natív bar fallback: %d gyertya [%s → %s]",
+                     symbol, tf_str, len(ohlcv),
+                     str(ohlcv.index[0])[:10], str(ohlcv.index[-1])[:10])
+
+    if ohlcv.empty:
+        log.warning("%s %s — nincs letölthető adat (tick és natív bar is üres).", symbol, tf_str)
         return False
 
     ohlcv.to_parquet(out_file)

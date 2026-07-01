@@ -397,6 +397,11 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
             history = mt5.history_deals_get(position=ticket)
             if history:
                 last_deal = history[-1]
+                # Csak a SAJÁT szimbólum ticketjeit kezeljük — másik pár
+                # feldolgozási körében ne írjuk rá ennek P&L-jét a wrong ds/state-re.
+                # (Ez okozta az UKOUSD zárt kereskedés P&L-jének EURUSD sorba kerülését.)
+                if last_deal.symbol != symbol:
+                    continue
                 pnl = last_deal.profit + last_deal.commission + last_deal.swap
                 state.daily_pnl += pnl
                 ds.daily_pnl     = state.daily_pnl

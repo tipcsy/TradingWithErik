@@ -9,11 +9,14 @@ tudja használni.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from typing import Optional, Any
 
 import pandas as pd
+
+log = logging.getLogger(__name__)
 
 from strategy.base import (
     Strategy, Column, StrategyColumn, CountdownColumn, MarketData, Cell, Timeframe,
@@ -209,11 +212,21 @@ class WprSmaStrategy(Strategy):
                 params=md.params,
             )
 
+        cur_m1_wpr = float(m1_closed["wpr"])
         signal = "NONE"
         if state.prev_m1_wpr is not None:
             signal = check_m1_entry(state.signal, state.prev_m1_wpr,
-                                    float(m1_closed["wpr"]), md.params)
-        state.prev_m1_wpr = float(m1_closed["wpr"])
+                                    cur_m1_wpr, md.params)
+        if signal != "NONE":
+            log.info(
+                "📊 %s → %s jelzés | M15 zárt WPR: %.1f (ablak: %s) | M1 WPR: %.1f → %.1f",
+                md.symbol, signal,
+                float(m15_closed["wpr"]),
+                "NYITVA" if state.signal.m15_window_open else "ZÁRVA",
+                state.prev_m1_wpr if state.prev_m1_wpr is not None else float("nan"),
+                cur_m1_wpr,
+            )
+        state.prev_m1_wpr = cur_m1_wpr
         return state, signal
 
     # --- Optimalizálás ----------------------------------------------------
