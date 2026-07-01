@@ -8,3 +8,7 @@ data/opt_error.log
 .venv/
 venv/
 config.json
+# Jelszót tartalmazó config-másolatok — sose kerüljenek fel
+config*másolata*.json
+config*copy*.json
+config.local.json

@@ -10,7 +10,10 @@
     "all_refresh_sec": 30,
     "watchdog_threshold_sec": 2.0,
     "_comment_countdown": "Mely időkeretek visszaszámlálója látszik a felső sávban (percben). Üres/hiányzó = a stratégia összes időkerete.",
-    "countdown_timeframes": [15, 1]
+    "countdown_timeframes": [
+      15,
+      1
+    ]
   },
   "quality": {
     "_comment": "Optimalizált instrumentum minősítési küszöbei (Minőség oszlop). Legrosszabb-elv: a pár a legrosszabb elért kategóriát kapja.",
@@ -202,8 +205,9 @@
     "method": "optuna",
     "max_trials": 500,
     "max_parallel_optimizers": 2,
-    "_comment_timeout": "Egy optimalizálás max ideje mp-ben; ennyi után beragadás-védelem zárja le (a UI nem ragad be).",
-    "timeout_sec": 1800,
+    "_comment_timeout": "Beragadás-védelem: NEM a teljes futásidőt limitálja (ezek hosszú folyamatok!), hanem azt figyeli, halad-e. stall_timeout_sec: ennyi mp NINCS haladás = beragadt, lezárja. hard_timeout_sec: opcionális abszolút végső határ mp-ben (0 = kikapcsolva).",
+    "stall_timeout_sec": 900,
+    "hard_timeout_sec": 0,
     "_comment_wf": "Walk-forward: n_splits ablak, mindegyikben train_months tanítás + test_months validálás",
     "wf_n_splits": 4,
     "wf_train_months": 6,
@@ -538,7 +542,7 @@
       "contract_size": 1.0
     },
     "Nikkei225": {
-      "enabled": false,
+      "enabled": true,
       "pip_size": 0.1,
       "min_lot": 1.0,
       "lot_step": 1.0,
@@ -549,7 +553,7 @@
       "contract_size": 1.0
     },
     "DJ30": {
-      "enabled": false,
+      "enabled": true,
       "pip_size": 0.1,
       "min_lot": 0.1,
       "lot_step": 0.1,
@@ -560,7 +564,7 @@
       "contract_size": 1.0
     },
     "EU50": {
-      "enabled": false,
+      "enabled": true,
       "pip_size": 0.1,
       "min_lot": 0.1,
       "lot_step": 0.1,
@@ -571,7 +575,7 @@
       "contract_size": 1.0
     },
     "XAUUSD": {
-      "enabled": false,
+      "enabled": true,
       "pip_size": 0.1,
       "min_lot": 0.01,
       "lot_step": 0.01,
@@ -582,7 +586,7 @@
       "contract_size": 100.0
     },
     "XAGUSD": {
-      "enabled": false,
+      "enabled": true,
       "pip_size": 0.01,
       "min_lot": 0.01,
       "lot_step": 0.01,
@@ -593,7 +597,7 @@
       "contract_size": 5000.0
     },
     "UKOUSD": {
-      "enabled": false,
+      "enabled": true,
       "pip_size": 0.01,
       "min_lot": 0.01,
       "lot_step": 0.01,
@@ -615,7 +619,7 @@
       "contract_size": 10000.0
     },
     "BTCUSD": {
-      "enabled": false,
+      "enabled": true,
       "pip_size": 0.1,
       "pv1_usd": 0.0878,
       "backtest_spread_pips": 1.5,
