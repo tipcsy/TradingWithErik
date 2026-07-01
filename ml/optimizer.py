@@ -306,13 +306,47 @@ def optimize_pair_optuna(
     best_score_so_far = [-float("inf")]
     trial_rows: list[dict] = []   # minden trial eredménye → CSV export
 
+    def _record_trial(params, score, summary=None, note=""):
+        """Egy trial sora a CSV-hez — MINDEN trialról (érvénytelen/0-trade is),
+        hogy az eredménytáblázat mindig létrejöjjön és lássék, mi történt.
+        note: elbukás oka (pl. hiányzó config-kulcs), hogy a CSV-ből kiderüljön."""
+        row = {"score": round(score, 2) if score > -999999.0 else score}
+        if summary:
+            pf = summary["profit_factor"]
+            row.update({
+                "trades":        summary["trades"],
+                "win_rate":      round(summary["win_rate"], 4),
+                "total_pnl":     round(summary["total_pnl"], 2),
+                "max_drawdown":  round(summary["max_drawdown"], 4),
+                "profit_factor": round(pf, 3) if pf != float("inf") else "inf",
+            })
+        else:
+            row["trades"] = 0
+        row["note"] = note
+        for pk, pv in params.items():
+            if not pk.startswith("_"):
+                row[pk] = pv
+        trial_rows.append(row)
+
     def objective(trial):
+        # ── Haladás MINDEN trialnál, a korai return ELŐTT ──────────────────
+        # (Különben a sok érvénytelen trial esetén — pl. BTCUSD — a GUI
+        #  stall-timeoutot dob, a CLI nem mutat haladást, és CSV sem készül.)
+        call_count[0] += 1
+        if call_count[0] == 1 or call_count[0] % 10 == 0:
+            log.info("  %s — %d/%d trial | legjobb score: %.2f",
+                     symbol, call_count[0], n_trials, best_score_so_far[0])
+            if progress_callback:
+                progress_callback(call_count[0], n_trials, best_score_so_far[0])
+
         params = _suggest_params(trial, opt_cfg, base_params)
         if not _wpr_constraints_ok(params):
+            _record_trial(params, -999999.0, note="WPR feltétel nem teljesült")
             return -999999.0
 
         window_scores = []
         combined_test = []          # az összes ablak TEST-trade-jei (CSV metrikákhoz)
+        last_err = ""               # utolsó kivétel szövege (diagnosztika a CSV-be)
         for w in windows:
             try:
                 # Teljes ablak adat (train + test) — az indikátorok warmuphoz kellenek
@@ -334,11 +368,15 @@ def optimize_pair_optuna(
                 combined_test.extend(test_trades)
                 window_scores.append(_score_trades(test_trades, initial_balance))
 
-            except Exception:
+            except Exception as e:
+                last_err = f"{type(e).__name__}: {e}"
                 window_scores.append(-999999.0)
 
         valid = [s for s in window_scores if s > -999999.0]
         if not valid:
+            # Ha kivétel volt → az az ok; ha nem, akkor tényleg nincs értékelhető trade.
+            _record_trial(params, -999999.0,
+                          note=last_err or "nincs értékelhető trade a TEST ablakokban")
             return -999999.0
 
         # Átlag × konzisztencia arány (hány ablak működött)
@@ -348,6 +386,7 @@ def optimize_pair_optuna(
 
         # ── Sor az eredménytáblázathoz (összes ablak TEST-metrikái + params) ──
         pnl_list = [t.pnl_usd for t in combined_test]
+        summary = None
         if pnl_list:
             wins   = [p for p in pnl_list if p > 0]
             losses = [p for p in pnl_list if p <= 0]
@@ -358,29 +397,17 @@ def optimize_pair_optuna(
                 peak = max(peak, bal)
                 mdd  = max(mdd, (peak - bal) / peak if peak > 0 else 0)
             pf = abs(sum(wins) / sum(losses)) if losses and sum(losses) != 0 else float("inf")
-            row = {
-                "score":         round(final_score, 2),
+            summary = {
                 "trades":        len(pnl_list),
-                "win_rate":      round(len(wins) / len(pnl_list), 4),
-                "total_pnl":     round(sum(pnl_list), 2),
-                "max_drawdown":  round(mdd, 4),
-                "profit_factor": round(pf, 3) if pf != float("inf") else "inf",
+                "win_rate":      len(wins) / len(pnl_list),
+                "total_pnl":     sum(pnl_list),
+                "max_drawdown":  mdd,
+                "profit_factor": pf,
             }
-            for pk, pv in params.items():
-                if not pk.startswith("_"):
-                    row[pk] = pv
-            trial_rows.append(row)
+        _record_trial(params, final_score, summary)
 
-        # Progress log/callback gyakran (10 trialonként) — a "nem halad" figyelő
-        # így friss jelet kap, és a UI %-a is sűrűbben frissül.
-        call_count[0] += 1
         if final_score > best_score_so_far[0]:
             best_score_so_far[0] = final_score
-        if call_count[0] % 10 == 0:
-            log.info("  %s — %d/%d trial | legjobb score: %.2f",
-                     symbol, call_count[0], n_trials, best_score_so_far[0])
-            if progress_callback:
-                progress_callback(call_count[0], n_trials, best_score_so_far[0])
 
         return final_score
 

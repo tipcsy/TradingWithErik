@@ -32,8 +32,10 @@ def calc_lot(
     risk_per_slot = total_risk / effective_slots
 
     pip_value  = pair_cfg["pv1_usd"]   # 1 lot, 1 pip mozgás USD értéke
-    lot_step   = pair_cfg["lot_step"]
-    min_lot    = pair_cfg["min_lot"]
+    # min_lot/lot_step hiányozhat (pl. GUI-ból hozzáadott vagy hiányos config) →
+    # biztonságos alapérték, hogy az optimalizálás/backteszt ne szálljon el csendben.
+    lot_step   = pair_cfg.get("lot_step", 0.01)
+    min_lot    = pair_cfg.get("min_lot", 0.01)
 
     if sl_pips <= 0 or pip_value <= 0:
         return min_lot
@@ -58,7 +60,7 @@ def calc_effective_slots(
     total_risk = balance * risk_pct
 
     pip_value = pair_cfg["pv1_usd"]
-    min_lot   = pair_cfg["min_lot"]
+    min_lot   = pair_cfg.get("min_lot", 0.01)
 
     actual_risk = min_lot * sl_pips * pip_value
 

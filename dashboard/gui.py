@@ -140,7 +140,8 @@ def _fixed_cell(key: str, ds, opt_status: str, inst_state: str) -> tuple[str, st
 
 class PairRow:
     def __init__(self, parent: tk.Frame, symbol: str, row_idx: int, columns: list,
-                 on_run, on_opt, on_delete, on_risky, on_name_click, mono_font, small_font):
+                 on_run, on_opt, on_delete, on_risky, on_name_click, mono_font, small_font,
+                 on_status_click=None):
         self.symbol  = symbol
         self.columns = columns
         self._bg     = BG_ROW_ODD if row_idx % 2 == 0 else BG_ROW_EVEN
@@ -159,6 +160,11 @@ class PairRow:
         # A Symbol cellára kattintva → optimalizált paraméterek szerkesztője
         self.labels["symbol"].config(cursor="hand2")
         self.labels["symbol"].bind("<Button-1>", lambda e: on_name_click(symbol))
+
+        # Az Opt státusz cellára kattintva → részletes állapot / hibalog / trials CSV
+        if on_status_click and "opt" in self.labels:
+            self.labels["opt"].config(cursor="hand2")
+            self.labels["opt"].bind("<Button-1>", lambda e: on_status_click(symbol))
 
         # Egy gomb a futtatáshoz (Play↔Stop morph) és egy az OPT-hoz (OPT↔STOP morph)
         self.btn_run = tk.Button(self.frame, text="▶", width=3,
@@ -501,11 +507,16 @@ class OptimizerController:
                         idle = now - self._last_progress.get(symbol, now)
                         if idle > stall_sec:
                             fut.cancel()
+                            self._log_error(symbol,
+                                f"BERAGADT: {int(idle)} mp nincs haladás "
+                                f"(stall_timeout_sec={stall_sec}). Lehet lassú (nagy adat) "
+                                f"vagy tényleg elakadt. Nézd meg a trials CSV-t, ha létrejött.")
                             self.optimizer_status[symbol] = \
                                 f"Hiba: beragadt ({int(idle//60)} perc nincs haladás)"
                             return   # a finally STOPPED-ra állít → UI nem ragad be
                         if hard_cap and (now - t_submit) > hard_cap:
                             fut.cancel()
+                            self._log_error(symbol, f"ABSZOLÚT IDŐLIMIT ({hard_cap} mp) elérve.")
                             self.optimizer_status[symbol] = "Hiba: abszolút időlimit"
                             return
             else:
@@ -513,8 +524,8 @@ class OptimizerController:
 
             if "error" in entry:
                 self.optimizer_status[symbol] = f"Hiba: {entry['error']}"
-                if entry.get("traceback"):
-                    self._log_error(symbol, entry["traceback"])
+                self._log_error(
+                    symbol, entry.get("traceback") or f"eredmény hiba: {entry['error']}")
                 return
 
             full = {
@@ -1419,7 +1430,8 @@ class DashboardWindow:
                 on_run=self._handle_run, on_opt=self._handle_opt,
                 on_delete=self._handle_delete, on_risky=self._handle_risky,
                 on_name_click=self._show_instrument_params,
-                mono_font=mono_font, small_font=small_font)
+                mono_font=mono_font, small_font=small_font,
+                on_status_click=self._show_opt_log)
 
         self._apply_filter_sort()
 
@@ -1592,6 +1604,7 @@ class DashboardWindow:
         # és a widget-építés a FŐ szálon (tkinter csak onnan biztonságos).
         def _work():
             pip_size, pv1_usd, spread_pips = 0.0001, 10.0, 1.5
+            min_lot, lot_step = 0.01, 0.01
             description = ""
             try:
                 import MetaTrader5 as _mt5
@@ -1611,23 +1624,28 @@ class DashboardWindow:
                     pv1_usd = round(tv / ts * pip_size, 4) if ts > 0 else tv
                     spread_pips = round(info.spread * info.point / pip_size, 1) \
                                   if pip_size > 0 else 1.5
+                    # Lot-korlátok a brókertől — enélkül az optimalizálás/backteszt elszáll
+                    min_lot  = getattr(info, "volume_min", 0.01) or 0.01
+                    lot_step = getattr(info, "volume_step", 0.01) or 0.01
             except Exception:
                 pass
             try:
                 self.root.after(
                     0, lambda: self._finalize_add_instrument(
-                        symbol, pip_size, pv1_usd, spread_pips, description))
+                        symbol, pip_size, pv1_usd, spread_pips, description,
+                        min_lot, lot_step))
             except Exception:
                 pass
         threading.Thread(target=_work, daemon=True, name="MT5AddInstr").start()
 
     def _finalize_add_instrument(self, symbol, pip_size, pv1_usd, spread_pips,
-                                 description=""):
+                                 description="", min_lot=0.01, lot_step=0.01):
         """A fő szálon fut: config-írás + dashboard state + új tábla-sor."""
         if symbol in self.rows:
             return
         self.cfg["pairs"][symbol] = {
             "enabled": False, "pip_size": pip_size, "pv1_usd": pv1_usd,
+            "min_lot": min_lot, "lot_step": lot_step,
             "backtest_spread_pips": spread_pips, "sess_start": 0, "sess_end": 24,
             "description": description,
         }
@@ -1649,7 +1667,8 @@ class DashboardWindow:
             on_run=self._handle_run, on_opt=self._handle_opt,
             on_delete=self._handle_delete, on_risky=self._handle_risky,
             on_name_click=self._show_instrument_params,
-            mono_font=self._mono_font, small_font=self._small_font)
+            mono_font=self._mono_font, small_font=self._small_font,
+            on_status_click=self._show_opt_log)
         self._apply_filter_sort()
 
     # ── JSON szintaxis-színezés (Text widgethez) ─────────────────────────
@@ -1857,6 +1876,87 @@ class DashboardWindow:
                   font=self._small_font, command=open_trials).pack(side="left", padx=6)
         tk.Button(btns, text="Mégse", bg=BTN_DIS_BG, fg=BTN_DIS_FG, relief="flat",
                   font=self._small_font, command=popup.destroy).pack(side="left", padx=6)
+
+    # ── Opt státusz részletek (a státusz-cellára kattintva) ──────────────
+    @staticmethod
+    def _read_opt_log_for(symbol: str, max_blocks: int = 6) -> str:
+        """Az adott instrumentumhoz tartozó legutóbbi hiba-blokkok az opt_error.log-ból."""
+        log_file = ROOT / "data" / "opt_error.log"
+        if not log_file.exists():
+            return ""
+        try:
+            with open(log_file, encoding="utf-8") as f:
+                raw = f.read()
+        except Exception:
+            return ""
+        sep = "=" * 60
+        blocks = [b for b in raw.split(sep) if f"[{symbol}]" in b]
+        return sep.join(blocks[-max_blocks:]).strip() if blocks else ""
+
+    def _show_opt_log(self, symbol: str):
+        """Részletes optimalizálási állapot: státusz + trials CSV + hibalog."""
+        popup = tk.Toplevel(self.root)
+        popup.title(f"{symbol} — Optimalizálás állapota")
+        popup.configure(bg=BG)
+        popup.geometry("780x540")
+        popup.grab_set()
+
+        state  = self.instrument_state.get(symbol, "—")
+        status = self.optimizer_status.get(symbol, "—")
+        tk.Label(popup, text=f"{symbol}   —   állapot: {state}", bg=BG, fg=FG_BLUE,
+                 font=self._header_font).pack(anchor="w", padx=10, pady=(10, 2))
+        tk.Label(popup, text=f"Státusz (teljes): {status}", bg=BG, fg=FG_WHITE,
+                 font=self._small_font, anchor="w", justify="left",
+                 wraplength=740).pack(anchor="w", padx=10)
+
+        # Trials CSV állapota + megnyitás
+        from ml.optimizer import PARAMS_DIR
+        csv = PARAMS_DIR / f"{symbol}_trials.csv"
+        row = tk.Frame(popup, bg=BG)
+        row.pack(anchor="w", padx=10, pady=(6, 0))
+        if csv.exists():
+            try:
+                with open(csv, encoding="utf-8-sig") as f:
+                    n = max(0, sum(1 for _ in f) - 1)
+            except Exception:
+                n = "?"
+            tk.Label(row, text=f"Trials CSV: {n} sor  —  {csv.name}", bg=BG,
+                     fg=FG_GREEN, font=self._small_font).pack(side="left")
+            tk.Button(row, text="Megnyitás", bg=BTN_BT_BG, fg=BTN_BT_FG, relief="flat",
+                      font=self._small_font,
+                      command=lambda: self._open_file(csv)).pack(side="left", padx=8)
+        else:
+            tk.Label(row, text="Trials CSV: nincs (még nem futott le, vagy egy trial "
+                               "sem készült el).", bg=BG, fg=FG_YELLOW,
+                     font=self._small_font).pack(side="left")
+
+        tk.Label(popup, text="Legutóbbi hibák/események (data/opt_error.log):",
+                 bg=BG, fg=FG_GRAY, font=self._small_font).pack(anchor="w", padx=10, pady=(8, 0))
+
+        txt_frame = tk.Frame(popup, bg=BG)
+        txt_frame.pack(fill="both", expand=True, padx=10, pady=4)
+        sb = tk.Scrollbar(txt_frame)
+        sb.pack(side="right", fill="y")
+        text = tk.Text(txt_frame, bg=BG_HEADER, fg=FG_WHITE, insertbackground=FG_WHITE,
+                       font=self._mono_font, wrap="word", yscrollcommand=sb.set)
+        text.pack(side="left", fill="both", expand=True)
+        sb.config(command=text.yview)
+        content = self._read_opt_log_for(symbol)
+        text.insert("1.0", content or "(Nincs naplózott hiba ehhez az instrumentumhoz. "
+                                      "Ha a Trials CSV létezik, az optimalizálás lefutott — "
+                                      "nyisd meg és nézd meg a score oszlopot.)")
+        text.config(state="disabled")
+
+        tk.Button(popup, text="Bezár", bg=BTN_DIS_BG, fg=BTN_DIS_FG, relief="flat",
+                  font=self._small_font, command=popup.destroy).pack(pady=8)
+
+    @staticmethod
+    def _open_file(path):
+        try:
+            import os
+            os.startfile(str(path))
+        except Exception:
+            pass
 
     # ── Gomb handlerek ────────────────────────────────────────────────────
     def _handle_run(self, symbol: str):

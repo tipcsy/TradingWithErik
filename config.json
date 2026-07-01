@@ -621,6 +621,8 @@
     "BTCUSD": {
       "enabled": true,
       "pip_size": 0.1,
+      "min_lot": 0.01,
+      "lot_step": 0.01,
       "pv1_usd": 0.0878,
       "backtest_spread_pips": 1.5,
       "sess_start": 0,
