@@ -939,15 +939,17 @@ class PortfolioBacktestTab:
 # ---------------------------------------------------------------------------
 
 POSITION_COLUMNS = [
-    ("symbol",  "Symbol", 10, "w"),
-    ("type",    "Irány",   6, "center"),
-    ("volume",  "Lot",     6, "center"),
-    ("open",    "Nyitó",  10, "center"),
-    ("current", "Akt.",   10, "center"),
-    ("sl",      "SL",     10, "center"),
-    ("tp",      "TP",     10, "center"),
-    ("orig_sl", "Er. SL", 10, "center"),
-    ("pnl",     "P&L",     9, "center"),
+    ("symbol",  "Symbol",     10, "w"),
+    ("type",    "Irány",       6, "center"),
+    ("volume",  "Lot",         6, "center"),
+    ("open",    "Nyitó",      10, "center"),
+    ("current", "Akt.",       10, "center"),
+    ("dist",    "Belépő táv",  9, "center"),   # pont a belépőtől (profit-irányban)
+    ("sl",      "SL",         10, "center"),
+    ("sl_pnl",  "SL P&L",      9, "center"),   # lekötött eredmény, ha az SL bekövetkezik
+    ("tp",      "TP",         10, "center"),
+    ("orig_sl", "Er. SL",     10, "center"),
+    ("pnl",     "P&L",         9, "center"),
 ]
 
 
@@ -1002,7 +1004,7 @@ class PositionRow:
         if val > 0:
             self._on_trail_dist(self.ticket, val)
 
-    def update(self, pos, pstate, digits, trail_default=None):
+    def update(self, pos, pstate, digits, trail_default=None, point=None):
         self._symbol = pos["symbol"]
         self.labels["symbol"].config(text=pos["symbol"])
         t = pos["type"]
@@ -1010,6 +1012,30 @@ class PositionRow:
         self.labels["volume"].config(text=f'{pos["volume"]:.2f}', fg=FG_WHITE)
         self.labels["open"].config(text=_fmt_price(pos["price_open"], digits), fg=FG_GRAY)
         self.labels["current"].config(text=_fmt_price(pos["price_current"], digits), fg=FG_WHITE)
+
+        entry   = pos["price_open"]
+        cur     = pos["price_current"]
+        sl_lvl  = pos["sl"]
+        profit  = pos["profit"]
+        dir_s   = 1 if t == "BUY" else -1   # a profit iránya
+
+        # Belépő táv PONTBAN, a profit irányában előjelezve (+ = javamra mozdult)
+        if point and point > 0:
+            dist_pts = int(round((cur - entry) / point * dir_s))
+            self.labels["dist"].config(text=f"{dist_pts:+d}",
+                                       fg=FG_GREEN if dist_pts >= 0 else FG_RED)
+        else:
+            self.labels["dist"].config(text="—", fg=FG_GRAY)
+
+        # P&L, ha az AKTUÁLIS SL bekövetkezik. A profit lineáris az árban, így a
+        # jelenlegi lebegő P&L-ből arányosítható: pnl_sl = P&L × (SL−entry)/(ár−entry).
+        # Ahogy a trailing emeli az SL-t, ez az érték egyre nyereségesebb lesz.
+        if sl_lvl and abs(cur - entry) > (point or 1e-9):
+            sl_pnl = profit * (sl_lvl - entry) / (cur - entry)
+            self.labels["sl_pnl"].config(text=f"{sl_pnl:+.2f}$",
+                                         fg=FG_GREEN if sl_pnl >= 0 else FG_RED)
+        else:
+            self.labels["sl_pnl"].config(text="—", fg=FG_GRAY)
 
         sl, tp = pos["sl"], pos["tp"]
         orig = pstate.get("original_sl", sl) if pstate else sl
@@ -1072,7 +1098,8 @@ class PositionsTab:
     def __init__(self, parent, cfg, mono_font, small_font, header_font,
                  positions_provider, pos_state, digits_provider,
                  on_be, on_trail, on_panic, on_close_all,
-                 on_name_click, on_trail_dist, trail_default_provider):
+                 on_name_click, on_trail_dist, trail_default_provider,
+                 point_provider):
         self.parent = parent
         self.cfg = cfg
         self._mono, self._small, self._header = mono_font, small_font, header_font
@@ -1084,6 +1111,7 @@ class PositionsTab:
         self._on_name_click = on_name_click
         self._on_trail_dist = on_trail_dist
         self._trail_default_provider = trail_default_provider
+        self._point_provider = point_provider
         self._rows: dict[int, PositionRow] = {}
         self._build_ui()
 
@@ -1110,7 +1138,8 @@ class PositionsTab:
         for txt, col in [("■ aktív", FG_GREEN), ("■ vár (nincs BE)", FG_ORANGE),
                          ("■ kikapcsolva", FG_GRAY)]:
             tk.Label(legend, text=txt, bg=BG, fg=col, font=self._small, padx=4).pack(side="left")
-        tk.Label(legend, text="   SL ⇘T = trailing mozgatta   |   táv mezője = PONT (egész)",
+        tk.Label(legend, text="   SL ⇘T = trailing mozgatta   |   Belépő táv = pont a belépőtől "
+                              "(+ = javamra)   |   SL P&L = eredmény, ha az SL bekövetkezik",
                  bg=BG, fg=FG_GRAY, font=self._small).pack(side="left")
 
         # Fejléc
@@ -1139,8 +1168,9 @@ class PositionsTab:
                                   self._on_name_click, self._on_trail_dist)
                 self._rows[tid] = row
             trail_def = self._trail_default_provider(pos["symbol"])
+            point     = self._point_provider(pos["symbol"])
             row.update(pos, self._pos_state.get(tid),
-                       self._digits_provider(pos["symbol"]), trail_def)
+                       self._digits_provider(pos["symbol"]), trail_def, point)
 
         for tid in list(self._rows):
             if tid not in seen:
@@ -1283,7 +1313,8 @@ class DashboardWindow:
             on_panic=self._pos_panic, on_close_all=self._pos_close_all,
             on_name_click=self._show_instrument_params,
             on_trail_dist=self._pos_trail_dist,
-            trail_default_provider=self._trail_default)
+            trail_default_provider=self._trail_default,
+            point_provider=lambda sym: getattr(self.dashboard_ref.get(sym), "point", None))
 
         bt_frame = tk.Frame(self._notebook, bg=BG_BT)
         self._notebook.add(bt_frame, text="  Portfólió Backtest  ")
