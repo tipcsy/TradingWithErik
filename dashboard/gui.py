@@ -982,9 +982,10 @@ class PositionRow:
         self.btn_panic.pack(side="left", padx=(1, 4))
 
     def _apply_trail_dist(self, _event=None):
+        # PONT, egész szám (tizedes nélkül). Toleráns beolvasás, de egészre kerekít.
         raw = self._trail_var.get().strip().replace(",", ".")
         try:
-            val = float(raw)
+            val = int(round(float(raw)))
         except ValueError:
             return
         if val > 0:
@@ -1002,9 +1003,20 @@ class PositionRow:
         sl, tp = pos["sl"], pos["tp"]
         orig = pstate.get("original_sl", sl) if pstate else sl
         be_done = bool(pstate and pstate.get("be_done"))
+        trail_moved = bool(pstate and pstate.get("trail_moved"))
         moved = bool(sl and orig and abs(sl - orig) > 1e-9)
-        self.labels["sl"].config(text=_fmt_price(sl, digits) if sl else "—",
-                                 fg=FG_CYAN if be_done else FG_WHITE)
+        # SL kijelzés: ha a TRAILING mozgatta → zöld + irányjel + "T" (látható, hogy
+        # a trailing húzta); ha BE megvolt de a trailing még nem húzott → cián.
+        if sl:
+            sl_txt = _fmt_price(sl, digits)
+            if trail_moved and moved:
+                arrow = "⇗" if pos["type"] == "BUY" else "⇘"
+                self.labels["sl"].config(text=f"{sl_txt} {arrow}T", fg=FG_GREEN)
+            else:
+                self.labels["sl"].config(text=sl_txt,
+                                         fg=FG_CYAN if be_done else FG_WHITE)
+        else:
+            self.labels["sl"].config(text="—", fg=FG_WHITE)
         self.labels["tp"].config(text=_fmt_price(tp, digits) if tp else "—", fg=FG_GRAY)
         # Eredeti SL: fehér, de ha a trailing már elmozdította → szürke
         self.labels["orig_sl"].config(text=_fmt_price(orig, digits) if orig else "—",
@@ -1015,20 +1027,32 @@ class PositionRow:
         # Gombok állapota (aktív-e?)
         self.btn_be.config(text="BE ✓" if be_done else "BE",
                            bg=BTN_PLAY_BG if be_done else BTN_OPT_BG)
-        trail_on = bool(pstate.get("trailing_enabled", True)) if pstate else True
-        self.btn_trail.config(bg=FG_GREEN if trail_on else BTN_DIS_BG,
-                              fg="#1e1e2e" if trail_on else FG_GRAY)
 
-        # Trail távolság mező: a kézi felülírás, ha van; egyébként az optimalizált
-        # alapérték. Gépelés közben (fókuszban) NEM írjuk felül.
-        override = pstate.get("trail_distance") if pstate else None
+        # Trail gomb — 3 állapot, "benyomott" (sunken) ha be van kapcsolva:
+        #   • KI:            lapos, szürke
+        #   • BE, de VÁR:    benyomott, NARANCS (nincs még BE/kockázatmentes → nem húz)
+        #   • BE és AKTÍV:   benyomott, ZÖLD (BE megvolt → a trailing húzhat/húz)
+        trail_on = bool(pstate.get("trailing_enabled", True)) if pstate else True
+        if not trail_on:
+            self.btn_trail.config(text="Trail", relief="flat",
+                                  bg=BTN_DIS_BG, fg=FG_GRAY)
+        elif be_done:
+            self.btn_trail.config(text="Trail", relief="sunken",
+                                  bg=FG_GREEN, fg="#1e1e2e")
+        else:
+            self.btn_trail.config(text="Trail", relief="sunken",
+                                  bg=FG_ORANGE, fg="#1e1e2e")
+
+        # Trail távolság mező — PONTBAN, egész szám. A kézi felülírás, ha van;
+        # egyébként az optimalizált alapérték. Gépelés közben NEM írjuk felül.
+        override = pstate.get("trail_points") if pstate else None
         eff = override if override is not None else trail_default
         try:
             focused = self.ent_trail.focus_get() is self.ent_trail
         except Exception:
             focused = False
         if not focused:
-            self._trail_var.set(f"{eff:.1f}" if eff is not None else "")
+            self._trail_var.set(str(int(eff)) if eff is not None else "")
         # Vizuális jelzés: kézi felülírás = cián, alapérték = halványabb
         self.ent_trail.config(fg=FG_CYAN if override is not None else FG_GRAY)
 
@@ -1068,13 +1092,23 @@ class PositionsTab:
                                        font=self._small, anchor="w", justify="left")
         self._lbl_breakdown.pack(fill="x", padx=10, pady=(0, 4))
 
+        # Jelmagyarázat — a Trail gomb színei és az SL trailing-jelölés
+        legend = tk.Frame(p, bg=BG)
+        legend.pack(fill="x", padx=10, pady=(0, 4))
+        tk.Label(legend, text="Trail:", bg=BG, fg=FG_GRAY, font=self._small).pack(side="left")
+        for txt, col in [("■ aktív", FG_GREEN), ("■ vár (nincs BE)", FG_ORANGE),
+                         ("■ kikapcsolva", FG_GRAY)]:
+            tk.Label(legend, text=txt, bg=BG, fg=col, font=self._small, padx=4).pack(side="left")
+        tk.Label(legend, text="   SL ⇘T = trailing mozgatta   |   táv mezője = PONT (egész)",
+                 bg=BG, fg=FG_GRAY, font=self._small).pack(side="left")
+
         # Fejléc
         hdr = tk.Frame(p, bg=BG_HEADER)
         hdr.pack(fill="x", padx=2)
         for key, label, w, anchor in POSITION_COLUMNS:
             tk.Label(hdr, text=label, width=w, anchor=anchor, bg=BG_HEADER,
                      fg=FG_BLUE, font=self._header, padx=4, pady=3).pack(side="left")
-        tk.Label(hdr, text="Vezérlés (BE / Trail / táv / Zár)", width=30, anchor="w",
+        tk.Label(hdr, text="Vezérlés (BE / Trail / táv=pont / Zár)", width=32, anchor="w",
                  bg=BG_HEADER, fg=FG_BLUE, font=self._header).pack(side="left")
         tk.Frame(p, bg=FG_GRAY_DIM, height=1).pack(fill="x", padx=2)
 
@@ -1905,39 +1939,50 @@ class DashboardWindow:
             # BE + spread puffer (spread×2 → ×1 → pontos BE), nem pontos entry
             if mt5_connector.move_to_breakeven(ticket):
                 st = position_state.setdefault(
-                    ticket, {"original_sl": orig_sl, "trailing_enabled": True, "be_done": False})
+                    ticket, {"original_sl": orig_sl, "trailing_enabled": True,
+                             "be_done": False, "trail_points": None, "trail_moved": False})
                 st["be_done"] = True
         threading.Thread(target=_w, daemon=True, name="ManualBE").start()
 
+    _DEFAULT_PSTATE = {"original_sl": 0.0, "trailing_enabled": True,
+                       "be_done": False, "trail_points": None, "trail_moved": False}
+
     def _pos_trail(self, ticket: int):
         from trading.live_trader import position_state
-        st = position_state.setdefault(
-            ticket, {"original_sl": 0.0, "trailing_enabled": True, "be_done": False,
-                     "trail_distance": None})
+        st = position_state.setdefault(ticket, dict(self._DEFAULT_PSTATE))
         st["trailing_enabled"] = not st.get("trailing_enabled", True)
 
-    def _pos_trail_dist(self, ticket: int, value: float):
-        """Kézi trail-távolság beállítása egy ticketre (Pozíciók fül)."""
+    def _pos_trail_dist(self, ticket: int, points: int):
+        """Kézi trail-távolság beállítása egy ticketre PONTBAN (Pozíciók fül)."""
         from trading.live_trader import position_state
-        st = position_state.setdefault(
-            ticket, {"original_sl": 0.0, "trailing_enabled": True, "be_done": False,
-                     "trail_distance": None})
-        st["trail_distance"] = value
+        st = position_state.setdefault(ticket, dict(self._DEFAULT_PSTATE))
+        st["trail_points"] = points
 
-    def _trail_default(self, symbol: str) -> Optional[float]:
-        """Egy szimbólum optimalizált trail-távolsága (a Pozíciók fül mezőjéhez).
-        Ha nincs optimalizált érték, a position_mgmt alapérték."""
+    def _trail_default(self, symbol: str) -> Optional[int]:
+        """Egy szimbólum optimalizált trail-távolsága PONTBAN (a Pozíciók fül
+        mezőjéhez). A paraméter pipben van tárolva → pont = pip × pip_size / point.
+        Ha a 'point' még nem ismert (MT5 adat nélkül), None-t ad."""
         from ml.optimizer import PARAMS_DIR
+        pips = None
         pf = PARAMS_DIR / f"{symbol}.json"
         if pf.exists():
             try:
                 with open(pf, encoding="utf-8") as f:
                     params = json.load(f).get("params", {})
-                if "trail_distance_pips" in params:
-                    return float(params["trail_distance_pips"])
+                pips = params.get("trail_distance_pips")
             except Exception:
                 pass
-        return self.cfg.get("position_mgmt", {}).get("trail_distance_pips")
+        if pips is None:
+            pips = self.cfg.get("position_mgmt", {}).get("trail_distance_pips")
+        if pips is None:
+            return None
+        pair_cfg = self.cfg["pairs"].get(symbol, {})
+        pip_size = pair_cfg.get("pip_size")
+        ds = self.dashboard_ref.get(symbol)
+        point = getattr(ds, "point", None) if ds else None
+        if not pip_size or not point:
+            return None
+        return int(round(float(pips) * pip_size / point))
 
     def _handle_connect(self):
         # A connect() blokkoló MT5-login — háttérszálon, hogy a UI ne fagyjon.
@@ -2079,6 +2124,7 @@ class DashboardWindow:
         if info:
             ds.digits     = info.digits
             ds.spread_pts = info.spread
+            ds.point      = info.point
         ref = ds.bid if ds.bid is not None else ds.ask
         if ref is not None and ds.day_open:
             ds.change_pct = (ref - ds.day_open) / ds.day_open * 100.0

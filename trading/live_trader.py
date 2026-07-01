@@ -71,6 +71,7 @@ class PairDashboardState:
     bid:              Optional[float] = None   # aktuális eladási ár
     ask:              Optional[float] = None   # aktuális vételi ár
     digits:           int  = 5                 # árformázás tizedesjegyek
+    point:            Optional[float] = None   # 1 pont ára (MT5 symbol_info.point)
     prev_bid:         Optional[float] = None   # előző bid (tick-színezéshez)
     prev_ask:         Optional[float] = None   # előző ask
     day_open:         Optional[float] = None   # napi nyitóár (változás% alaphoz)
@@ -342,11 +343,11 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         is_rf  = slot_mgr.is_risk_free(ticket)
 
         # Megosztott pozíció-állapot (GUI ↔ motor): eredeti SL, trailing toggle, BE,
-        # trail_distance (None = az optimalizált paramétert használjuk; szám = kézi
-        # felülírás a Pozíciók fülről)
+        # trail_points (None = az optimalizált paramétert használjuk; egész = kézi
+        # felülírás PONTBAN a Pozíciók fülről), trail_moved (a trailing már húzott-e).
         pstate = position_state.setdefault(ticket, {
             "original_sl": pos.sl, "trailing_enabled": True, "be_done": is_rf,
-            "trail_distance": None})
+            "trail_points": None, "trail_moved": False})
         # Kézi BE (a Pozíciók fülről): ha be_done jelölt, de a slot-kezelő még
         # nem tudja, szinkronizáljuk (slot felszabadul, trailing indulhat).
         if pstate.get("be_done") and not is_rf:
@@ -373,45 +374,50 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
                          " (risky)" if risky else "")
 
         # Trailing stop (kockázatmentes után, és csak ha kézzel nincs kikapcsolva).
+        # MINDEN számítás PONTBAN (bróker-egység), hogy a kijelzés és a motor
+        # egyértelmű legyen (a "pip" félreérthető volt).
         is_rf = slot_mgr.is_risk_free(ticket)
         if is_rf and pstate.get("trailing_enabled", True):
-            trail_act  = params.get("trail_activation_pips", 8)
-            # Kézi felülírás (Pozíciók fül) elsőbbséget élvez az optimalizált érték előtt
-            dist_override = pstate.get("trail_distance")
-            base_dist  = dist_override if dist_override is not None \
-                         else params.get("trail_distance_pips", 6)
-            trail_dist = base_dist * (0.5 if risky else 1.0)
+            point  = sym_info.point if (sym_info and sym_info.point > 0) else pip_size
+            digits = sym_info.digits if sym_info else 5
+
+            # Követési távolság ÁR-ban:
+            #   • kézi felülírás (Pozíciók fül) PONTBAN → pontos érték, risky NEM felezi
+            #   • egyébként az optimalizált trail_distance_pips → ár, risky felezi
+            override_points = pstate.get("trail_points")
+            if override_points is not None:
+                dist_price = override_points * point
+            else:
+                base_pips  = params.get("trail_distance_pips", 6)
+                dist_price = pip_to_price(base_pips, pip_size) * (0.5 if risky else 1.0)
 
             # A bróker MINIMUM stop-távolsága: ha az új SL ennél közelebb esne az
             # árhoz, a modify csendben elutasításra kerül → a trailing sosem fog
-            # profitot (az SL a BE-n ragad, a pozíció 0-n zár). Ezért az effektív
-            # követési távolságot a min. stop-távolság + 1 pip alá NEM engedjük.
-            digits = sym_info.digits if sym_info else 5
-            min_stop_pips = 0.0
-            if sym_info and sym_info.point > 0:
-                min_stop_pips = sym_info.trade_stops_level * sym_info.point / pip_size
-            eff_dist = max(trail_dist, min_stop_pips + 1.0)
+            # profitot. Ezért az effektív követés a min. stop-távolság + 1 pont alá
+            # NEM mehet — így a legkorábbi (kb. 1 pontnyi) profitot is lekötjük.
+            min_stop_price = (sym_info.trade_stops_level * point) if sym_info else 0.0
+            eff_price = max(dist_price, min_stop_price + point)
 
-            # Risky mód: a trailing AZONNAL induljon (nem várunk trail_activation_pips
-            # profitra) — így a köztes profitot is lekötjük, nem csak BE-zünk.
-            act = 0.0 if risky else trail_act
+            # Risky mód: a trailing AZONNAL induljon (nem várunk aktiválási profitra).
+            act_price = 0.0 if risky else pip_to_price(
+                params.get("trail_activation_pips", 8), pip_size)
 
             if pos.type == mt5.ORDER_TYPE_BUY:
-                trail_trigger = pos.price_open + pip_to_price(act, pip_size)
-                if pos.price_current >= trail_trigger:
-                    new_sl = round(pos.price_current - pip_to_price(eff_dist, pip_size), digits)
+                if pos.price_current >= pos.price_open + act_price:
+                    new_sl = round(pos.price_current - eff_price, digits)
                     if new_sl > pos.sl and modify_sl(ticket, new_sl):
-                        log.info("↗ %s #%d trailing SL → %.*f (%.1f pip követés%s)",
-                                 symbol, ticket, digits, new_sl, eff_dist,
-                                 ", risky" if risky else "")
+                        pstate["trail_moved"] = True
+                        log.info("↗ %s #%d trailing SL → %.*f (%d pont követés%s)",
+                                 symbol, ticket, digits, new_sl,
+                                 round(eff_price / point), ", risky" if risky else "")
             else:
-                trail_trigger = pos.price_open - pip_to_price(act, pip_size)
-                if pos.price_current <= trail_trigger:
-                    new_sl = round(pos.price_current + pip_to_price(eff_dist, pip_size), digits)
+                if pos.price_current <= pos.price_open - act_price:
+                    new_sl = round(pos.price_current + eff_price, digits)
                     if new_sl < pos.sl and modify_sl(ticket, new_sl):
-                        log.info("↘ %s #%d trailing SL → %.*f (%.1f pip követés%s)",
-                                 symbol, ticket, digits, new_sl, eff_dist,
-                                 ", risky" if risky else "")
+                        pstate["trail_moved"] = True
+                        log.info("↘ %s #%d trailing SL → %.*f (%d pont követés%s)",
+                                 symbol, ticket, digits, new_sl,
+                                 round(eff_price / point), ", risky" if risky else "")
 
         # Dashboard P&L frissítés
         ds.position_pnl = pnl
