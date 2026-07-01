@@ -344,6 +344,8 @@ class OptimizerController:
         self._lock            = threading.Lock()
         self._queue: list     = []
         self._running: set    = set()
+        # Utolsó haladás időbélyege páronként — a "nem halad" (stall) timeouthoz
+        self._last_progress: dict = {}
 
         # Process-pool + folyamatok közti progress-queue (lazán, háttérben)
         self._pool        = None
@@ -386,6 +388,7 @@ class OptimizerController:
             if symbol in self._running:
                 pct = int(done / total * 100) if total else 0
                 self.optimizer_status[symbol] = f"{done}/{total}  {pct}%"
+                self._last_progress[symbol] = time.time()   # halad → stall-óra újraindul
 
     def shutdown(self):
         try:
@@ -475,19 +478,36 @@ class OptimizerController:
             #    PONTOSAN ugyanaz, mint a CLI-ben. A GUI csak a processzt/timeoutot/
             #    haladást intézi. A method-választás EGY helyen (optimize_symbol) él. ──
             self._ensure_pool()
-            timeout_sec = opt_cfg.get("timeout_sec", 1800)   # beragadás-védelem
+            # "Nem halad" (stall) alapú védelem: NEM a teljes futásidőt limitáljuk
+            # (ezek hosszú folyamatok!), hanem azt figyeljük, hogy jön-e haladás.
+            # Ha stall_timeout_sec ideje NINCS előrelépés → tényleg beragadt → zárjuk.
+            # hard_timeout_sec (0 = kikapcsolva) opcionális abszolút végső határ.
+            stall_sec = opt_cfg.get("stall_timeout_sec", 900)   # 15 perc haladás nélkül
+            hard_cap  = opt_cfg.get("hard_timeout_sec", 0)      # 0 = nincs abszolút limit
             self.optimizer_status[symbol] = "Optimalizálás indul..."
             args = (symbol, df_m15, df_m1, self.cfg, initial_bal)
 
             if self._pool is not None:
                 from concurrent.futures import TimeoutError as _FutTimeout
+                t_submit = time.time()
+                self._last_progress[symbol] = t_submit
                 fut = self._pool.submit(optimize_job, *args, self._progress_q)
-                try:
-                    entry = fut.result(timeout=timeout_sec)
-                except _FutTimeout:
-                    fut.cancel()
-                    self.optimizer_status[symbol] = "Hiba: időtúllépés"
-                    return   # a finally visszaállítja STOPPED-ra → UI nem ragad be
+                while True:
+                    try:
+                        entry = fut.result(timeout=10)   # rövid poll
+                        break
+                    except _FutTimeout:
+                        now  = time.time()
+                        idle = now - self._last_progress.get(symbol, now)
+                        if idle > stall_sec:
+                            fut.cancel()
+                            self.optimizer_status[symbol] = \
+                                f"Hiba: beragadt ({int(idle//60)} perc nincs haladás)"
+                            return   # a finally STOPPED-ra állít → UI nem ragad be
+                        if hard_cap and (now - t_submit) > hard_cap:
+                            fut.cancel()
+                            self.optimizer_status[symbol] = "Hiba: abszolút időlimit"
+                            return
             else:
                 entry = optimize_job(*args, _LocalProgress(self.optimizer_status))
 
@@ -521,6 +541,7 @@ class OptimizerController:
         finally:
             with self._lock:
                 self._running.discard(symbol)
+                self._last_progress.pop(symbol, None)
                 self.instrument_state[symbol] = "STOPPED"
                 self._try_start_next()
 

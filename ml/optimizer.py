@@ -371,11 +371,12 @@ def optimize_pair_optuna(
                     row[pk] = pv
             trial_rows.append(row)
 
-        # Progress log minden 50. trialnál
+        # Progress log/callback gyakran (10 trialonként) — a "nem halad" figyelő
+        # így friss jelet kap, és a UI %-a is sűrűbben frissül.
         call_count[0] += 1
-        if call_count[0] % 50 == 0:
-            if final_score > best_score_so_far[0]:
-                best_score_so_far[0] = final_score
+        if final_score > best_score_so_far[0]:
+            best_score_so_far[0] = final_score
+        if call_count[0] % 10 == 0:
             log.info("  %s — %d/%d trial | legjobb score: %.2f",
                      symbol, call_count[0], n_trials, best_score_so_far[0])
             if progress_callback:
@@ -538,7 +539,7 @@ def optimize_pair(
             log.debug("%s — kombináció hiba: %s", symbol, e)
             continue
 
-        if (i + 1) % 50 == 0:
+        if (i + 1) % 10 == 0:
             best_pnl = best_summary["total_pnl"] if best_summary else 0
             log.info(
                 "  %s — %d/%d próbált | legjobb P&L: %.2f$",
