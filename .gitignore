@@ -7,3 +7,4 @@ data/ui_watchdog.log
 data/opt_error.log
 .venv/
 venv/
+config.json

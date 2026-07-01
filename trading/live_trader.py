@@ -31,6 +31,8 @@ sys.path.insert(0, str(ROOT))
 
 from core import mt5_connector
 from core import risky_mode
+from core import correlation
+from core.quality import grade_rank
 from core.indicator_engine import atr as atr_indicator
 from core.risk_manager import calc_sl_tp_pips, calc_lot, calc_effective_slots, SlotManager
 from strategy import get_strategy
@@ -82,6 +84,8 @@ class PairDashboardState:
     trained:          bool = False  # van-e optimalizált paraméter
     opt_grade:        Optional[tuple] = None  # (minősítő_szöveg, szín-név)
     opt_grade_reason: str  = ""               # mi húzza le a minősítést
+    corr_conflict:    bool = False            # korrelált kitettség-ütközés (villog)
+    corr_tip:         str  = ""               # ütközés magyarázata (tooltip)
     spread_pts:       int  = 0      # aktuális spread pontban (MT5 egység)
     max_spread_pts:   int  = 0      # megengedett max spread pontban
     timeframe_remaining: dict = field(default_factory=dict)  # {percek: hátralévő mp}
@@ -414,24 +418,43 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
     already_open = len(symbol_positions) > 0
     if (signal != "NONE" and not already_open and atr_val is not None
             and slot_mgr.can_open() and spread_ok):
-        sl_pips, tp_pips = calc_sl_tp_pips(atr_val, {**params, "pip_size": pip_size})
-        eff_slots = calc_effective_slots(balance, sl_pips, pair_cfg, risk_trading_cfg)
-        lot = calc_lot(balance, sl_pips, pair_cfg, risk_trading_cfg, eff_slots)
+        # ── Korreláció / devizakitettség kapu ──────────────────────────────
+        cmode    = correlation.get_mode()
+        conflict = []
+        if cmode != correlation.INACTIVE:
+            others = [(p.symbol, "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL")
+                      for p in open_positions if p.symbol != symbol]
+            conflict = correlation.shared_exposure(symbol, signal, others)
 
-        tick = mt5.symbol_info_tick(symbol)
-        if tick:
-            if signal == "BUY":
-                open_price = tick.ask
-                sl_price   = round(open_price - pip_to_price(sl_pips, pip_size), 5)
-                tp_price   = round(open_price + pip_to_price(tp_pips, pip_size), 5)
-            else:
-                open_price = tick.bid
-                sl_price   = round(open_price + pip_to_price(sl_pips, pip_size), 5)
-                tp_price   = round(open_price - pip_to_price(tp_pips, pip_size), 5)
+        if conflict and cmode == correlation.STRONGER:
+            # Az erősebb (jobb minőségű) nyit elsőként — a run() minőség szerint
+            # rendezve dolgozza fel a párokat —, a korrelált újat blokkoljuk.
+            log.info("K-blokk: %s belépés kihagyva (azonos kitettség: %s)",
+                     symbol, ", ".join(conflict))
+        else:
+            ctf = risk_trading_cfg
+            if conflict and cmode == correlation.HALF:
+                ctf = {**ctf, "account_risk_pct": ctf["account_risk_pct"] * 0.5}
+                log.info("K: %s fél mérettel (azonos kitettség: %s)",
+                         symbol, ", ".join(conflict))
+            sl_pips, tp_pips = calc_sl_tp_pips(atr_val, {**params, "pip_size": pip_size})
+            eff_slots = calc_effective_slots(balance, sl_pips, pair_cfg, ctf)
+            lot = calc_lot(balance, sl_pips, pair_cfg, ctf, eff_slots)
 
-            ticket = open_position(symbol, signal, lot, sl_price, tp_price, magic)
-            if ticket:
-                slot_mgr.add(ticket)
+            tick = mt5.symbol_info_tick(symbol)
+            if tick:
+                if signal == "BUY":
+                    open_price = tick.ask
+                    sl_price   = round(open_price - pip_to_price(sl_pips, pip_size), 5)
+                    tp_price   = round(open_price + pip_to_price(tp_pips, pip_size), 5)
+                else:
+                    open_price = tick.bid
+                    sl_price   = round(open_price + pip_to_price(sl_pips, pip_size), 5)
+                    tp_price   = round(open_price - pip_to_price(tp_pips, pip_size), 5)
+
+                ticket = open_position(symbol, signal, lot, sl_price, tp_price, magic)
+                if ticket:
+                    slot_mgr.add(ticket)
 
 
 # ---------------------------------------------------------------------------

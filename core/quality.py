@@ -75,6 +75,15 @@ def grade(test_summary: dict, cfg: dict) -> tuple[str, str, str]:
     return ("Jó", "green", "")
 
 
+_RANK = {"Jó": 0, "Közepes": 1, "Gyenge": 2, "Rossz": 3}
+
+
+def grade_rank(grade_text: str) -> int:
+    """Minősítő szöveg → rang (kisebb = erősebb). Ismeretlen/nincs → 4.
+    A 'Csak erősebb' korreláció-mód a feldolgozási sorrendhez használja."""
+    return _RANK.get(grade_text, 4)
+
+
 def metric_colors(test_summary: dict, cfg: dict) -> dict:
     """Per-metrika szemantikus szín (a részletes popuphoz)."""
     if not test_summary:
