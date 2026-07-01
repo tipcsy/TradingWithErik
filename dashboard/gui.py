@@ -40,6 +40,7 @@ from dashboard.theme import (
 from strategy import get_strategy
 from strategy.base import Column
 from core import risky_mode
+from version import APP_NAME, APP_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -1155,7 +1156,7 @@ class DashboardWindow:
             instrument_state, optimizer_status, max_parallel=max_par)
 
         self.root = tk.Tk()
-        self.root.title("MT5 Erik — Live Dashboard")
+        self.root.title(f"{APP_NAME} v{APP_VERSION} — Live Dashboard")
         self.root.configure(bg=BG)
         self.root.resizable(True, True)
 
@@ -1168,8 +1169,11 @@ class DashboardWindow:
         # ── Globális fejléc ─────────────────────────────────────────────
         top_bar = tk.Frame(self.root, bg=BG_HEADER, pady=5)
         top_bar.pack(fill="x", padx=4, pady=(4, 0))
-        tk.Label(top_bar, text="MT5 Erik — Dashboard",
-                 bg=BG_HEADER, fg=FG_BLUE, font=title_font).pack(side="left", padx=10)
+        tk.Label(top_bar, text=APP_NAME,
+                 bg=BG_HEADER, fg=FG_BLUE, font=title_font).pack(side="left", padx=(10, 3))
+        # Verzió — jól látható helyen, a név mellett (build-azonosításhoz)
+        tk.Label(top_bar, text=f"v{APP_VERSION}",
+                 bg=BG_HEADER, fg=FG_CYAN, font=info_font).pack(side="left", padx=(0, 10))
         self.lbl_time = tk.Label(top_bar, text="", bg=BG_HEADER, fg=FG_GRAY, font=info_font)
         self.lbl_time.pack(side="right", padx=10)
         self._btn_connect = tk.Button(
