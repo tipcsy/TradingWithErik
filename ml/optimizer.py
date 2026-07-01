@@ -304,6 +304,7 @@ def optimize_pair_optuna(
 
     call_count = [0]
     best_score_so_far = [-float("inf")]
+    trial_rows: list[dict] = []   # minden trial eredménye → CSV export
 
     def objective(trial):
         params = _suggest_params(trial, opt_cfg, base_params)
@@ -311,6 +312,7 @@ def optimize_pair_optuna(
             return -999999.0
 
         window_scores = []
+        combined_test = []          # az összes ablak TEST-trade-jei (CSV metrikákhoz)
         for w in windows:
             try:
                 # Teljes ablak adat (train + test) — az indikátorok warmuphoz kellenek
@@ -329,6 +331,7 @@ def optimize_pair_optuna(
                     t for t in result.closed
                     if t.close_time is not None and t.close_time >= w["test_start"]
                 ]
+                combined_test.extend(test_trades)
                 window_scores.append(_score_trades(test_trades, initial_balance))
 
             except Exception:
@@ -342,6 +345,31 @@ def optimize_pair_optuna(
         avg_score   = float(np.mean(valid))
         consistency = len(valid) / len(window_scores)
         final_score = avg_score * consistency
+
+        # ── Sor az eredménytáblázathoz (összes ablak TEST-metrikái + params) ──
+        pnl_list = [t.pnl_usd for t in combined_test]
+        if pnl_list:
+            wins   = [p for p in pnl_list if p > 0]
+            losses = [p for p in pnl_list if p <= 0]
+            bal = peak = initial_balance
+            mdd = 0.0
+            for p in pnl_list:
+                bal += p
+                peak = max(peak, bal)
+                mdd  = max(mdd, (peak - bal) / peak if peak > 0 else 0)
+            pf = abs(sum(wins) / sum(losses)) if losses and sum(losses) != 0 else float("inf")
+            row = {
+                "score":         round(final_score, 2),
+                "trades":        len(pnl_list),
+                "win_rate":      round(len(wins) / len(pnl_list), 4),
+                "total_pnl":     round(sum(pnl_list), 2),
+                "max_drawdown":  round(mdd, 4),
+                "profit_factor": round(pf, 3) if pf != float("inf") else "inf",
+            }
+            for pk, pv in params.items():
+                if not pk.startswith("_"):
+                    row[pk] = pv
+            trial_rows.append(row)
 
         # Progress log minden 50. trialnál
         call_count[0] += 1
@@ -360,6 +388,18 @@ def optimize_pair_optuna(
         sampler=optuna.samplers.TPESampler(seed=42),
     )
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+    # ── Teljes eredménytáblázat mentése CSV-be (score szerint csökkenő) ──────
+    # Ugyanaz a formátum, mint a random/grid ágon → a GUI "Trials CSV" gombja is nyitja.
+    if trial_rows:
+        try:
+            df_res = pd.DataFrame(trial_rows).sort_values("score", ascending=False)
+            out_csv = PARAMS_DIR / f"{symbol}_trials.csv"
+            df_res.to_csv(out_csv, index=False, encoding="utf-8-sig")
+            log.info("  %s — %d trial eredménye mentve: %s",
+                     symbol, len(trial_rows), out_csv.name)
+        except Exception as e:
+            log.debug("%s — trials CSV mentés hiba: %s", symbol, e)
 
     if progress_callback:
         progress_callback(n_trials, n_trials, study.best_value)
@@ -723,6 +763,50 @@ def optimize_job(symbol, df_m15, df_m1, params_list, pair_cfg, trading_cfg,
         )
         if result is None:
             return {"error": "nincs eredmény"}
+        test_result  = run_pair(symbol, df_m15, df_m1, result["params"],
+                                pair_cfg, trading_cfg, initial_balance,
+                                test_start=test_start)
+        test_summary = test_result.summary(initial_balance)
+        return {
+            "train_summary": result["train_summary"],
+            "test_summary":  test_summary,
+            "params":        result["params"],
+        }
+    except Exception as e:
+        import traceback
+        return {"error": f"{e}", "traceback": traceback.format_exc()}
+
+
+def optimize_job_optuna(symbol, df_m15, df_m1, opt_cfg, base_params, pair_cfg,
+                        trading_cfg, initial_balance, test_start,
+                        n_trials, n_splits, train_months, test_months,
+                        progress_q=None) -> dict:
+    """Optuna (Bayesian, walk-forward) optimalizálás külön PROCESSZBEN futtatva.
+
+    Ugyanaz a szerződés, mint az optimize_job-é: picklezhető bemenetek, a haladás a
+    progress_q-ra kerül, és a teljes trial-táblázatot CSV-be menti (optimize_pair_optuna).
+    Visszaad: {"train_summary","test_summary","params"} vagy {"error": "..."}.
+    """
+    if not _OPTUNA_AVAILABLE:
+        return {"error": "optuna nincs telepítve"}
+
+    def _progress(done, total, best_score):
+        if progress_q is not None:
+            try:
+                progress_q.put((symbol, done, total))
+            except Exception:
+                pass
+
+    try:
+        result = optimize_pair_optuna(
+            symbol, df_m15, df_m1, opt_cfg, base_params, pair_cfg, trading_cfg,
+            initial_balance,
+            n_trials=n_trials, n_splits=n_splits,
+            train_months=train_months, test_months=test_months,
+            progress_callback=_progress,
+        )
+        if result is None:
+            return {"error": "nincs eredmény (optuna)"}
         test_result  = run_pair(symbol, df_m15, df_m1, result["params"],
                                 pair_cfg, trading_cfg, initial_balance,
                                 test_start=test_start)

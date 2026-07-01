@@ -432,7 +432,8 @@ class OptimizerController:
         """HáttérSZÁL: adat-előkészítés (MT5, IO) → a CPU-nehéz optimalizálás
         külön PROCESSZBE. A fő (UI) szál egyiket sem érinti → nem fagy."""
         try:
-            from ml.optimizer import optimize_job, params_file
+            from ml.optimizer import (optimize_job, optimize_job_optuna,
+                                       params_file, _OPTUNA_AVAILABLE)
             from trading.backtest import load_data
 
             opt_cfg     = self.cfg["optimizer"]
@@ -480,18 +481,33 @@ class OptimizerController:
             df_m15 = df_m15[df_m15.index >= train_start].copy()
             df_m1  = df_m1[df_m1.index  >= train_start].copy()
 
-            params_list = self.strategy.param_space(
-                self.cfg, base_params, method, max_trials)
-            self.optimizer_status[symbol] = f"0/{len(params_list)}  0%"
+            # ── Módszer választása: Optuna (config: method=optuna), különben
+            #    random/grid. Az Optuna a GUI-ból is ugyanúgy fut, mint a CLI-ben. ──
+            use_optuna = (method == "optuna" and _OPTUNA_AVAILABLE)
+            self._ensure_pool()
+            timeout_sec = opt_cfg.get("timeout_sec", 1800)   # beragadás-védelem
+
+            if use_optuna:
+                job  = optimize_job_optuna
+                args = (symbol, df_m15, df_m1, opt_cfg, base_params, pair_cfg,
+                        trading_cfg, initial_bal, test_start,
+                        max_trials,
+                        opt_cfg.get("wf_n_splits", 4),
+                        opt_cfg.get("wf_train_months", 6),
+                        opt_cfg.get("wf_test_months", 2))
+                self.optimizer_status[symbol] = f"0/{max_trials}  0%  (optuna)"
+            else:
+                params_list = self.strategy.param_space(
+                    self.cfg, base_params, method, max_trials)
+                job  = optimize_job
+                args = (symbol, df_m15, df_m1, params_list, pair_cfg, trading_cfg,
+                        initial_bal, test_start)
+                self.optimizer_status[symbol] = f"0/{len(params_list)}  0%"
 
             # ── Számítás külön PROCESSZBEN (GIL-mentes), tartalék: szálon ──
-            self._ensure_pool()
-            args = (symbol, df_m15, df_m1, params_list, pair_cfg, trading_cfg,
-                    initial_bal, test_start)
-            timeout_sec = opt_cfg.get("timeout_sec", 1800)   # beragadás-védelem
             if self._pool is not None:
                 from concurrent.futures import TimeoutError as _FutTimeout
-                fut = self._pool.submit(optimize_job, *args, self._progress_q)
+                fut = self._pool.submit(job, *args, self._progress_q)
                 try:
                     entry = fut.result(timeout=timeout_sec)
                 except _FutTimeout:
@@ -499,7 +515,7 @@ class OptimizerController:
                     self.optimizer_status[symbol] = "Hiba: időtúllépés"
                     return   # a finally visszaállítja STOPPED-ra → UI nem ragad be
             else:
-                entry = optimize_job(*args, _LocalProgress(self.optimizer_status))
+                entry = job(*args, _LocalProgress(self.optimizer_status))
 
             if "error" in entry:
                 self.optimizer_status[symbol] = f"Hiba: {entry['error']}"
