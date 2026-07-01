@@ -572,19 +572,83 @@ def optimize_pair(
 # Fő belépési pont
 # ---------------------------------------------------------------------------
 
+def optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance, progress=None) -> dict:
+    """EGYSÉGES optimalizálási belépési pont — a CLI és a GUI-processz is EZT hívja.
+
+    A method-döntés (optuna | grid | random) EGYETLEN helyen él, így a két felület
+    sosem csúszhat szét. Az adat szeletelése train_start-tól, a trials CSV kiírása
+    (a compute-függvényekben) és az out-of-sample teszt is itt, egységesen történik.
+
+    progress: opcionális fn(done, total, best) haladásjelző.
+    Visszaad: {"train_summary","test_summary","params"} vagy {"error": "..."}.
+    """
+    opt_cfg     = cfg["optimizer"]
+    method      = opt_cfg.get("method", "random")
+    max_trials  = opt_cfg.get("max_trials", 500)
+    train_start = opt_cfg.get("train_start_date", "2025-01-01")
+    test_start  = opt_cfg.get("test_start_date", "2025-10-01")
+    trading_cfg = cfg["trading"]
+    pair_cfg    = cfg["pairs"][symbol]
+    base_params = {**cfg["indicators"], **cfg["sltp"], **cfg["position_mgmt"]}
+
+    # Adat szeletelése train_start-tól (idempotens, ha a hívó már szeletelt)
+    ts_train = pd.Timestamp(train_start)
+    if df_m15.index.tzinfo is not None:
+        ts_train = ts_train.tz_localize("UTC")
+    df_m15 = df_m15[df_m15.index >= ts_train]
+    df_m1  = df_m1[df_m1.index  >= ts_train]
+    if len(df_m15) < 200 or len(df_m1) < 200:
+        return {"error": "túl kevés adat a train_start után"}
+
+    # ── Method-dispatch (EGY helyen) ─────────────────────────────────────────
+    if method == "optuna" and _OPTUNA_AVAILABLE:
+        log.info("  Optuna Bayesian optimalizálás (%d trial, walk-forward)...", max_trials)
+        result = optimize_pair_optuna(
+            symbol, df_m15, df_m1, opt_cfg, base_params, pair_cfg, trading_cfg,
+            initial_balance,
+            n_trials=max_trials,
+            n_splits=opt_cfg.get("wf_n_splits", 4),
+            train_months=opt_cfg.get("wf_train_months", 6),
+            test_months=opt_cfg.get("wf_test_months", 2),
+            progress_callback=progress)
+    elif method == "grid":
+        params_list = generate_grid_params(opt_cfg, base_params)
+        log.info("  Grid search: %d kombináció", len(params_list))
+        result = optimize_pair(symbol, df_m15, df_m1, params_list, pair_cfg,
+                               trading_cfg, initial_balance, test_start,
+                               progress_callback=progress)
+    else:
+        params_list = generate_random_params(opt_cfg, base_params, max_trials)
+        log.info("  Random search: %d kombináció", len(params_list))
+        result = optimize_pair(symbol, df_m15, df_m1, params_list, pair_cfg,
+                               trading_cfg, initial_balance, test_start,
+                               progress_callback=progress)
+
+    if result is None:
+        return {"error": "nincs eredmény"}
+
+    # Out-of-sample (TEST) validálás — szintén itt, egységesen
+    try:
+        test_result  = run_pair(symbol, df_m15, df_m1, result["params"],
+                                pair_cfg, trading_cfg, initial_balance,
+                                test_start=test_start)
+        test_summary = test_result.summary(initial_balance)
+    except Exception as e:
+        log.warning("  %s — TEST hiba: %s", symbol, e)
+        test_summary = {}
+
+    return {
+        "train_summary": result["train_summary"],
+        "test_summary":  test_summary,
+        "params":        result["params"],
+    }
+
+
 def run_optimizer(cfg: dict, symbols: Optional[list[str]] = None):
     opt_cfg     = cfg["optimizer"]
     method      = opt_cfg.get("method", "random")
     max_trials  = opt_cfg.get("max_trials", 500)
-    test_start  = opt_cfg.get("test_start_date", "2025-01-01")
     initial_balance = cfg.get("ml", {}).get("starting_balance_eur", 1000.0)
-    trading_cfg = cfg["trading"]
-
-    base_params = {
-        **cfg["indicators"],
-        **cfg["sltp"],
-        **cfg["position_mgmt"],
-    }
 
     # Párok kiválasztása
     all_pairs = {s: p for s, p in cfg["pairs"].items() if isinstance(p, dict) and p.get("enabled", False)}
@@ -615,89 +679,23 @@ def run_optimizer(cfg: dict, symbols: Optional[list[str]] = None):
             log.warning("%s — nincs adat, kihagyva.", symbol)
             continue
 
-        # Adatok szeletelése: train_start → train_end (gyorsabb backtest)
-        train_start = opt_cfg.get("train_start_date", "2025-01-01")
-        ts_train = pd.Timestamp(train_start)
-        if df_m15.index.tzinfo is not None:
-            ts_train = ts_train.tz_localize("UTC")
-        df_m15 = df_m15[df_m15.index >= ts_train].copy()
-        df_m1  = df_m1[df_m1.index  >= ts_train].copy()
-        if len(df_m15) < 200 or len(df_m1) < 200:
-            log.warning("%s — túl kevés adat a train_start után, kihagyva.", symbol)
-            continue
-        log.info("  Adat: M15=%d gyertya, M1=%d gyertya (%s-tól)",
-                 len(df_m15), len(df_m1), train_start)
-
-        # Optimalizálás futtatása a konfigurált módszerrel
-        if method == "optuna" and _OPTUNA_AVAILABLE:
-            log.info("  Optuna Bayesian optimalizálás (%d trial, walk-forward)...", max_trials)
-            result = optimize_pair_optuna(
-                symbol, df_m15, df_m1,
-                opt_cfg, base_params,
-                pair_cfg, trading_cfg,
-                initial_balance,
-                n_trials=max_trials,
-                n_splits=opt_cfg.get("wf_n_splits", 4),
-                train_months=opt_cfg.get("wf_train_months", 6),
-                test_months=opt_cfg.get("wf_test_months", 2),
-            )
-        elif method == "grid":
-            params_list = generate_grid_params(opt_cfg, base_params)
-            log.info("  Grid search: %d kombináció", len(params_list))
-            result = optimize_pair(
-                symbol, df_m15, df_m1,
-                params_list, pair_cfg, trading_cfg,
-                initial_balance, test_start,
-            )
-        else:
-            params_list = generate_random_params(opt_cfg, base_params, max_trials)
-            log.info("  Random search: %d kombináció", len(params_list))
-            result = optimize_pair(
-                symbol, df_m15, df_m1,
-                params_list, pair_cfg, trading_cfg,
-                initial_balance, test_start,
-            )
-
-        if result is None:
-            log.warning("%s — nem találtunk jó paramétert.", symbol)
+        # ── KÖZÖS dispatch (ugyanaz, mint a GUI-ban) ──────────────────────
+        result = optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance)
+        if "error" in result:
+            log.warning("%s — %s", symbol, result["error"])
             continue
 
-        best_params   = result["params"]
         train_summary = result["train_summary"]
-
+        test_summary  = result.get("test_summary", {})
         elapsed = time.time() - t0
         log.info(
             "  TRAIN | Kötések: %d | Win: %.0f%% | P&L: %.2f$ | MaxDD: %.1f%%",
-            train_summary["trades"],
-            train_summary["win_rate"] * 100,
-            train_summary["total_pnl"],
-            train_summary["max_drawdown"] * 100,
+            train_summary.get("trades", 0),
+            train_summary.get("win_rate", 0) * 100,
+            train_summary.get("total_pnl", 0),
+            train_summary.get("max_drawdown", 0) * 100,
         )
-        log.info("  ⏱  %.1f mp", elapsed)
-
-        # ── AZONNALI MENTÉS a teszt előtt — crash esetén sem vész el ────
-        entry = {
-            "symbol":        symbol,
-            "optimized_at":  datetime.utcnow().isoformat(),
-            "train_summary": train_summary,
-            "test_summary":  {},   # teszt után frissítjük
-            "params":        best_params,
-        }
-        out = params_file(symbol)
-        tmp = out.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(entry, f, indent=2, ensure_ascii=False, default=str)
-        tmp.replace(out)
-        log.info("  Mentve (train): %s", out)
-
-        # Out-of-sample (TEST) validálás
-        try:
-            test_result  = run_pair(
-                symbol, df_m15, df_m1,
-                best_params, pair_cfg, trading_cfg,
-                initial_balance, test_start=test_start,
-            )
-            test_summary = test_result.summary(initial_balance)
+        if test_summary:
             log.info(
                 "  TEST  | Kötések: %d | Win: %.0f%% | P&L: %.2f$ | MaxDD: %.1f%%",
                 test_summary.get("trades", 0),
@@ -705,13 +703,20 @@ def run_optimizer(cfg: dict, symbols: Optional[list[str]] = None):
                 test_summary.get("total_pnl", 0),
                 test_summary.get("max_drawdown", 0) * 100,
             )
-            # Fájl frissítése a test_summary-vel
-            entry["test_summary"] = test_summary
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(entry, f, indent=2, ensure_ascii=False, default=str)
-            tmp.replace(out)
-        except Exception as te:
-            log.warning("  %s — TEST hiba (train eredmény megmarad): %s", symbol, te)
+        log.info("  ⏱  %.1f mp", elapsed)
+
+        entry = {
+            "symbol":        symbol,
+            "optimized_at":  datetime.utcnow().isoformat(),
+            "train_summary": train_summary,
+            "test_summary":  test_summary,
+            "params":        result["params"],
+        }
+        out = params_file(symbol)
+        tmp = out.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(entry, f, indent=2, ensure_ascii=False, default=str)
+        tmp.replace(out)
         log.info("  Mentve: %s", out)
 
     log.info("=" * 60)
@@ -738,18 +743,15 @@ def run_optimizer(cfg: dict, symbols: Optional[list[str]] = None):
 # Külön PROCESSZBEN futtatható feladat (GIL-mentes — a GUI sosem fagy tőle)
 # ---------------------------------------------------------------------------
 
-def optimize_job(symbol, df_m15, df_m1, params_list, pair_cfg, trading_cfg,
-                 initial_balance, test_start, progress_q=None) -> dict:
-    """Egy pár teljes optimalizálása + out-of-sample teszt, MT5-függetlenül.
+def optimize_job(symbol, df_m15, df_m1, cfg, initial_balance, progress_q=None) -> dict:
+    """Az `optimize_symbol` PROCESSZBEN futtatható burka (a GUI ezt küldi a pool-nak).
 
-    Külön folyamatban (ProcessPoolExecutor) is futtatható: minden bemenet
-    picklezhető (DataFrame-ek, dict-ek), nincs MT5 vagy tkinter függés.
-    A haladást a progress_q-ra teszi (symbol, done, total) hármasként; ez lehet
-    multiprocessing Manager().Queue() VAGY bármi, aminek van .put() metódusa.
-
-    Visszaad: {"train_summary","test_summary","params"} vagy {"error": "..."}.
+    Minden bemenet picklezhető (DataFrame-ek + a teljes cfg dict), nincs MT5 vagy
+    tkinter függés. A haladást a progress_q-ra teszi (symbol, done, total) hármasként.
+    A method-döntést (optuna|grid|random) az optimize_symbol intézi → a GUI és a CLI
+    UGYANAZT az utat járja. Visszaad: {"train_summary","test_summary","params"} | {"error"}.
     """
-    def _progress(done, total, best_pnl):
+    def _progress(done, total, best):
         if progress_q is not None:
             try:
                 progress_q.put((symbol, done, total))
@@ -757,65 +759,8 @@ def optimize_job(symbol, df_m15, df_m1, params_list, pair_cfg, trading_cfg,
                 pass
 
     try:
-        result = optimize_pair(
-            symbol, df_m15, df_m1, params_list, pair_cfg, trading_cfg,
-            initial_balance, test_start, progress_callback=_progress,
-        )
-        if result is None:
-            return {"error": "nincs eredmény"}
-        test_result  = run_pair(symbol, df_m15, df_m1, result["params"],
-                                pair_cfg, trading_cfg, initial_balance,
-                                test_start=test_start)
-        test_summary = test_result.summary(initial_balance)
-        return {
-            "train_summary": result["train_summary"],
-            "test_summary":  test_summary,
-            "params":        result["params"],
-        }
-    except Exception as e:
-        import traceback
-        return {"error": f"{e}", "traceback": traceback.format_exc()}
-
-
-def optimize_job_optuna(symbol, df_m15, df_m1, opt_cfg, base_params, pair_cfg,
-                        trading_cfg, initial_balance, test_start,
-                        n_trials, n_splits, train_months, test_months,
-                        progress_q=None) -> dict:
-    """Optuna (Bayesian, walk-forward) optimalizálás külön PROCESSZBEN futtatva.
-
-    Ugyanaz a szerződés, mint az optimize_job-é: picklezhető bemenetek, a haladás a
-    progress_q-ra kerül, és a teljes trial-táblázatot CSV-be menti (optimize_pair_optuna).
-    Visszaad: {"train_summary","test_summary","params"} vagy {"error": "..."}.
-    """
-    if not _OPTUNA_AVAILABLE:
-        return {"error": "optuna nincs telepítve"}
-
-    def _progress(done, total, best_score):
-        if progress_q is not None:
-            try:
-                progress_q.put((symbol, done, total))
-            except Exception:
-                pass
-
-    try:
-        result = optimize_pair_optuna(
-            symbol, df_m15, df_m1, opt_cfg, base_params, pair_cfg, trading_cfg,
-            initial_balance,
-            n_trials=n_trials, n_splits=n_splits,
-            train_months=train_months, test_months=test_months,
-            progress_callback=_progress,
-        )
-        if result is None:
-            return {"error": "nincs eredmény (optuna)"}
-        test_result  = run_pair(symbol, df_m15, df_m1, result["params"],
-                                pair_cfg, trading_cfg, initial_balance,
-                                test_start=test_start)
-        test_summary = test_result.summary(initial_balance)
-        return {
-            "train_summary": result["train_summary"],
-            "test_summary":  test_summary,
-            "params":        result["params"],
-        }
+        return optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance,
+                               progress=_progress)
     except Exception as e:
         import traceback
         return {"error": f"{e}", "traceback": traceback.format_exc()}

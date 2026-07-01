@@ -432,19 +432,11 @@ class OptimizerController:
         """HáttérSZÁL: adat-előkészítés (MT5, IO) → a CPU-nehéz optimalizálás
         külön PROCESSZBE. A fő (UI) szál egyiket sem érinti → nem fagy."""
         try:
-            from ml.optimizer import (optimize_job, optimize_job_optuna,
-                                       params_file, _OPTUNA_AVAILABLE)
+            from ml.optimizer import optimize_job, params_file
             from trading.backtest import load_data
 
             opt_cfg     = self.cfg["optimizer"]
-            method      = opt_cfg.get("method", "random")
-            max_trials  = opt_cfg.get("max_trials", 500)
-            train_start = opt_cfg.get("train_start_date", "2025-01-01")
-            test_start  = opt_cfg.get("test_start_date", "2025-10-01")
             initial_bal = self.cfg.get("ml", {}).get("starting_balance_eur", 1000.0)
-            trading_cfg = self.cfg["trading"]
-            pair_cfg    = self.cfg["pairs"][symbol]
-            base_params = self.strategy.base_params(self.cfg)
 
             # ── Adat előkészítés (MT5_LOCK alatt, háttérszálon) ───────────
             from core.mt5_connector import MT5_LOCK
@@ -478,36 +470,18 @@ class OptimizerController:
                 self.optimizer_status[symbol] = "Hiba: nincs adat"
                 return
 
-            df_m15 = df_m15[df_m15.index >= train_start].copy()
-            df_m1  = df_m1[df_m1.index  >= train_start].copy()
-
-            # ── Módszer választása: Optuna (config: method=optuna), különben
-            #    random/grid. Az Optuna a GUI-ból is ugyanúgy fut, mint a CLI-ben. ──
-            use_optuna = (method == "optuna" and _OPTUNA_AVAILABLE)
+            # ── KÖZÖS dispatch: az optimize_job (→ optimize_symbol) dönt a
+            #    módszerről (optuna|grid|random), szeletel, CSV-t ír és tesztel —
+            #    PONTOSAN ugyanaz, mint a CLI-ben. A GUI csak a processzt/timeoutot/
+            #    haladást intézi. A method-választás EGY helyen (optimize_symbol) él. ──
             self._ensure_pool()
             timeout_sec = opt_cfg.get("timeout_sec", 1800)   # beragadás-védelem
+            self.optimizer_status[symbol] = "Optimalizálás indul..."
+            args = (symbol, df_m15, df_m1, self.cfg, initial_bal)
 
-            if use_optuna:
-                job  = optimize_job_optuna
-                args = (symbol, df_m15, df_m1, opt_cfg, base_params, pair_cfg,
-                        trading_cfg, initial_bal, test_start,
-                        max_trials,
-                        opt_cfg.get("wf_n_splits", 4),
-                        opt_cfg.get("wf_train_months", 6),
-                        opt_cfg.get("wf_test_months", 2))
-                self.optimizer_status[symbol] = f"0/{max_trials}  0%  (optuna)"
-            else:
-                params_list = self.strategy.param_space(
-                    self.cfg, base_params, method, max_trials)
-                job  = optimize_job
-                args = (symbol, df_m15, df_m1, params_list, pair_cfg, trading_cfg,
-                        initial_bal, test_start)
-                self.optimizer_status[symbol] = f"0/{len(params_list)}  0%"
-
-            # ── Számítás külön PROCESSZBEN (GIL-mentes), tartalék: szálon ──
             if self._pool is not None:
                 from concurrent.futures import TimeoutError as _FutTimeout
-                fut = self._pool.submit(job, *args, self._progress_q)
+                fut = self._pool.submit(optimize_job, *args, self._progress_q)
                 try:
                     entry = fut.result(timeout=timeout_sec)
                 except _FutTimeout:
@@ -515,7 +489,7 @@ class OptimizerController:
                     self.optimizer_status[symbol] = "Hiba: időtúllépés"
                     return   # a finally visszaállítja STOPPED-ra → UI nem ragad be
             else:
-                entry = job(*args, _LocalProgress(self.optimizer_status))
+                entry = optimize_job(*args, _LocalProgress(self.optimizer_status))
 
             if "error" in entry:
                 self.optimizer_status[symbol] = f"Hiba: {entry['error']}"
