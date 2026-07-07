@@ -503,6 +503,20 @@ class WprSmaStrategy(Strategy):
             objects.append(viz.Label(name=name, text=text, corner=0, x=10, y=y,
                                      color="black", fontsize=9))
 
+        # ── A stratégia által HASZNÁLT indikátorok (a TradeForgeViz felrakja) ──
+        p = md.params
+        m15_levels = (p.get("wpr_m15_sell_extreme", -20),
+                      p.get("wpr_m15_trigger", -50),
+                      p.get("wpr_m15_buy_extreme", -80))
+        m1_levels  = (p.get("wpr_m1_sell_extreme", -20),
+                      p.get("wpr_m1_trigger", -50),
+                      p.get("wpr_m1_buy_extreme", -80))
+        objects.append(viz.Indicator("MA",  "M15", p.get("sma_period", 200)))
+        objects.append(viz.Indicator("WPR", "M15", p.get("wpr_m15_period", 21),
+                                     m15_levels, color="black"))
+        objects.append(viz.Indicator("WPR", "M1",  p.get("wpr_m1_period", 8),
+                                     m1_levels, color="black"))
+
         return objects
 
     # --- Optimalizálás ----------------------------------------------------

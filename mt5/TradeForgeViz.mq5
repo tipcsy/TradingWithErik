@@ -17,12 +17,35 @@
 input int    TimerSeconds = 1;       // Fájl-újraolvasás gyakorisága (mp)
 input string FilePrefix   = "TFV_";  // Objektum-név és fájl prefix
 
-string g_file;   // TFV_<Symbol>.csv
+string g_file;                    // TFV_<Symbol>.csv
+bool   g_ind_done = false;        // az indikátorok fel vannak-e már rakva
+string g_ma_name  = "";           // a felrakott SMA rövidneve (fő ablak, leszedéshez)
+
+//+------------------------------------------------------------------+
+//| A SAJÁT al-ablak-indikátorok (TFWPR, TFBANDS) leszedése MINDEN    |
+//| al-ablakból. CSÖKKENŐ ablak- és index-sorrend → a törlés miatti   |
+//| index-eltolódás nem hagy ki egyet (ez okozta az időkeret-váltós   |
+//| halmozódást).                                                     |
+//+------------------------------------------------------------------+
+void RemoveOurWPRs()
+{
+   int wtot = (int)ChartGetInteger(0, CHART_WINDOWS_TOTAL);
+   for(int w = wtot - 1; w >= 1; w--)
+      for(int idx = ChartIndicatorsTotal(0, w) - 1; idx >= 0; idx--)
+      {
+         string nm = ChartIndicatorName(0, w, idx);
+         if(StringFind(nm, "TFWPR") == 0 || StringFind(nm, "TFBANDS") == 0)
+            ChartIndicatorDelete(0, w, nm);
+      }
+}
 
 //+------------------------------------------------------------------+
 int OnInit()
 {
    g_file = FilePrefix + _Symbol + ".csv";
+   g_ind_done = false;
+   g_ma_name  = "";
+   RemoveOurWPRs();   // előző futás maradék WPR-jei (halmozódás ellen)
    EventSetTimer(TimerSeconds);
    RefreshFromFile();
    return(INIT_SUCCEEDED);
@@ -32,7 +55,11 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
-   // SZÁNDÉKOSAN nem törlünk objektumot: a kirajzolt jelzések maradjanak meg.
+   // Az AUTO-felrakott indikátorokat leszedjük (a TradeForgeViz-hez tartoznak).
+   // A rajz-objektumok (TFV_) SZÁNDÉKOSAN maradnak.
+   RemoveOurWPRs();
+   if(g_ma_name != "")
+      ChartIndicatorDelete(0, 0, g_ma_name);
 }
 
 //+------------------------------------------------------------------+
@@ -60,13 +87,30 @@ void RefreshFromFile()
    if(h == INVALID_HANDLE)
       return;   // még nincs fájl — nem hiba
 
+   string inds[];
+   int nind = 0;
    while(!FileIsEnding(h))
    {
       string ln = FileReadString(h);
-      if(StringLen(ln) > 0)
-         ApplyLine(ln);
+      if(StringLen(ln) == 0)
+         continue;
+      if(StringFind(ln, "IND;") == 0)   // indikátor-leírás — külön kezeljük
+      {
+         ArrayResize(inds, nind + 1);
+         inds[nind] = ln;
+         nind++;
+         continue;
+      }
+      ApplyLine(ln);
    }
    FileClose(h);
+
+   // Az indikátorokat CSAK EGYSZER rakjuk fel (amint először látjuk az IND sorokat).
+   if(!g_ind_done && nind > 0)
+   {
+      SetupIndicators(inds, nind);
+      g_ind_done = true;
+   }
    ChartRedraw();
 }
 
@@ -90,40 +134,11 @@ void ApplyLine(string ln)
    string type = f[0];
    string name = f[1];
 
-   if(type == "RECT"  && n >= 8) UpsertRect(name, f);
-   else if(type == "VLINE" && n >= 5) UpsertVLine(name, f);
+   // RECT (SMA-szalag + M15 doboz) → a TradeForgeBands al-ablak rajzolja, itt kihagyjuk.
+   if(type == "VLINE" && n >= 5) UpsertVLine(name, f);
    else if(type == "TREND" && n >= 8) UpsertTrend(name, f);
    else if(type == "TEXT"  && n >= 7) UpsertText(name, f);
    else if(type == "LABEL" && n >= 8) UpsertLabel(name, f);
-}
-
-//+------------------------------------------------------------------+
-//| RECT;name;t1;p1;t2;p2;r,g,b;fill                                 |
-//+------------------------------------------------------------------+
-void UpsertRect(string name, string &f[])
-{
-   datetime t1 = (datetime)StringToInteger(f[2]);
-   double   p1 = StringToDouble(f[3]);
-   datetime t2 = (datetime)StringToInteger(f[4]);
-   double   p2 = StringToDouble(f[5]);
-   color    c  = StringToColor(f[6]);
-   bool     fill = (f[7] == "1");
-
-   if(ObjectFind(0, name) < 0)
-   {
-      ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, p1, t2, p2);
-      ObjectSetInteger(0, name, OBJPROP_BACK, true);
-      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
-   }
-   else
-   {
-      // MÓDOSÍTÁS: a sarkok mozgatása → a doboz nő/zsugorodik (nem új objektum).
-      ObjectMove(0, name, 0, t1, p1);
-      ObjectMove(0, name, 1, t2, p2);
-   }
-   ObjectSetInteger(0, name, OBJPROP_COLOR, c);
-   ObjectSetInteger(0, name, OBJPROP_FILL, fill);
 }
 
 //+------------------------------------------------------------------+
@@ -227,5 +242,64 @@ void UpsertLabel(string name, string &f[])
    ObjectSetString(0, name, OBJPROP_TEXT, txt);
    ObjectSetInteger(0, name, OBJPROP_COLOR, c);
    ObjectSetInteger(0, name, OBJPROP_FONTSIZE, fs);
+}
+
+//+------------------------------------------------------------------+
+//| A stratégia által HASZNÁLT indikátorok felrakása a chartra       |
+//| IND;<MA|WPR>;<TF>;<period>;[szint1;szint2;…]                     |
+//+------------------------------------------------------------------+
+ENUM_TIMEFRAMES TfFromStr(string s)
+{
+   if(s == "M1")  return PERIOD_M1;
+   if(s == "M5")  return PERIOD_M5;
+   if(s == "M15") return PERIOD_M15;
+   if(s == "M30") return PERIOD_M30;
+   if(s == "H1")  return PERIOD_H1;
+   if(s == "H4")  return PERIOD_H4;
+   return PERIOD_CURRENT;
+}
+
+void SetupIndicators(string &inds[], int cnt)
+{
+   // Szalag/doboz AL-ABLAK (TradeForgeBands) — a TradeForgeViz vezérli, hogy
+   // EGY indikátor rakjon fel mindent. FELTÉTEL: a TradeForgeBands.ex5 megvan.
+   int bh = iCustom(_Symbol, PERIOD_CURRENT, "TradeForgeBands");
+   if(bh != INVALID_HANDLE)
+      ChartIndicatorAdd(0, (int)ChartGetInteger(0, CHART_WINDOWS_TOTAL), bh);
+
+   for(int i = 0; i < cnt; i++)
+   {
+      string f[];
+      int n = StringSplit(inds[i], ';', f);
+      if(n < 4)
+         continue;
+      string          kind   = f[1];
+      ENUM_TIMEFRAMES tf     = TfFromStr(f[2]);
+      int             period = (int)StringToInteger(f[3]);
+
+      // f[4] = vonalszín ("r,g,b" vagy "-" = alapértelmezett); WPR-nél f[5..] szintek.
+      if(kind == "MA")
+      {
+         int hnd = iMA(_Symbol, tf, period, 0, MODE_SMA, PRICE_CLOSE);
+         if(hnd == INVALID_HANDLE)
+            continue;
+         if(ChartIndicatorAdd(0, 0, hnd))   // 0 = fő (ár) ablak
+            g_ma_name = ChartIndicatorName(0, 0, ChartIndicatorsTotal(0, 0) - 1);
+      }
+      else if(kind == "WPR")
+      {
+         // Saját WPR (TradeForgeWPR): állítható szín + szintek. A matek a
+         // stratégiáé. FELTÉTEL: a TradeForgeWPR.ex5 le van fordítva.
+         color  clr = (n > 4 && f[4] != "-") ? StringToColor(f[4]) : clrBlack;
+         double l1  = (n > 5) ? StringToDouble(f[5]) : -20.0;
+         double l2  = (n > 6) ? StringToDouble(f[6]) : -50.0;
+         double l3  = (n > 7) ? StringToDouble(f[7]) : -80.0;
+         int hnd = iCustom(_Symbol, tf, "TradeForgeWPR", period, clr, l1, l2, l3);
+         if(hnd == INVALID_HANDLE)
+            continue;
+         int win = (int)ChartGetInteger(0, CHART_WINDOWS_TOTAL);   // új al-ablak
+         ChartIndicatorAdd(0, win, hnd);   // a leszedést a RemoveOurWPRs intézi (név szerint)
+      }
+   }
 }
 //+------------------------------------------------------------------+

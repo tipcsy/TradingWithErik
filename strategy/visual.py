@@ -127,6 +127,27 @@ class Text:
 
 
 @dataclass
+class Indicator:
+    """A stratégia által HASZNÁLT indikátor leírása — az indikátor (MQL5) a chartra
+    rakja (ChartIndicatorAdd). Nem rajz-objektum: az indikátor külön kezeli.
+
+    kind: "MA" | "WPR" ; timeframe: "M1"/"M15"/… ; period: egész ;
+    levels: WPR jelentős szintek (extrém/trigger) — az al-ablakba vízszintes
+    vonalként kerülnek. Az MA-hoz üres."""
+    kind: str
+    timeframe: str
+    period: int
+    levels: tuple = ()
+    color: str = ""        # vonalszín (szemantikus név); "" = MT5 alapértelmezett
+
+    def line(self) -> str:
+        col = _rgb(self.color) if self.color else "-"
+        parts = ["IND", self.kind, self.timeframe, str(int(self.period)), col]
+        parts += [repr(float(x)) for x in self.levels]
+        return ";".join(parts)
+
+
+@dataclass
 class Label:
     """Chart-SAROKHOZ pinnelt szöveg (pixel-koordináta, nem mozog az árral).
     Pl. a beállítás-táblázat. corner: 0=bal-fent, 1=jobb-fent, 2=bal-lent,
