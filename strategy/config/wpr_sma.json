@@ -137,16 +137,6 @@
       "max": 4.0,
       "step": 0.2
     },
-    "trade_hour_start": {
-      "min": 0,
-      "max": 12,
-      "step": 1
-    },
-    "trade_hour_end": {
-      "min": 12,
-      "max": 24,
-      "step": 1
-    },
     "skip_monday_hours": {
       "min": 0,
       "max": 4,

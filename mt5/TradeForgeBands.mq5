@@ -17,10 +17,14 @@
 
 input int    TimerSeconds = 1;      // fájl-újraolvasás (mp)
 input string FilePrefix   = "TFV_"; // ugyanaz, mint a TradeForgeViz-nél
-input double RibbonTop    = 0.45;   // SMA-szalag felső széle (al-ablak 0..1)
-input double RibbonBot    = 0.05;   // SMA-szalag alsó széle
-input double BoxTop       = 0.95;   // M15 doboz felső széle (a szalag FÖLÖTT)
-input double BoxBot       = 0.55;   // M15 doboz alsó széle
+// Három sor az al-ablakban (0..1): kék M15-doboz FENT, SMA-szalag KÖZÉPEN,
+// szürke no-trade sáv LENT.
+input double BoxTop       = 0.95;   // M15 doboz (kék)
+input double BoxBot       = 0.68;
+input double RibbonTop    = 0.62;   // SMA-szalag (zöld/piros)
+input double RibbonBot    = 0.36;
+input double NoTradeTop   = 0.30;   // no-trade órák (szürke)
+input double NoTradeBot   = 0.05;
 
 double DummyBuf[];   // csak az al-ablak létrehozásához (nem rajzol)
 string g_file;
@@ -113,11 +117,15 @@ void ApplyRect(string ln)
    double top, bot;
    if(StringFind(name, FilePrefix + "m15win") == 0)
    {
-      top = BoxTop;    bot = BoxBot;      // M15 doboz — felül
+      top = BoxTop;     bot = BoxBot;      // M15 doboz — felül (kék)
+   }
+   else if(StringFind(name, FilePrefix + "notrade") == 0)
+   {
+      top = NoTradeTop; bot = NoTradeBot;  // no-trade órák — lent (szürke)
    }
    else
    {
-      top = RibbonTop; bot = RibbonBot;   // SMA-szalag — alul
+      top = RibbonTop;  bot = RibbonBot;   // SMA-szalag — középen (zöld/piros)
    }
 
    // SAJÁT név (TFB_…) — hogy ne ütközzön a fő ablak esetleges TFV_ objektumaival.

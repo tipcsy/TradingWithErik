@@ -964,6 +964,7 @@ class PortfolioBacktestTab:
 
 POSITION_COLUMNS = [
     ("symbol",  "Symbol",     10, "w"),
+    ("strategy","Stratégia",   9, "center"),
     ("type",    "Irány",       6, "center"),
     ("volume",  "Lot",         6, "center"),
     ("open",    "Nyitó",      10, "center"),
@@ -1028,9 +1029,11 @@ class PositionRow:
         if val > 0:
             self._on_trail_dist(self.ticket, val)
 
-    def update(self, pos, pstate, digits, trail_default=None, point=None):
+    def update(self, pos, pstate, digits, trail_default=None, point=None,
+               strategy_name="—"):
         self._symbol = pos["symbol"]
         self.labels["symbol"].config(text=pos["symbol"])
+        self.labels["strategy"].config(text=strategy_name or "—", fg=FG_GRAY)
         t = pos["type"]
         self.labels["type"].config(text=t, fg=FG_GREEN if t == "BUY" else FG_RED)
         self.labels["volume"].config(text=f'{pos["volume"]:.2f}', fg=FG_WHITE)
@@ -1123,11 +1126,12 @@ class PositionsTab:
                  positions_provider, pos_state, digits_provider,
                  on_be, on_trail, on_panic, on_close_all,
                  on_name_click, on_trail_dist, trail_default_provider,
-                 point_provider):
+                 point_provider, strategy_provider=None):
         self.parent = parent
         self.cfg = cfg
         self._mono, self._small, self._header = mono_font, small_font, header_font
         self._positions_provider = positions_provider
+        self._strategy_provider = strategy_provider
         self._pos_state = pos_state
         self._digits_provider = digits_provider
         self._on_be, self._on_trail, self._on_panic = on_be, on_trail, on_panic
@@ -1193,8 +1197,10 @@ class PositionsTab:
                 self._rows[tid] = row
             trail_def = self._trail_default_provider(pos["symbol"])
             point     = self._point_provider(pos["symbol"])
+            strat     = self._strategy_provider(pos.get("magic")) if self._strategy_provider else "—"
             row.update(pos, self._pos_state.get(tid),
-                       self._digits_provider(pos["symbol"]), trail_def, point)
+                       self._digits_provider(pos["symbol"]), trail_def, point,
+                       strategy_name=strat)
 
         for tid in list(self._rows):
             if tid not in seen:
@@ -1222,6 +1228,121 @@ class PositionsTab:
             self._lbl_breakdown.config(text="   |   ".join(parts), fg=FG_GRAY)
         else:
             self._lbl_breakdown.config(text="Nincs nyitott pozíció.", fg=FG_GRAY)
+
+
+# ---------------------------------------------------------------------------
+# Lezárt napi pozíciók fül — a mai (UTC) lezárt kereskedések + összesítés
+# ---------------------------------------------------------------------------
+
+CLOSED_COLUMNS = [
+    ("symbol",   "Symbol",     10, "w"),
+    ("strategy", "Stratégia",   9, "center"),
+    ("type",     "Irány",       6, "center"),
+    ("volume",   "Lot",         6, "center"),
+    ("open",     "Nyitó",      10, "center"),
+    ("close",    "Záró",       10, "center"),
+    ("time",     "Zárás",       8, "center"),
+    ("pnl",      "P&L",         9, "center"),
+]
+
+
+class ClosedTab:
+    """Mai lezárt kereskedések (MT5 history), stratégiánkénti bontással.
+    A sorok kulcsa a pozíció-azonosító; a lista a nap során csak bővül."""
+
+    def __init__(self, parent, mono_font, small_font, header_font,
+                 closed_provider, strategy_provider, digits_provider):
+        self.parent = parent
+        self._mono, self._small, self._header = mono_font, small_font, header_font
+        self._closed_provider = closed_provider
+        self._strategy_provider = strategy_provider
+        self._digits_provider = digits_provider
+        self._rows: dict = {}
+        self._build_ui()
+
+    def _build_ui(self):
+        p = self.parent
+        p.configure(bg=BG)
+        top = tk.Frame(p, bg=BG, pady=4)
+        top.pack(fill="x", padx=8)
+        tk.Label(top, text="Mai lezárt kereskedések  (MT5 szerver-idő)", bg=BG,
+                 fg=FG_WHITE, font=self._header).pack(side="left")
+        self._lbl_total = tk.Label(top, text="Összes P&L: —", bg=BG, fg=FG_WHITE,
+                                   font=self._header)
+        self._lbl_total.pack(side="right", padx=8)
+
+        self._lbl_breakdown = tk.Label(p, text="", bg=BG, fg=FG_GRAY, font=self._small,
+                                       anchor="w", justify="left")
+        self._lbl_breakdown.pack(fill="x", padx=10, pady=(0, 4))
+
+        hdr = tk.Frame(p, bg=BG_HEADER)
+        hdr.pack(fill="x", padx=2)
+        for key, label, w, anchor in CLOSED_COLUMNS:
+            tk.Label(hdr, text=label, width=w, anchor=anchor, bg=BG_HEADER,
+                     fg=FG_BLUE, font=self._header, padx=4, pady=3).pack(side="left")
+        tk.Frame(p, bg=FG_GRAY_DIM, height=1).pack(fill="x", padx=2)
+
+        holder = tk.Frame(p, bg=BG)
+        holder.pack(fill="both", expand=True, padx=2)
+        canvas = tk.Canvas(holder, bg=BG, highlightthickness=0)
+        vsb = tk.Scrollbar(holder, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        self._rows_frame = tk.Frame(canvas, bg=BG)
+        canvas.create_window((0, 0), window=self._rows_frame, anchor="nw")
+        self._rows_frame.bind(
+            "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+    def refresh(self):
+        closed = self._closed_provider() or []
+        for c in closed:
+            pid = c["position"]
+            if pid not in self._rows:
+                self._rows[pid] = self._make_row(c)   # nincs törlés — a lista csak bővül
+
+        total  = sum(c["pnl"] for c in closed)
+        wins   = sum(1 for c in closed if c["pnl"] > 0)
+        losses = sum(1 for c in closed if c["pnl"] < 0)
+        self._lbl_total.config(
+            text=f"Összes P&L: {total:+.2f}$   |   {len(closed)} trade   |   {wins}W / {losses}L",
+            fg=FG_GREEN if total >= 0 else FG_RED)
+
+        by_strat: dict = {}
+        for c in closed:
+            nm = self._strategy_provider(c.get("magic")) if self._strategy_provider else "—"
+            a = by_strat.setdefault(nm, [0.0, 0])
+            a[0] += c["pnl"]
+            a[1] += 1
+        if by_strat:
+            parts = [f"{s}: {v[0]:+.2f}$ ({v[1]})" for s, v in sorted(by_strat.items())]
+            self._lbl_breakdown.config(text="   |   ".join(parts), fg=FG_GRAY)
+        else:
+            self._lbl_breakdown.config(text="Ma még nincs lezárt kereskedés.", fg=FG_GRAY)
+
+    def _make_row(self, c):
+        digits = self._digits_provider(c["symbol"])
+        strat  = self._strategy_provider(c.get("magic")) if self._strategy_provider else "—"
+        t      = c["type"]
+        pnl    = c["pnl"]
+        tstr   = datetime.fromtimestamp(c["close_time"], tz=timezone.utc).strftime("%H:%M")
+        vals = {
+            "symbol":   (c["symbol"],                       FG_WHITE),
+            "strategy": (strat,                             FG_GRAY),
+            "type":     (t,                 FG_GREEN if t == "BUY" else FG_RED),
+            "volume":   (f'{c["volume"]:.2f}',              FG_WHITE),
+            "open":     (_fmt_price(c["price_open"], digits),  FG_GRAY),
+            "close":    (_fmt_price(c["price_close"], digits), FG_WHITE),
+            "time":     (tstr,                              FG_GRAY),
+            "pnl":      (f"{pnl:+.2f}$",     FG_GREEN if pnl >= 0 else FG_RED),
+        }
+        row = tk.Frame(self._rows_frame, bg=BG_ROW_EVEN)
+        for key, label, w, anchor in CLOSED_COLUMNS:
+            txt, fg = vals[key]
+            tk.Label(row, text=txt, width=w, anchor=anchor, bg=BG_ROW_EVEN, fg=fg,
+                     font=self._mono, padx=4, pady=2).pack(side="left")
+        row.pack(fill="x", padx=2)
+        return row
 
 
 # ---------------------------------------------------------------------------
@@ -1338,7 +1459,16 @@ class DashboardWindow:
             on_name_click=self._show_instrument_params,
             on_trail_dist=self._pos_trail_dist,
             trail_default_provider=self._trail_default,
-            point_provider=lambda sym: getattr(self.dashboard_ref.get(sym), "point", None))
+            point_provider=lambda sym: getattr(self.dashboard_ref.get(sym), "point", None),
+            strategy_provider=self._strategy_by_magic)
+
+        closed_frame = tk.Frame(self._notebook, bg=BG)
+        self._notebook.add(closed_frame, text="  Lezárt (ma)  ")
+        self._closed_tab = ClosedTab(
+            closed_frame, mono_font, small_font, header_font,
+            closed_provider=lambda: getattr(self, "_mt5_cache", {}).get("closed_today", []),
+            strategy_provider=self._strategy_by_magic,
+            digits_provider=lambda sym: getattr(self.dashboard_ref.get(sym), "digits", 5))
 
         bt_frame = tk.Frame(self._notebook, bg=BG_BT)
         self._notebook.add(bt_frame, text="  Portfólió Backtest  ")
@@ -1833,6 +1963,104 @@ class DashboardWindow:
             _metric("PF ", f"{ts.get('profit_factor',0):.2f}", mc.get("profit_factor", "white"))
             _metric("MaxDD ", f"{ts.get('max_drawdown',0)*100:.1f}%", mc.get("max_drawdown", "white"))
 
+        # ── Kereskedési órák (trade_hours) + óránkénti P&L-bontás ────────────
+        # A live óra-kapuja a config.json pairs.<SYM>.trade_hours listáját nézi.
+        # Az óránkénti P&L (az optimalizált test_summary-ből) segít eldönteni,
+        # mely órákat vegyük ki. Auto-javasol = a mínuszos órákat kiveszi (kézzel
+        # felülbírálható). Ez a config.json-ba ment, NEM az optimalizált JSON-ba.
+        hp_raw = (ts or {}).get("hourly_pnl", {})
+        hourly = {}
+        for _k, _v in hp_raw.items():
+            try:
+                hourly[int(_k)] = _v
+            except (ValueError, TypeError):
+                pass
+
+        _pc = self.cfg.get("pairs", {}).get(symbol, {})
+        _cur = _pc.get("trade_hours")
+        if _cur is not None:
+            _checked0 = {int(h) for h in _cur}
+        else:
+            _hs, _he = params.get("trade_hour_start"), params.get("trade_hour_end")
+            if isinstance(_hs, (int, float)) and isinstance(_he, (int, float)):
+                _checked0 = {h for h in range(24) if int(_hs) <= h < int(_he)}
+            else:
+                _checked0 = set(range(24))
+
+        tk.Label(popup, text="Kereskedési órák (szerver/chart idő) — pipáld be, mely órákban "
+                             "kereskedjen (óránkénti P&L az optimalizálásból):",
+                 bg=BG, fg=FG_GRAY, font=self._small_font).pack(anchor="w", padx=10, pady=(8, 0))
+
+        # Saját kattintható kapcsoló óránként (a natív checkbox rosszul renderel a
+        # sötét témán). Az ÓRA-SZÁM a gomb: ZÖLD = kereskedik, sötét = kihagyja.
+        hours_frame = tk.Frame(popup, bg=BG)
+        hours_frame.pack(anchor="w", padx=10, pady=(2, 2))
+        hour_on = {h: (h in _checked0) for h in range(24)}
+        hour_btns = {}
+
+        def _paint(h):
+            btn = hour_btns[h]
+            if hour_on[h]:
+                btn.config(bg=FG_GREEN, fg="#1e1e2e")     # BE — zöld
+            else:
+                btn.config(bg=BG_HEADER, fg=FG_GRAY_DIM)  # KI — sötét
+
+        def _toggle(h):
+            hour_on[h] = not hour_on[h]
+            _paint(h)
+
+        for h in range(24):
+            colf = tk.Frame(hours_frame, bg=BG)
+            colf.grid(row=0, column=h, padx=1)
+            btn = tk.Label(colf, text=f"{h:02d}", width=2, padx=2, pady=2,
+                           font=("Courier New", 8, "bold"), cursor="hand2")
+            btn.pack()
+            btn.bind("<Button-1>", lambda e, hh=h: _toggle(hh))
+            hour_btns[h] = btn
+            _paint(h)
+            _b = hourly.get(h)
+            if _b:
+                _pnl, _cnt = _b.get("pnl", 0.0), _b.get("count", 0)
+                tk.Label(colf, text=f"{_pnl:+.0f}", bg=BG,
+                         fg=FG_GREEN if _pnl >= 0 else FG_RED,
+                         font=("Courier New", 7)).pack()
+                tk.Label(colf, text=f"{_cnt}", bg=BG, fg=FG_GRAY,
+                         font=("Courier New", 7)).pack()
+            else:
+                tk.Label(colf, text="—", bg=BG, fg=FG_GRAY_DIM,
+                         font=("Courier New", 7)).pack()
+                tk.Label(colf, text="", bg=BG, font=("Courier New", 7)).pack()
+
+        hbtns = tk.Frame(popup, bg=BG)
+        hbtns.pack(anchor="w", padx=10, pady=(0, 6))
+        hlbl = tk.Label(hbtns, text="", bg=BG, fg=FG_GREEN, font=self._small_font)
+
+        def auto_suggest():
+            # Mínuszos óra → ki; nem-mínuszos → be; adat nélküli óra érintetlen.
+            for _h in range(24):
+                _bb = hourly.get(_h)
+                if _bb is not None:
+                    hour_on[_h] = (_bb.get("pnl", 0.0) >= 0)
+                    _paint(_h)
+            hlbl.config(text="Javaslat betöltve — felülbírálható, majd Órák mentése.",
+                        fg=FG_GRAY)
+
+        def save_hours():
+            sel = [h for h in range(24) if hour_on[h]]
+            pcfg = self.cfg.setdefault("pairs", {}).setdefault(symbol, {})
+            pcfg["trade_hours"] = sel
+            try:
+                self._save_main_config()
+                hlbl.config(text=f"Mentve: {len(sel)} óra a config.json-ba.", fg=FG_GREEN)
+            except Exception as ex:
+                hlbl.config(text=f"Mentési hiba: {ex}", fg=FG_RED)
+
+        tk.Button(hbtns, text="Auto-javasol", font=self._small_font, bg=BTN_OPT_BG,
+                  fg="#ffffff", relief="flat", command=auto_suggest).pack(side="left", padx=(0, 6))
+        tk.Button(hbtns, text="Órák mentése", font=self._small_font, bg=BTN_PLAY_BG,
+                  fg="#1e1e2e", relief="flat", command=save_hours).pack(side="left", padx=(0, 6))
+        hlbl.pack(side="left", padx=6)
+
         tk.Label(popup, text="Kézi módosítás — a következő Play-nél lép életbe:",
                  bg=BG, fg=FG_GRAY, font=self._small_font).pack(anchor="w", padx=10)
 
@@ -2094,6 +2322,16 @@ class DashboardWindow:
         self.instrument_state.pop(symbol, None)
         self.optimizer_status.pop(symbol, None)
         self._apply_filter_sort()
+
+    def _strategy_by_magic(self, magic) -> str:
+        """magic → stratégianév (Pozíciók / Lezárt fül). Jelenleg egy stratégia
+        van; több stratégiánál itt bővül a leképezés (magic-onként egyedi)."""
+        try:
+            if magic is not None and int(magic) == self.strategy.magic(self.cfg):
+                return self.strategy.name
+        except Exception:
+            pass
+        return "—"
 
     # ── Pozíciókezelő handlerek (Pozíciók fül) ──────────────────────────
     def _pos_panic(self, ticket: int):
@@ -2453,7 +2691,8 @@ class DashboardWindow:
                 try:
                     from core.mt5_connector import (
                         connection_info, daily_pnl as _dpnl,
-                        open_positions_by_symbol, open_positions_detailed)
+                        open_positions_by_symbol, open_positions_detailed,
+                        closed_positions_today)
                     info = connection_info(self.cfg)
                     self._mt5_cache["connected"] = info.get("connected", False)
                     self._mt5_cache["info"]      = info
@@ -2461,10 +2700,12 @@ class DashboardWindow:
                         self._mt5_cache["daily_pnl"] = _dpnl()
                         self._mt5_cache["positions"] = open_positions_by_symbol()
                         self._mt5_cache["positions_detail"] = open_positions_detailed()
+                        self._mt5_cache["closed_today"] = closed_positions_today()
                     else:
                         self._mt5_cache["daily_pnl"] = None
                         self._mt5_cache["positions"] = {}
                         self._mt5_cache["positions_detail"] = []
+                        self._mt5_cache["closed_today"] = []
                 except Exception:
                     pass
                 _t.sleep(5)
@@ -2569,6 +2810,13 @@ class DashboardWindow:
         if hasattr(self, "_pos_tab"):
             try:
                 self._pos_tab.refresh()
+            except Exception:
+                pass
+
+        # Lezárt (ma) fül frissítése
+        if hasattr(self, "_closed_tab"):
+            try:
+                self._closed_tab.refresh()
             except Exception:
                 pass
 

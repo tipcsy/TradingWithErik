@@ -156,6 +156,63 @@ def open_positions_detailed() -> list:
         return []
 
 
+def closed_positions_today() -> list:
+    """A MAI napon (UTC) LEZÁRT pozíciók — a „Lezárt napi pozíciók" fülhöz.
+
+    Az MT5 deal-előzményből pozíciónként összegzi: nyitó/záró ár, irány, lot,
+    P&L (a záró deal-ök profit+jutalék+swap-ja — a daily_pnl konvenciójával
+    egyezik), magic. A ma zárt, de KORÁBBAN nyitott pozíciók nyitó dealjét külön
+    lekéri. Rendezve zárási idő szerint.
+    """
+    try:
+        from datetime import date, datetime, timezone, timedelta
+        today    = datetime.combine(date.today(), datetime.min.time()).replace(tzinfo=timezone.utc)
+        tomorrow = today + timedelta(days=1)
+        with MT5_LOCK:
+            deals = mt5.history_deals_get(today, tomorrow)
+        if not deals:
+            return []
+        agg: dict = {}
+        for d in deals:
+            p = agg.setdefault(d.position_id, {
+                "in": None, "pnl": 0.0, "close_price": None, "close_time": None})
+            if d.entry == mt5.DEAL_ENTRY_IN:
+                p["in"] = d
+            elif d.entry in (mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_OUT_BY):
+                p["pnl"]        += d.profit + d.commission + d.swap
+                p["close_price"] = d.price
+                p["close_time"]  = d.time
+        out = []
+        for pid, p in agg.items():
+            if p["close_time"] is None:
+                continue                     # ma nyitott, még nyitva → nem lezárt
+            din = p["in"]
+            if din is None:                  # korábban nyitott, ma zárt → nyitó deal külön
+                with MT5_LOCK:
+                    hist = mt5.history_deals_get(position=pid)
+                for d in hist or []:
+                    if d.entry == mt5.DEAL_ENTRY_IN:
+                        din = d
+                        break
+                if din is None:
+                    continue
+            out.append({
+                "position":    pid,
+                "symbol":      din.symbol,
+                "type":        "BUY" if din.type == mt5.DEAL_TYPE_BUY else "SELL",
+                "volume":      din.volume,
+                "price_open":  din.price,
+                "price_close": p["close_price"],
+                "close_time":  p["close_time"],
+                "magic":       din.magic,
+                "pnl":         round(p["pnl"], 2),
+            })
+        out.sort(key=lambda x: x["close_time"])
+        return out
+    except Exception:
+        return []
+
+
 def close_position(ticket: int) -> bool:
     """Egy pozíció azonnali piaci zárása (Pánik gomb)."""
     try:

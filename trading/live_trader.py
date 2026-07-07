@@ -286,9 +286,51 @@ class LivePairState:
 # MT5 chart-vizualizáció (a stratégia visual_objects-je → Common\Files fájl)
 # ---------------------------------------------------------------------------
 
-def write_pair_visuals(symbol: str, params: dict, strategy, pip_size: float):
-    """A stratégia rajzolási objektumait kiírja a viz-fájlba. MÉLY adatablakot
-    tölt (visual_lookback_bars) — ez több, mint a jelzés-warmup —, hogy a
+def framework_visual_objects(pair_cfg: dict, md: MarketData) -> list:
+    """KERETRENDSZER-szintű viz-objektumok (nem a stratégiáé): a no-trade órák
+    SZÜRKE dobozai a `trade_hours` alapján. A stratégia semmit nem tud a
+    kereskedési órákról — ezért ezt a keret emittálja (a szeparáció megmarad).
+
+    Idő: a bar-idővel (szerver/chart idő) EGYEZŐ órákban — a live óra-kapuja is
+    ehhez igazodik, így a szürke doboz pontosan azt mutatja, mikor NEM kereskedik.
+    """
+    from strategy import visual as viz
+    th = pair_cfg.get("trade_hours")
+    if th is None:
+        return []
+    no_trade = set(range(24)) - {int(h) for h in th}
+    df = md.bars.get("M15")
+    if not no_trade or df is None or len(df) < 2:
+        return []
+    start, end = df.index[0], df.index[-1]
+    objs: list = []
+    day     = pd.Timestamp(start.date(), tz="UTC")
+    end_day = pd.Timestamp(end.date(),   tz="UTC")
+    while day <= end_day:
+        h = 0
+        while h < 24:
+            if h in no_trade:
+                blk = h
+                while h < 24 and h in no_trade:
+                    h += 1
+                t1 = day + pd.Timedelta(hours=blk)
+                t2 = day + pd.Timedelta(hours=h)          # exkluzív blokk-vég
+                if t2 > start and t1 < end:               # látható tartományra vágva
+                    e1 = int(max(t1, start).timestamp())
+                    e2 = int(min(t2, end).timestamp())
+                    if e2 > e1:
+                        objs.append(viz.Rect(name=f"notrade_{e1}", t1=e1, p1=0.0,
+                                             t2=e2, p2=1.0, color="gray"))
+            else:
+                h += 1
+        day += pd.Timedelta(days=1)
+    return objs
+
+
+def write_pair_visuals(symbol: str, params: dict, strategy, pip_size: float,
+                       pair_cfg: dict = None):
+    """A stratégia + keretrendszer rajzolási objektumait kiírja a viz-fájlba. MÉLY
+    adatablakot tölt (visual_lookback_bars) — több, mint a jelzés-warmup —, hogy a
     megjelenített előzmény (SMA-szalag) több napra visszamenjen."""
     bars = {}
     for tf in strategy.timeframes():
@@ -303,7 +345,10 @@ def write_pair_visuals(symbol: str, params: dict, strategy, pip_size: float):
         return
     # pip_size a jövőbeli TP/SL-rajzoláshoz (feltétel 3) — a params nem tartalmazza.
     md = MarketData(symbol=symbol, params={**params, "pip_size": pip_size}, bars=bars)
-    mt5_visual.write(symbol, strategy.visual_objects(md))
+    # A no-trade szürke dobozok ELŐRE kerülnek (a fájlban előbb) → az al-ablakban
+    # a szalag/doboz FÖLÖTTE rajzolódik (a szürke a háttér-időoszlop).
+    framework = framework_visual_objects(pair_cfg or {}, md)
+    mt5_visual.write(symbol, framework + strategy.visual_objects(md))
 
 
 # ---------------------------------------------------------------------------
@@ -339,12 +384,38 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         {**trading_cfg, "account_risk_pct": trading_cfg["account_risk_pct"] * 0.5}
         if risky else trading_cfg)
 
-    # Session szűrő
-    hour = datetime.now(timezone.utc).hour
-    sess_start = pair_cfg.get("sess_start", 0)
-    sess_end   = pair_cfg.get("sess_end", 24)
-    if not (sess_start <= hour < sess_end):
-        return
+    # --- MT5 chart-vizualizáció (throttle-olva, mély adatablakkal) ---
+    # A kereskedési kapuk (session/napi limit/adathiány) ELŐTT: a viz MEGJELENÍTÉS,
+    # nem kereskedés — kereskedési szüneten (pl. session-en kívül) is frissüljön,
+    # különben a sávok „megállnak" a session végén.
+    now_ts = time.time()
+    if (VIZ_ENABLED and ds.viz_enabled
+            and now_ts - _viz_last_write.get(symbol, 0.0) >= VIZ_INTERVAL_SEC):
+        _viz_last_write[symbol] = now_ts
+        try:
+            write_pair_visuals(symbol, params, strategy, pip_size, pair_cfg)
+        except Exception as e:
+            log.debug("%s — viz írás hiba: %s", symbol, e)
+
+    # Óra-kapu: az engedélyezett órák LISTÁJA (trade_hours), amit kézzel állítasz
+    # az óránkénti P&L-bontás alapján. Ha nincs trade_hours → visszaesik a régi
+    # sess_start/sess_end TARTOMÁNYRA (visszafelé kompatibilis).
+    #
+    # Az óra a SZERVER/CHART idő (a bar-idővel és az óránkénti bontással egyező),
+    # NEM a valós UTC — így a trade_hours pontosan azt jelenti, amit a charton
+    # látsz, és a no-trade szürke sáv is illeszkedik. (A tick.time szerver-epoch.)
+    _tick = mt5.symbol_info_tick(symbol)
+    hour = (datetime.fromtimestamp(_tick.time, tz=timezone.utc).hour
+            if _tick else datetime.now(timezone.utc).hour)
+    trade_hours = pair_cfg.get("trade_hours")
+    if trade_hours is not None:
+        if hour not in {int(h) for h in trade_hours}:
+            return
+    else:
+        sess_start = pair_cfg.get("sess_start", 0)
+        sess_end   = pair_cfg.get("sess_end", 24)
+        if not (sess_start <= hour < sess_end):
+            return
 
     # Napi reset
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -379,16 +450,6 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         ds.cells_ts = time.time()
     except Exception:
         pass
-
-    # --- MT5 chart-vizualizáció (throttle-olva, mély adatablakkal) ---
-    now_ts = time.time()
-    if (VIZ_ENABLED and ds.viz_enabled
-            and now_ts - _viz_last_write.get(symbol, 0.0) >= VIZ_INTERVAL_SEC):
-        _viz_last_write[symbol] = now_ts
-        try:
-            write_pair_visuals(symbol, params, strategy, pip_size)
-        except Exception as e:
-            log.debug("%s — viz írás hiba: %s", symbol, e)
 
     # --- ATR (méretezéshez) + spread (kapuhoz) — végrehajtási inputok ---
     # Konvenció: az első deklarált időkeret a "fő" (magasabb) — ezen mérünk ATR-t.

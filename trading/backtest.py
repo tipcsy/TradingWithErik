@@ -99,6 +99,17 @@ class BacktestResult:
             if dd > max_dd:
                 max_dd = dd
 
+        # Óránkénti (belépési óra szerinti) P&L-bontás — ebből dönthető el, mely
+        # órákat érdemes kivenni (trade_hours). {óra(0-23): {"pnl","count"}}.
+        hourly: dict = {}
+        for t in closed:
+            h = int(t.open_time.hour)
+            b = hourly.setdefault(h, {"pnl": 0.0, "count": 0})
+            b["pnl"]   += t.pnl_usd
+            b["count"] += 1
+        for b in hourly.values():
+            b["pnl"] = round(b["pnl"], 2)
+
         return {
             "symbol":        self.symbol,
             "trades":        len(closed),
@@ -112,6 +123,7 @@ class BacktestResult:
             "sl_count":      len(sls),
             "be_trail_count": len(be_tr),
             "final_balance": initial_balance + sum(pnl_list),
+            "hourly_pnl":    hourly,
         }
 
 
@@ -158,6 +170,7 @@ def run_pair(
     initial_balance: float,
     test_start: Optional[str] = None,
     strategy=None,
+    allowed_hours: Optional[set] = None,
 ) -> BacktestResult:
     # A jelzést/indikátorokat a STRATÉGIA adja (seam); a végrehajtás (SL/TP/
     # breakeven/trailing, slot, lot) a motoré. strategy=None → config szerinti.
@@ -184,9 +197,9 @@ def run_pair(
         m15 = m15[m15.index >= ts]
         m1  = m1[m1.index >= ts]
 
-    # Session szűrő: params felülírja pair_cfg-t ha van (Optuna optimalizálja)
-    sess_start = int(params.get("trade_hour_start", pair_cfg.get("sess_start", 0)))
-    sess_end   = int(params.get("trade_hour_end",   pair_cfg.get("sess_end", 24)))
+    # Óra-szűrő: alapból MINDEN órát kereskedünk (az optimalizáló így teljes
+    # óránkénti bontást ad, amiből a trade_hours kézzel dönthető el). Az
+    # allowed_hours (ha adott) csak a preview-hoz szűr — a live óra-kapuja külön.
     skip_monday_hours = int(params.get("skip_monday_hours", 0))
     skip_friday_hour  = int(params.get("skip_friday_hour", 24))
 
@@ -210,9 +223,9 @@ def run_pair(
     prev_m1_row = None
 
     for m1_time, m1_row in m1.iterrows():
-        # Session szűrő
+        # Óra-szűrő (csak ha allowed_hours adott — preview; egyébként minden óra)
         hour = m1_time.hour
-        if not (sess_start <= hour < sess_end):
+        if allowed_hours is not None and hour not in allowed_hours:
             prev_m1_row = m1_row
             continue
 

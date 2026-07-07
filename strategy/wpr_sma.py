@@ -545,8 +545,6 @@ class WprSmaStrategy(Strategy):
             return False
         if p.get("wpr_m1_trigger", -50) <= p.get("wpr_m1_buy_extreme", -80):
             return False
-        if p.get("trade_hour_start", 0) >= p.get("trade_hour_end", 24):
-            return False
         return True
 
     # --- Backtest-motor hookok (a core signal/indicator becsomagolva) ------
