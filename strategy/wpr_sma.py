@@ -361,6 +361,9 @@ class WprSmaStrategy(Strategy):
         # NYERS bar-idő integer (a copy_rates ugyanezt adja) → pontosan a
         # gyertyára esik, időzóna-konverzió nélkül.
         times  = [int(t.timestamp()) for t in m15.index]
+        # Egy M15 gyertya hossza mp-ben (a záráshoz igazításhoz — lásd lentebb).
+        m15_sec = (int((m15.index[1] - m15.index[0]).total_seconds())
+                   if len(m15) >= 2 else 900)
 
         valid = ~np.isnan(smas)
         if not valid.any():
@@ -415,11 +418,14 @@ class WprSmaStrategy(Strategy):
         win_open_i = None
         tl_t, tl_dir, tl_win, tl_atr = [], [], [], []
 
-        def _emit_win(open_i: int, end_time: int):
+        # A jelzés a M15 gyertya ZÁRÁSA UTÁN él (a motor az utolsó ZÁRT gyertyát
+        # használja) → a dobozt +1 gyertyányival eltoljuk, hogy az M1 belépők a
+        # doboz IDEJE ALÁ essenek (különben a belépő a doboz után „lógna").
+        def _emit_win(open_i: int, end_i_time: int):
             objects.append(viz.Rect(
                 name=f"m15win_{times[open_i]}",
-                t1=times[open_i], p1=blue_top,
-                t2=end_time,      p2=blue_bot,
+                t1=times[open_i] + m15_sec, p1=blue_top,
+                t2=end_i_time + m15_sec,    p2=blue_bot,
                 color="blue", fill=True))
 
         for i in range(len(m15) - 1):      # csak ZÁRT M15 gyertyák
@@ -448,9 +454,11 @@ class WprSmaStrategy(Strategy):
             p = 0
             for j in range(1, len(m1) - 1):          # az utolsó M1 formálódik
                 t = times1[j]
-                while p + 1 < len(tl_t) and tl_t[p + 1] <= t:
+                # Az utolsó ZÁRT M15 gyertya állapotát vesszük (mint a motor): egy
+                # M15 gyertya a NYITÁSA UTÁN m15_sec-kel zár, csak akkor él a jelzés.
+                while p + 1 < len(tl_t) and tl_t[p + 1] + m15_sec <= t:
                     p += 1
-                if tl_t[p] > t or not tl_win[p]:      # M1 az első állapot előtt / zárt ablak
+                if tl_t[p] + m15_sec > t or not tl_win[p]:   # p még nem zárt / zárt ablak
                     continue
                 pw, cw = m1_wprs[j - 1], m1_wprs[j]
                 if math.isnan(pw) or math.isnan(cw):

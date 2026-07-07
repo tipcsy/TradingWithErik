@@ -99,6 +99,11 @@ class PairDashboardState:
     strategy_cells:   dict = field(default_factory=dict)
     cells_ts:         float = 0.0
 
+    # Per-instrumentum vizualizáció ki/be (a GUI V gombja billenti). A motor
+    # csak akkor írja a viz-fájlt, ha ez True. Kikapcsoláskor a GUI törli a
+    # chart-objektumokat (mt5_visual.clear).
+    viz_enabled:      bool = True
+
 
 # Globális dashboard állapot — a GUI ebből olvas
 dashboard: dict[str, PairDashboardState] = {}
@@ -377,7 +382,8 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
 
     # --- MT5 chart-vizualizáció (throttle-olva, mély adatablakkal) ---
     now_ts = time.time()
-    if VIZ_ENABLED and now_ts - _viz_last_write.get(symbol, 0.0) >= VIZ_INTERVAL_SEC:
+    if (VIZ_ENABLED and ds.viz_enabled
+            and now_ts - _viz_last_write.get(symbol, 0.0) >= VIZ_INTERVAL_SEC):
         _viz_last_write[symbol] = now_ts
         try:
             write_pair_visuals(symbol, params, strategy, pip_size)
@@ -398,9 +404,11 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
     sym_info  = mt5.symbol_info(symbol)
     if sym_info and atr_val is not None and sym_info.point > 0:
         current_spread_pts = sym_info.spread
-        atr_pts = int(atr_val / sym_info.point)
-        ratio   = params.get("max_spread_atr_ratio", 0.20)
-        max_spread_pts = max(1, int(atr_pts * ratio))
+        atr_pts    = int(atr_val / sym_info.point)
+        ratio      = params.get("max_spread_atr_ratio", 0.20)
+        pip_to_pt  = max(1, round(pip_size / sym_info.point))
+        min_pts    = max(1, int(params.get("min_spread_pips", 2.0) * pip_to_pt))
+        max_spread_pts = max(min_pts, int(atr_pts * ratio))
         spread_ok = (current_spread_pts <= max_spread_pts)
         if not spread_ok:
             log.debug("%s — spread túl nagy: %d pt > %d pt max, kihagyva.",
@@ -618,6 +626,7 @@ def run(cfg: dict, slot_mgr: SlotManager):
             symbol=symbol,
             enabled=pair_cfg.get("enabled", False),
             trained=trained,
+            viz_enabled=pair_cfg.get("viz_enabled", True),   # V mód a config.json-ból
         )
         # Kezdeti állapot: ha enabled és trained → LIVE, egyébként STOPPED
         if pair_cfg.get("enabled", False) and trained:

@@ -142,7 +142,7 @@ def _fixed_cell(key: str, ds, opt_status: str, inst_state: str) -> tuple[str, st
 class PairRow:
     def __init__(self, parent: tk.Frame, symbol: str, row_idx: int, columns: list,
                  on_run, on_opt, on_delete, on_risky, on_name_click, mono_font, small_font,
-                 on_status_click=None):
+                 on_status_click=None, on_viz=None):
         self.symbol  = symbol
         self.columns = columns
         self._bg     = BG_ROW_ODD if row_idx % 2 == 0 else BG_ROW_EVEN
@@ -176,6 +176,12 @@ class PairRow:
                                    bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
                                    relief="flat", command=lambda: on_risky(symbol))
         self.btn_risky.pack(side="left", padx=1)
+        # Vizualizáció ki/be az adott instrumentumhoz (MT5 chart-rajz)
+        self.btn_viz = tk.Button(self.frame, text="V", width=2,
+                                 bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
+                                 relief="flat",
+                                 command=(lambda: on_viz(symbol)) if on_viz else None)
+        self.btn_viz.pack(side="left", padx=1)
         self.btn_opt = tk.Button(self.frame, text="OPT", width=4,
                                  bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
                                  relief="flat", command=lambda: on_opt(symbol))
@@ -220,6 +226,12 @@ class PairRow:
             self.btn_risky.config(text="R", bg=FG_ORANGE, fg="#1e1e2e", state="normal")
         else:
             self.btn_risky.config(text="R", bg=BTN_DIS_BG, fg=FG_GRAY, state="normal")
+
+        # Viz gomb — bármely állapotban kapcsolható; zöld, ha a viz BE van kapcsolva
+        if getattr(ds, "viz_enabled", True):
+            self.btn_viz.config(text="V", bg=FG_GREEN, fg="#1e1e2e", state="normal")
+        else:
+            self.btn_viz.config(text="V", bg=BTN_DIS_BG, fg=FG_GRAY, state="normal")
 
         # ── Offline ───────────────────────────────────────────────────────
         if not connected and inst_state not in ("OPTIMIZING", "QUEUED"):
@@ -1432,7 +1444,7 @@ class DashboardWindow:
                 on_delete=self._handle_delete, on_risky=self._handle_risky,
                 on_name_click=self._show_instrument_params,
                 mono_font=mono_font, small_font=small_font,
-                on_status_click=self._show_opt_log)
+                on_status_click=self._show_opt_log, on_viz=self._handle_viz)
 
         self._apply_filter_sort()
 
@@ -1665,7 +1677,7 @@ class DashboardWindow:
             on_delete=self._handle_delete, on_risky=self._handle_risky,
             on_name_click=self._show_instrument_params,
             mono_font=self._mono_font, small_font=self._small_font,
-            on_status_click=self._show_opt_log)
+            on_status_click=self._show_opt_log, on_viz=self._handle_viz)
         self._apply_filter_sort()
 
     # ── JSON szintaxis-színezés (Text widgethez) ─────────────────────────
@@ -2032,6 +2044,37 @@ class DashboardWindow:
                            self.optimizer_status.get(symbol, ""),
                            connected=getattr(self, "_connected", False))
 
+    def _handle_viz(self, symbol: str):
+        """Vizualizáció ki/be az adott instrumentumhoz. Bekapcsoláskor azonnali
+        újrarajzolás (a throttle nullázásával); kikapcsoláskor a chart-objektumok
+        törlése (mt5_visual.clear)."""
+        ds = self.dashboard_ref.get(symbol)
+        if ds is None:
+            return
+        ds.viz_enabled = not getattr(ds, "viz_enabled", True)
+        try:
+            from trading import live_trader as _lt
+            from core import mt5_visual as _viz
+            if ds.viz_enabled:
+                _lt._viz_last_write.pop(symbol, None)   # következő ciklusban azonnal ír
+            else:
+                _viz.clear(symbol)                       # objektumok törlése a chartról
+        except Exception:
+            pass
+        # Perzisztálás a config.json-ba (per-instrumentum V állapot)
+        try:
+            pc = self.cfg.get("pairs", {}).get(symbol)
+            if isinstance(pc, dict):
+                pc["viz_enabled"] = ds.viz_enabled
+                self._save_main_config()
+        except Exception:
+            pass
+        row = self.rows.get(symbol)
+        if row is not None:
+            row.update(ds, self.instrument_state.get(symbol, "STOPPED"),
+                       self.optimizer_status.get(symbol, ""),
+                       connected=getattr(self, "_connected", False))
+
     def _handle_delete(self, symbol: str):
         """Instrumentum törlése a config-ból és a táblából (megerősítéssel).
         Csak megállított (STOPPED) párra engedélyezett."""
@@ -2381,9 +2424,14 @@ class DashboardWindow:
                                    params.get("atr_period", 14))
                     atr_val = atr_ser.iloc[-2]
                     if atr_val == atr_val:   # not NaN
-                        atr_pts = int(atr_val / info.point)
-                        ratio   = params.get("max_spread_atr_ratio", 0.20)
-                        ds.max_spread_pts = max(1, int(atr_pts * ratio))
+                        atr_pts  = int(atr_val / info.point)
+                        ratio    = params.get("max_spread_atr_ratio", 0.20)
+                        pair_pip = float(self.cfg["pairs"].get(symbol, {}).get(
+                                         "pip_size", info.point * 10))
+                        pip_to_pt = max(1, round(pair_pip / info.point))
+                        min_pts  = max(1, int(params.get("min_spread_pips", 2.0)
+                                              * pip_to_pt))
+                        ds.max_spread_pts = max(min_pts, int(atr_pts * ratio))
             except Exception:
                 pass
 
@@ -2615,6 +2663,7 @@ def _demo_dashboard(cfg: dict):
             spread_pts=random.randint(6, 18), max_spread_pts=random.randint(12, 25),
             position_pnl=None, risk_free=False, daily_pnl=0.0,
             opt_grade=grade_cell, opt_grade_reason=grade_reason,
+            viz_enabled=cfg["pairs"][symbol].get("viz_enabled", True),
         )
         # Stratégia-cellák szimulálása (csak LIVE pároknál mutatunk értéket)
         if st == "LIVE":

@@ -75,6 +75,13 @@ void RefreshFromFile()
 //+------------------------------------------------------------------+
 void ApplyLine(string ln)
 {
+   // Törlés-direktíva: a Python a V (viz) gomb KI-kapcsolásakor írja ki.
+   if(StringFind(ln, "CLEAR") == 0)
+   {
+      ObjectsDeleteAll(0, FilePrefix);
+      return;
+   }
+
    string f[];
    int n = StringSplit(ln, ';', f);
    if(n < 2)

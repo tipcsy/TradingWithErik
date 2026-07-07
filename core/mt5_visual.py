@@ -62,3 +62,23 @@ def write(symbol: str, objects: list) -> Optional[Path]:
         except PermissionError:
             time.sleep(0.05)
     return None
+
+
+def clear(symbol: str) -> Optional[Path]:
+    """A `symbol` chart-objektumainak TÖRLÉSE: egy `CLEAR` direktívát ír a
+    fájlba, amit az indikátor a saját (TFV_ prefixű) objektumai törlésével
+    értelmez. A vizualizáció KI-kapcsolásához (V gomb) használjuk."""
+    d = files_dir()
+    if d is None:
+        return None
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{PREFIX}{symbol}.csv"
+    tmp  = path.with_suffix(".csv.tmp")
+    tmp.write_text("CLEAR\n", encoding="ascii")
+    for _ in range(5):
+        try:
+            os.replace(tmp, path)
+            return path
+        except PermissionError:
+            time.sleep(0.05)
+    return None
