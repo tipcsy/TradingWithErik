@@ -15,18 +15,6 @@
       1
     ]
   },
-  "quality": {
-    "_comment": "Optimalizált instrumentum minősítési küszöbei (Minőség oszlop). Legrosszabb-elv: a pár a legrosszabb elért kategóriát kapja.",
-    "min_trades": 15,
-    "maxdd_mid": 0.18,
-    "maxdd_weak": 0.25,
-    "maxdd_bad": 0.35,
-    "pf_mid": 1.4,
-    "pf_weak": 1.2,
-    "pf_bad": 1.0,
-    "winrate_weak": 0.35,
-    "winrate_good": 0.45
-  },
   "broker": {
     "name": "Vantage",
     "server": "VantageInternational-Demo",
@@ -56,157 +44,13 @@
     "_comment_risky": "Risky mód (data/risky_mode.json) újraolvasási gyakorisága mp-ben — külső program is írhatja a fájlt. A gombnyomás azonnal ment.",
     "risky_reload_sec": 3600
   },
-  "position_mgmt": {
-    "_comment": "Kockázatmentesítés és trailing stop beállításai",
-    "_comment_be": "breakeven_pct: a TP hány %-ánál toljuk az SL-t az entry szintre (0 = kikapcs)",
-    "breakeven_pct": 0.5,
-    "_comment_trail": "trail_activation_pips: ennyi pip profit UTÁN indul a trailing. trail_distance_pips: ennyivel követ",
-    "trail_activation_pips": 8.0,
-    "trail_distance_pips": 6.0
-  },
-  "indicators": {
-    "_comment": "Alapértelmezett indikátor paraméterek — az optimizer felülírja páronként",
-    "sma_period": 200,
-    "wpr_m15_period": 21,
-    "wpr_m1_period": 8,
-    "_comment_levels": "WPR szintek: extrém zónák és trigger szint",
-    "wpr_m15_sell_extreme": -20,
-    "wpr_m15_buy_extreme": -80,
-    "wpr_m15_trigger": -50,
-    "wpr_m1_sell_extreme": -20,
-    "wpr_m1_buy_extreme": -80,
-    "wpr_m1_trigger": -50
-  },
-  "sltp": {
-    "_comment": "ATR-alapú SL/TP: SL = ATR * sl_atr_mult, TP = SL * tp_rr_ratio",
-    "atr_period": 14,
-    "sl_atr_mult": 1.5,
-    "tp_rr_ratio": 2.0
-  },
   "optimizer": {
-    "_comment": "AI paraméter optimalizálás tartományai",
-    "sma_period": {
-      "min": 50,
-      "max": 300,
-      "step": 10
-    },
-    "wpr_m15_period": {
-      "min": 10,
-      "max": 50,
-      "step": 1
-    },
-    "wpr_m1_period": {
-      "min": 3,
-      "max": 20,
-      "step": 1
-    },
-    "wpr_m15_sell_extreme": {
-      "min": -35,
-      "max": -5,
-      "step": 5
-    },
-    "wpr_m15_buy_extreme": {
-      "min": -95,
-      "max": -65,
-      "step": 5
-    },
-    "wpr_m15_trigger": {
-      "min": -70,
-      "max": -30,
-      "step": 5
-    },
-    "wpr_m1_sell_extreme": {
-      "min": -35,
-      "max": -5,
-      "step": 5
-    },
-    "wpr_m1_buy_extreme": {
-      "min": -95,
-      "max": -65,
-      "step": 5
-    },
-    "wpr_m1_trigger": {
-      "min": -70,
-      "max": -30,
-      "step": 5
-    },
-    "atr_period": {
-      "min": 10,
-      "max": 20,
-      "step": 1
-    },
-    "sl_atr_mult": {
-      "min": 1.0,
-      "max": 3.0,
-      "step": 0.25
-    },
-    "tp_rr_ratio": {
-      "min": 1.5,
-      "max": 3.0,
-      "step": 0.25
-    },
-    "max_open_slots": {
-      "min": 2,
-      "max": 8,
-      "step": 1
-    },
-    "breakeven_pct": {
-      "min": 0.3,
-      "max": 0.7,
-      "step": 0.1
-    },
-    "trail_activation_pips": {
-      "min": 4,
-      "max": 20,
-      "step": 2
-    },
-    "trail_distance_pips": {
-      "min": 3,
-      "max": 15,
-      "step": 1
-    },
-    "max_spread_atr_ratio": {
-      "min": 0.05,
-      "max": 0.35,
-      "step": 0.05
-    },
-    "_comment_market": "Piaci minőség szűrők — az Optuna instrumentumonként optimalizálja",
-    "atr_min_pct": {
-      "min": 0.2,
-      "max": 1.0,
-      "step": 0.1
-    },
-    "atr_max_pct": {
-      "min": 1.2,
-      "max": 4.0,
-      "step": 0.2
-    },
-    "trade_hour_start": {
-      "min": 0,
-      "max": 12,
-      "step": 1
-    },
-    "trade_hour_end": {
-      "min": 12,
-      "max": 24,
-      "step": 1
-    },
-    "skip_monday_hours": {
-      "min": 0,
-      "max": 4,
-      "step": 1
-    },
-    "skip_friday_hour": {
-      "min": 18,
-      "max": 24,
-      "step": 1
-    },
     "_comment_method": "Optimalizálási módszer: optuna | random | grid",
     "method": "optuna",
     "max_trials": 500,
     "max_parallel_optimizers": 2,
     "_comment_timeout": "Beragadás-védelem: NEM a teljes futásidőt limitálja (ezek hosszú folyamatok!), hanem azt figyeli, halad-e. stall_timeout_sec: ennyi mp NINCS haladás = beragadt, lezárja. hard_timeout_sec: opcionális abszolút végső határ mp-ben (0 = kikapcsolva).",
-    "stall_timeout_sec": 900,
+    "stall_timeout_sec": 1200,
     "hard_timeout_sec": 0,
     "_comment_wf": "Walk-forward: n_splits ablak, mindegyikben train_months tanítás + test_months validálás",
     "wf_n_splits": 4,
@@ -629,12 +473,45 @@
       "sess_end": 24
     },
     "HUBS": {
-      "enabled": false,
+      "enabled": true,
       "pip_size": 1.0,
       "pv1_usd": 0.8771,
       "backtest_spread_pips": 0.0,
       "sess_start": 0,
       "sess_end": 24
+    },
+    "VIX": {
+      "enabled": true,
+      "pip_size": 0.1,
+      "pv1_usd": 87.5825,
+      "min_lot": 0.1,
+      "lot_step": 0.1,
+      "backtest_spread_pips": 0.0,
+      "sess_start": 0,
+      "sess_end": 24,
+      "description": "Volatility Index"
+    },
+    "VOW": {
+      "enabled": false,
+      "pip_size": 0.001,
+      "pv1_usd": 0.01,
+      "min_lot": 1.0,
+      "lot_step": 1.0,
+      "backtest_spread_pips": 0.0,
+      "sess_start": 0,
+      "sess_end": 24,
+      "description": "Volkswagen AG"
+    },
+    "SPCX": {
+      "enabled": true,
+      "pip_size": 1.0,
+      "pv1_usd": 0.8757,
+      "min_lot": 0.1,
+      "lot_step": 0.1,
+      "backtest_spread_pips": 0.0,
+      "sess_start": 0,
+      "sess_end": 24,
+      "description": "Space Exploration Technologies Corp."
     }
   }
 }

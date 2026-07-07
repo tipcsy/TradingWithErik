@@ -260,9 +260,8 @@ def download_pair(symbol: str, tf_str: str, start: datetime, overwrite: bool, en
 # ---------------------------------------------------------------------------
 
 def main():
-    cfg_path = ROOT / "config.json"
-    with open(cfg_path, encoding="utf-8") as f:
-        cfg = json.load(f)
+    from strategy.settings import load_config
+    cfg = load_config(ROOT / "config.json")
 
     if not mt5_connector.connect(cfg):
         sys.exit(1)

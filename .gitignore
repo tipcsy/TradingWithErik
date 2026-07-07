@@ -5,6 +5,9 @@ data/m15/*.parquet
 data/risky_mode.json
 data/ui_watchdog.log
 data/opt_error.log
+# Optuna folytatható study — tranziens SQLite + kész-jelölő (ne kerüljön gitbe)
+data/optimized_params/*_study.db
+data/optimized_params/*_study.done
 .venv/
 venv/
 config.json

@@ -20,8 +20,9 @@ CFG_PATH = ROOT / "config.json"
 
 
 def load_cfg() -> dict:
-    with open(CFG_PATH, encoding="utf-8") as f:
-        return json.load(f)
+    # A váz config.json + az aktív stratégia saját beállításainak beolvasztása.
+    from strategy.settings import load_config
+    return load_config(CFG_PATH)
 
 
 def cmd_download():

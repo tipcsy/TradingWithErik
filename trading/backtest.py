@@ -28,9 +28,8 @@ RESULTS_DIR = Path(__file__).resolve().parents[1] / "data" / "backtest_results"
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from core.indicator_engine import compute_indicators
-from core.signal_detector import PairState, check_m15_signal, check_m1_entry
 from core.risk_manager import calc_sl_tp_pips, calc_lot, calc_effective_slots
+from strategy import get_strategy
 
 logging.basicConfig(
     level=logging.INFO,
@@ -158,18 +157,23 @@ def run_pair(
     trading_cfg: dict,
     initial_balance: float,
     test_start: Optional[str] = None,
+    strategy=None,
 ) -> BacktestResult:
+    # A jelzést/indikátorokat a STRATÉGIA adja (seam); a végrehajtás (SL/TP/
+    # breakeven/trailing, slot, lot) a motoré. strategy=None → config szerinti.
+    if strategy is None:
+        strategy = get_strategy({})
+    tf_hi = strategy.timeframes()[0].label
+    tf_lo = strategy.timeframes()[1].label
+
     result = BacktestResult(symbol=symbol)
 
-    # Indikátorok számítása
-    m15, m1 = compute_indicators(df_m15, df_m1, params)
+    # Indikátorok számítása (a stratégia dönti el, mely indikátorok)
+    m15, m1 = strategy.bt_indicators(df_m15, df_m1, params)
 
     # Warmup sor — az első érvényes indikátor sor
-    warmup = max(params["sma_period"], params["wpr_m15_period"], params["atr_period"])
-    m15 = m15.iloc[warmup:].copy()
-
-    warmup_m1 = params["wpr_m1_period"]
-    m1 = m1.iloc[warmup_m1:].copy()
+    m15 = m15.iloc[strategy.bt_warmup(params, tf_hi):].copy()
+    m1  = m1.iloc[strategy.bt_warmup(params, tf_lo):].copy()
 
     # Test/train szétválasztás
     if test_start:
@@ -194,7 +198,7 @@ def run_pair(
     pip_size = pair_cfg["pip_size"]
     pv1_usd  = pair_cfg["pv1_usd"]
 
-    state = PairState(symbol=symbol)
+    state = strategy.bt_new_state(symbol)
     open_trades: list[Trade] = []
     balance = initial_balance
     daily_pnl: dict[str, float] = {}  # dátum → napi P&L
@@ -203,24 +207,24 @@ def run_pair(
     m15_times = m15.index.to_list()
     m15_ptr = 0  # melyik M15 gyertya az aktuális
 
-    prev_m1_wpr = None
+    prev_m1_row = None
 
     for m1_time, m1_row in m1.iterrows():
         # Session szűrő
         hour = m1_time.hour
         if not (sess_start <= hour < sess_end):
-            prev_m1_wpr = m1_row["wpr"]
+            prev_m1_row = m1_row
             continue
 
         # Hétfő reggeli gap szűrő
         dow = m1_time.weekday()
         if dow == 0 and hour < skip_monday_hours:
-            prev_m1_wpr = m1_row["wpr"]
+            prev_m1_row = m1_row
             continue
 
         # Péntek délután szűrő
         if dow == 4 and hour >= skip_friday_hour:
-            prev_m1_wpr = m1_row["wpr"]
+            prev_m1_row = m1_row
             continue
 
         # Napi veszteség limit ellenőrzés
@@ -228,7 +232,7 @@ def run_pair(
         daily_loss = daily_pnl.get(day_key, 0.0)
         daily_limit = balance * trading_cfg["daily_loss_limit_pct"]
         if daily_loss <= -daily_limit:
-            prev_m1_wpr = m1_row["wpr"]
+            prev_m1_row = m1_row
             continue
 
         # M15 állapot frissítése ha új M15 gyertya zárult
@@ -243,20 +247,13 @@ def run_pair(
                 cur_atr = m15_row["atr"]
                 if not pd.isna(cur_atr):
                     if atr_min_pct > 0 and cur_atr < avg_atr * atr_min_pct:
-                        prev_m1_wpr = m1_row["wpr"]
+                        prev_m1_row = m1_row
                         continue
                     if atr_max_pct > 0 and cur_atr > avg_atr * atr_max_pct:
-                        prev_m1_wpr = m1_row["wpr"]
+                        prev_m1_row = m1_row
                         continue
 
-            if not (pd.isna(m15_row["sma"]) or pd.isna(m15_row["wpr"]) or pd.isna(m15_row["atr"])):
-                state = check_m15_signal(
-                    state,
-                    close=m15_row["close"],
-                    sma=m15_row["sma"],
-                    wpr_m15=m15_row["wpr"],
-                    params=params,
-                )
+            state = strategy.bt_on_high_close(state, m15_row, params)
 
         # Nyitott pozíciók kezelése (SL/TP/breakeven/trailing)
         spread_pips = pair_cfg.get("backtest_spread_pips", 1.5)
@@ -348,8 +345,8 @@ def run_pair(
         free_slots = trading_cfg["max_open_slots"] - occupied
 
         # M1 belépési jelzés ellenőrzés
-        if prev_m1_wpr is not None and free_slots > 0 and not pd.isna(m1_row["wpr"]):
-            signal = check_m1_entry(state, prev_m1_wpr, m1_row["wpr"], params)
+        if prev_m1_row is not None and free_slots > 0:
+            signal = strategy.bt_on_low_close(state, prev_m1_row, m1_row, params)
 
             if signal != "NONE" and m15_ptr < len(m15_times):
                 m15_row = m15.iloc[m15_ptr]
@@ -389,7 +386,7 @@ def run_pair(
                     )
                     open_trades.append(trade)
 
-        prev_m1_wpr = m1_row["wpr"]
+        prev_m1_row = m1_row
 
     # Nyitva maradt pozíciók hozzáadása (nincs zárva)
     for trade in open_trades:
@@ -407,9 +404,10 @@ def run_backtest(cfg: dict, params: Optional[dict] = None, test_mode: bool = Fal
     initial_balance = cfg.get("ml", {}).get("starting_balance_eur", 1000.0)
     trading_cfg     = cfg["trading"]
     test_start      = cfg.get("optimizer", {}).get("test_start_date") if test_mode else None
+    strategy        = get_strategy(cfg)
 
     if params is None:
-        params = {**cfg["indicators"], **cfg["sltp"], **cfg["position_mgmt"]}
+        params = strategy.base_params(cfg)
 
     pairs = {s: p for s, p in cfg["pairs"].items() if isinstance(p, dict) and p.get("enabled", False)}
     summaries  = []
@@ -423,7 +421,7 @@ def run_backtest(cfg: dict, params: Optional[dict] = None, test_mode: bool = Fal
         result = run_pair(
             symbol, df_m15, df_m1,
             params, pair_cfg, trading_cfg,
-            initial_balance, test_start,
+            initial_balance, test_start, strategy=strategy,
         )
         summary = result.summary(initial_balance)
         summaries.append(summary)
@@ -587,7 +585,7 @@ def _save_backtest_results(trades: list, summaries: list[dict],
 PARAMS_DIR = ROOT / "data" / "optimized_params"
 
 
-def _advance_m15_state(pd_info: dict, m1_time: pd.Timestamp) -> None:
+def _advance_m15_state(pd_info: dict, m1_time: pd.Timestamp, strategy) -> None:
     """M15 pointer előrehaladása és állapot frissítése (egy pár adatain)."""
     m15_times = pd_info["m15_times"]
     m15_df    = pd_info["m15"]
@@ -599,18 +597,8 @@ def _advance_m15_state(pd_info: dict, m1_time: pd.Timestamp) -> None:
 
     ptr = pd_info["m15_ptr"]
     if ptr < len(m15_times):
-        row = m15_df.iloc[ptr]
-        sma = row.get("sma", float("nan"))
-        wpr = row.get("wpr", float("nan"))
-        atr = row.get("atr", float("nan"))
-        if not (pd.isna(sma) or pd.isna(wpr) or pd.isna(atr)):
-            pd_info["state"] = check_m15_signal(
-                pd_info["state"],
-                close=float(row["close"]),
-                sma=float(sma),
-                wpr_m15=float(wpr),
-                params=params,
-            )
+        pd_info["state"] = strategy.bt_on_high_close(
+            pd_info["state"], m15_df.iloc[ptr], params)
 
 
 def run_portfolio_backtest(
@@ -632,6 +620,9 @@ def run_portfolio_backtest(
         initial_balance = float(cfg.get("ml", {}).get("starting_balance_eur", 1000.0))
     trading_cfg = cfg["trading"]
     spread_default = 1.5
+    strategy = get_strategy(cfg)
+    tf_hi = strategy.timeframes()[0].label
+    tf_lo = strategy.timeframes()[1].label
 
     # ── Per-pár optimalizált paraméterek betöltése ────────────────────────
     pair_params: dict = {}
@@ -668,12 +659,10 @@ def run_portfolio_backtest(
             log.warning("Portfolio BT: %s — nincs adat, kihagyva.", sym)
             continue
 
-        m15, m1 = compute_indicators(df_m15, df_m1, params)
+        m15, m1 = strategy.bt_indicators(df_m15, df_m1, params)
 
-        warmup_m15 = max(params["sma_period"], params["wpr_m15_period"], params["atr_period"])
-        warmup_m1  = params["wpr_m1_period"]
-        m15 = m15.iloc[warmup_m15:].copy()
-        m1  = m1.iloc[warmup_m1:].copy()
+        m15 = m15.iloc[strategy.bt_warmup(params, tf_hi):].copy()
+        m1  = m1.iloc[strategy.bt_warmup(params, tf_lo):].copy()
 
         # Dátum szűrés
         m15 = m15[(m15.index >= ts_from) & (m15.index <= ts_to)]
@@ -690,8 +679,8 @@ def run_portfolio_backtest(
             "m15_ptr":   0,
             "params":    params,
             "pair_cfg":  cfg["pairs"][sym],
-            "state":     PairState(symbol=sym),
-            "prev_wpr":  None,
+            "state":     strategy.bt_new_state(sym),
+            "prev_row":  None,
         }
         log.info("Portfolio BT: %s betöltve — M15=%d M1=%d bar", sym, len(m15), len(m1))
 
@@ -740,7 +729,7 @@ def run_portfolio_backtest(
 
         # ── 1. M15 állapot frissítése minden párhoz ───────────────────────
         for info in pair_data.values():
-            _advance_m15_state(info, m1_time)
+            _advance_m15_state(info, m1_time, strategy)
 
         # ── 2. Nyitott pozíciók kezelése ──────────────────────────────────
         for sym in list(open_trades.keys()):
@@ -836,14 +825,13 @@ def run_portfolio_backtest(
             row  = m1_df.loc[m1_time]
             hour = m1_time.hour
             if not (pair_cfg.get("sess_start", 0) <= hour < pair_cfg.get("sess_end", 24)):
-                info["prev_wpr"] = float(row["wpr"]) if not pd.isna(row.get("wpr")) else None
+                info["prev_row"] = row
                 continue
 
-            curr_wpr = row.get("wpr")
-            prev_wpr = info["prev_wpr"]
+            prev_row = info["prev_row"]
 
-            if prev_wpr is not None and curr_wpr is not None and not pd.isna(curr_wpr):
-                signal = check_m1_entry(info["state"], prev_wpr, float(curr_wpr), params)
+            if prev_row is not None:
+                signal = strategy.bt_on_low_close(info["state"], prev_row, row, params)
 
                 if signal != "NONE":
                     ptr = info["m15_ptr"]
@@ -884,7 +872,7 @@ def run_portfolio_backtest(
                             open_trades[sym] = trade
                             occupied += 1
 
-            info["prev_wpr"] = float(curr_wpr) if not pd.isna(curr_wpr) else None
+            info["prev_row"] = row
 
     # ── Végeredmény ───────────────────────────────────────────────────────
     if progress_callback:
@@ -916,8 +904,7 @@ def run_portfolio_backtest(
 
 
 if __name__ == "__main__":
-    cfg_path = ROOT / "config.json"
-    with open(cfg_path, encoding="utf-8") as f:
-        cfg = json.load(f)
+    from strategy.settings import load_config
+    cfg = load_config(ROOT / "config.json")
 
     run_backtest(cfg, save_results=True)

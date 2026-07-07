@@ -52,6 +52,24 @@ def params_file(symbol: str) -> Path:
     return PARAMS_DIR / f"{symbol}.json"
 
 
+def trials_file(symbol: str) -> Path:
+    return PARAMS_DIR / f"{symbol}_trials.csv"
+
+
+def study_db(symbol: str) -> Path:
+    return PARAMS_DIR / f"{symbol}_study.db"
+
+
+# A trials CSV formátuma: ';' elválasztó + ',' tizedesjel (magyar Excel),
+# utf-8-sig BOM. A GUI csak sort számol és Excelben nyitja — nem parse-olja.
+def _write_trials_csv(rows: list[dict], out_csv: Path) -> int:
+    if not rows:
+        return 0
+    df = pd.DataFrame(rows).sort_values("score", ascending=False)
+    df.to_csv(out_csv, index=False, encoding="utf-8-sig", sep=";", decimal=",")
+    return len(rows)
+
+
 # ---------------------------------------------------------------------------
 # Paraméter tér generálás
 # ---------------------------------------------------------------------------
@@ -67,8 +85,13 @@ def _range(spec: dict) -> list:
     return values
 
 
-def generate_random_params(opt_cfg: dict, base_params: dict, n: int) -> list[dict]:
-    """N db véletlen paraméter kombinációt generál."""
+def generate_random_params(opt_cfg: dict, base_params: dict, n: int,
+                           constraints=None) -> list[dict]:
+    """N db véletlen paraméter kombinációt generál.
+
+    constraints: opcionális fn(params)->bool — a stratégia érvényesség-ellenőrzője
+    (pl. WPR szint-sorrend). None → nincs szűrés.
+    """
     ranges = {
         k: _range(v)
         for k, v in opt_cfg.items()
@@ -86,15 +109,7 @@ def generate_random_params(opt_cfg: dict, base_params: dict, n: int) -> list[dic
         for key, values in ranges.items():
             p[key] = random.choice(values)
 
-        # Kényszer: sell_extreme > trigger > buy_extreme (SELL logika fordítva)
-        # WPR értékek: sell_extreme közel 0-hoz, buy_extreme közel -100-hoz
-        if p.get("wpr_m15_sell_extreme", -20) <= p.get("wpr_m15_trigger", -50):
-            continue
-        if p.get("wpr_m15_trigger", -50) <= p.get("wpr_m15_buy_extreme", -80):
-            continue
-        if p.get("wpr_m1_sell_extreme", -20) <= p.get("wpr_m1_trigger", -50):
-            continue
-        if p.get("wpr_m1_trigger", -50) <= p.get("wpr_m1_buy_extreme", -80):
+        if constraints is not None and not constraints(p):
             continue
 
         key_tuple = tuple(sorted(p.items()))
@@ -106,8 +121,12 @@ def generate_random_params(opt_cfg: dict, base_params: dict, n: int) -> list[dic
     return combos
 
 
-def generate_grid_params(opt_cfg: dict, base_params: dict) -> list[dict]:
-    """Teljes grid — csak kis paramétertérnél használandó!"""
+def generate_grid_params(opt_cfg: dict, base_params: dict,
+                         constraints=None) -> list[dict]:
+    """Teljes grid — csak kis paramétertérnél használandó!
+
+    constraints: opcionális fn(params)->bool — a stratégia érvényesség-ellenőrzője.
+    """
     ranges = {}
     fixed = deepcopy(base_params)
 
@@ -123,13 +142,7 @@ def generate_grid_params(opt_cfg: dict, base_params: dict) -> list[dict]:
         for k, v in zip(keys, values):
             p[k] = v
 
-        if p.get("wpr_m15_sell_extreme", -20) <= p.get("wpr_m15_trigger", -50):
-            continue
-        if p.get("wpr_m15_trigger", -50) <= p.get("wpr_m15_buy_extreme", -80):
-            continue
-        if p.get("wpr_m1_sell_extreme", -20) <= p.get("wpr_m1_trigger", -50):
-            continue
-        if p.get("wpr_m1_trigger", -50) <= p.get("wpr_m1_buy_extreme", -80):
+        if constraints is not None and not constraints(p):
             continue
 
         combos.append(p)
@@ -252,22 +265,6 @@ def _suggest_params(trial, opt_cfg: dict, base_params: dict) -> dict:
     return params
 
 
-def _wpr_constraints_ok(params: dict) -> bool:
-    """WPR szint sorrendek ellenőrzése."""
-    if params.get("wpr_m15_sell_extreme", -20) <= params.get("wpr_m15_trigger", -50):
-        return False
-    if params.get("wpr_m15_trigger", -50) <= params.get("wpr_m15_buy_extreme", -80):
-        return False
-    if params.get("wpr_m1_sell_extreme", -20) <= params.get("wpr_m1_trigger", -50):
-        return False
-    if params.get("wpr_m1_trigger", -50) <= params.get("wpr_m1_buy_extreme", -80):
-        return False
-    # Session logika: start < end
-    if params.get("trade_hour_start", 0) >= params.get("trade_hour_end", 24):
-        return False
-    return True
-
-
 def optimize_pair_optuna(
     symbol: str,
     df_m15: pd.DataFrame,
@@ -277,6 +274,7 @@ def optimize_pair_optuna(
     pair_cfg: dict,
     trading_cfg: dict,
     initial_balance: float,
+    strategy,
     n_trials: int = 500,
     n_splits: int = 4,
     train_months: int = 6,
@@ -304,11 +302,12 @@ def optimize_pair_optuna(
 
     call_count = [0]
     best_score_so_far = [-float("inf")]
-    trial_rows: list[dict] = []   # minden trial eredménye → CSV export
 
-    def _record_trial(params, score, summary=None, note=""):
+    def _record_trial(trial, params, score, summary=None, note=""):
         """Egy trial sora a CSV-hez — MINDEN trialról (érvénytelen/0-trade is),
         hogy az eredménytáblázat mindig létrejöjjön és lássék, mi történt.
+        A sort a TRIAL user_attr-jébe tesszük (a study-val perzisztálódik → a CSV
+        a study-ból bármikor újraépíthető, folytatás után is).
         note: elbukás oka (pl. hiányzó config-kulcs), hogy a CSV-ből kiderüljön."""
         row = {"score": round(score, 2) if score > -999999.0 else score}
         if summary:
@@ -326,22 +325,25 @@ def optimize_pair_optuna(
         for pk, pv in params.items():
             if not pk.startswith("_"):
                 row[pk] = pv
-        trial_rows.append(row)
+        trial.set_user_attr("row", row)
 
     def objective(trial):
         # ── Haladás MINDEN trialnál, a korai return ELŐTT ──────────────────
         # (Különben a sok érvénytelen trial esetén — pl. BTCUSD — a GUI
         #  stall-timeoutot dob, a CLI nem mutat haladást, és CSV sem készül.)
         call_count[0] += 1
+        # Haladás MINDEN trialnál → a GUI stall-órája minden trial után újraindul,
+        # így a stall-ablaknak elég EGY trialt lefednie (nem 10-et). A napló
+        # viszont csak 10-esével ír, hogy ne árassza el.
+        if progress_callback:
+            progress_callback(call_count[0], n_trials, best_score_so_far[0])
         if call_count[0] == 1 or call_count[0] % 10 == 0:
             log.info("  %s — %d/%d trial | legjobb score: %.2f",
                      symbol, call_count[0], n_trials, best_score_so_far[0])
-            if progress_callback:
-                progress_callback(call_count[0], n_trials, best_score_so_far[0])
 
         params = _suggest_params(trial, opt_cfg, base_params)
-        if not _wpr_constraints_ok(params):
-            _record_trial(params, -999999.0, note="WPR feltétel nem teljesült")
+        if not strategy.constraints_ok(params):
+            _record_trial(trial, params, -999999.0, note="paraméter-kényszer nem teljesült")
             return -999999.0
 
         window_scores = []
@@ -358,6 +360,7 @@ def optimize_pair_optuna(
                     params, pair_cfg, trading_cfg,
                     initial_balance,
                     test_start=None,  # teljes ablakot futtatjuk
+                    strategy=strategy,
                 )
 
                 # Csak a TEST periódus trade-jeit értékeljük
@@ -375,7 +378,7 @@ def optimize_pair_optuna(
         valid = [s for s in window_scores if s > -999999.0]
         if not valid:
             # Ha kivétel volt → az az ok; ha nem, akkor tényleg nincs értékelhető trade.
-            _record_trial(params, -999999.0,
+            _record_trial(trial, params, -999999.0,
                           note=last_err or "nincs értékelhető trade a TEST ablakokban")
             return -999999.0
 
@@ -404,30 +407,82 @@ def optimize_pair_optuna(
                 "max_drawdown":  mdd,
                 "profit_factor": pf,
             }
-        _record_trial(params, final_score, summary)
+        _record_trial(trial, params, final_score, summary)
 
         if final_score > best_score_so_far[0]:
             best_score_so_far[0] = final_score
 
         return final_score
 
+    out_csv     = trials_file(symbol)
+    storage_url = f"sqlite:///{study_db(symbol).as_posix()}"
+
+    def _dump_csv(study, _trial=None):
+        """A trials CSV újraépítése a study-ból (a trialok user_attr sorai).
+        Folytatás után a RÉGI trialok is benne vannak (a .db perzisztálja őket)."""
+        rows = [t.user_attrs["row"] for t in study.trials if "row" in t.user_attrs]
+        try:
+            _write_trials_csv(rows, out_csv)
+        except Exception as e:
+            log.debug("%s — trials CSV mentés hiba: %s", symbol, e)
+
+    def _incremental_cb(study, trial):
+        # Inkrementális CSV-mentés minden 10. trial után. A study MINDEN trialt
+        # azonnal a .db-be ír → megszakadáskor sem vész el eredmény, a CSV pedig
+        # bármikor újraépíthető belőle.
+        if (trial.number + 1) % 10 == 0:
+            _dump_csv(study)
+
+    # Folytatás-szemantika:
+    #   • előző futás BEFEJEZŐDÖTT (marker fájl van) → FRISS optimalizálás
+    #     (a régi .db-t töröljük — még a kapcsolat megnyitása ELŐTT, friss
+    #     processzben, így nincs Windows-fájlzár),
+    #   • előző futás MEGSZAKADT (nincs marker, de van .db) → FOLYTATÁS.
+    done_marker = PARAMS_DIR / f"{symbol}_study.done"
+    if done_marker.exists():
+        try:
+            study_db(symbol).unlink(missing_ok=True)
+            done_marker.unlink(missing_ok=True)
+        except Exception as e:
+            log.debug("%s — study reset hiba: %s", symbol, e)
+
+    # Perzisztens study (SQLite) → megszakadás után FOLYTATHATÓ ugyanarra a párra.
     study = optuna.create_study(
+        study_name=symbol,
+        storage=storage_url,
+        load_if_exists=True,
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=42),
     )
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
-
-    # ── Teljes eredménytáblázat mentése CSV-be (score szerint csökkenő) ──────
-    # Ugyanaz a formátum, mint a random/grid ágon → a GUI "Trials CSV" gombja is nyitja.
-    if trial_rows:
+    done = len(study.trials)
+    call_count[0] = done            # a haladás a TELJES készültséget mutassa
+    if done:
         try:
-            df_res = pd.DataFrame(trial_rows).sort_values("score", ascending=False)
-            out_csv = PARAMS_DIR / f"{symbol}_trials.csv"
-            df_res.to_csv(out_csv, index=False, encoding="utf-8-sig")
-            log.info("  %s — %d trial eredménye mentve: %s",
-                     symbol, len(trial_rows), out_csv.name)
-        except Exception as e:
-            log.debug("%s — trials CSV mentés hiba: %s", symbol, e)
+            best_score_so_far[0] = study.best_value
+        except Exception:
+            pass
+    remaining = max(0, n_trials - done)
+    if remaining > 0:
+        if done:
+            log.info("  %s — FOLYTATÁS: %d kész trial a study-ban, még %d hátra",
+                     symbol, done, remaining)
+        study.optimize(objective, n_trials=remaining, show_progress_bar=False,
+                       callbacks=[_incremental_cb])
+    else:
+        log.info("  %s — a study már kész (%d trial). Új futáshoz töröld a .db-t: %s",
+                 symbol, done, study_db(symbol).name)
+
+    # Végső, teljes CSV a study-ból (a folytatott trialokkal együtt).
+    _dump_csv(study)
+    log.info("  %s — %d trial eredménye mentve: %s", symbol, len(study.trials), out_csv.name)
+
+    # Ha elértük a teljes trial-számot → BEFEJEZETT: marker, hogy a KÖVETKEZŐ OPT
+    # frissen induljon (ne folytassa a már kész study-t).
+    if len(study.trials) >= n_trials:
+        try:
+            done_marker.touch()
+        except Exception:
+            pass
 
     if progress_callback:
         progress_callback(n_trials, n_trials, study.best_value)
@@ -443,7 +498,8 @@ def optimize_pair_optuna(
         from trading.backtest import run_pair as _rp
         m15_tr = df_m15[df_m15.index >= windows[0]["train_start"]]
         m1_tr  = df_m1[df_m1.index  >= windows[0]["train_start"]]
-        train_result = _rp(symbol, m15_tr, m1_tr, best_params, pair_cfg, trading_cfg, initial_balance)
+        train_result = _rp(symbol, m15_tr, m1_tr, best_params, pair_cfg, trading_cfg,
+                           initial_balance, strategy=strategy)
         train_trades = [
             t for t in train_result.closed
             if t.close_time is not None and t.close_time < last_window["test_start"]
@@ -490,6 +546,7 @@ def optimize_pair(
     trading_cfg: dict,
     initial_balance: float,
     train_end: str,
+    strategy,
     progress_callback=None,   # fn(done: int, total: int, best_pnl: float)
 ) -> Optional[dict]:
     """
@@ -508,6 +565,7 @@ def optimize_pair(
                 params, pair_cfg, trading_cfg,
                 initial_balance,
                 test_start=None,   # TRAIN: teljes adat a train_end-ig
+                strategy=strategy,
             )
             # TRAIN adatra szűrünk
             train_result_trades = [
@@ -566,14 +624,17 @@ def optimize_pair(
             log.debug("%s — kombináció hiba: %s", symbol, e)
             continue
 
+        # Haladás MINDEN kombinációnál (stall-óra újraindítás); log 10-esével.
+        best_pnl = best_summary["total_pnl"] if best_summary else 0
+        if progress_callback:
+            progress_callback(i + 1, len(params_list), best_pnl)
         if (i + 1) % 10 == 0:
-            best_pnl = best_summary["total_pnl"] if best_summary else 0
             log.info(
                 "  %s — %d/%d próbált | legjobb P&L: %.2f$",
                 symbol, i + 1, len(params_list), best_pnl,
             )
-            if progress_callback:
-                progress_callback(i + 1, len(params_list), best_pnl)
+            # Inkrementális CSV: az eddigi eredmények azonnal lemezre (nem vész el).
+            _write_trials_csv(all_rows, trials_file(symbol))
 
     # Végső callback
     if progress_callback:
@@ -581,17 +642,10 @@ def optimize_pair(
         progress_callback(len(params_list), len(params_list), best_pnl)
 
     # ── Teljes eredménytáblázat mentése CSV-be (score szerint csökkenő) ──────
-    # Excelben közvetlenül megnyitható (utf-8-sig BOM). A felhasználó így látja
-    # az összes vizsgált kombinációt, nem csak a legjobbat.
-    if all_rows:
-        try:
-            df_res = pd.DataFrame(all_rows).sort_values("score", ascending=False)
-            out_csv = PARAMS_DIR / f"{symbol}_trials.csv"
-            df_res.to_csv(out_csv, index=False, encoding="utf-8-sig")
-            log.info("  %s — %d kombináció eredménye mentve: %s",
-                     symbol, len(all_rows), out_csv.name)
-        except Exception as e:
-            log.debug("%s — trials CSV mentés hiba: %s", symbol, e)
+    n = _write_trials_csv(all_rows, trials_file(symbol))
+    if n:
+        log.info("  %s — %d kombináció eredménye mentve: %s",
+                 symbol, n, trials_file(symbol).name)
 
     return {"params": best_params, "train_summary": best_summary} if best_params else None
 
@@ -600,16 +654,22 @@ def optimize_pair(
 # Fő belépési pont
 # ---------------------------------------------------------------------------
 
-def optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance, progress=None) -> dict:
+def optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance, progress=None,
+                    strategy=None) -> dict:
     """EGYSÉGES optimalizálási belépési pont — a CLI és a GUI-processz is EZT hívja.
 
     A method-döntés (optuna | grid | random) EGYETLEN helyen él, így a két felület
     sosem csúszhat szét. Az adat szeletelése train_start-tól, a trials CSV kiírása
     (a compute-függvényekben) és az out-of-sample teszt is itt, egységesen történik.
 
+    strategy: a használandó stratégia (seam). None → a config alapján (get_strategy).
     progress: opcionális fn(done, total, best) haladásjelző.
     Visszaad: {"train_summary","test_summary","params"} vagy {"error": "..."}.
     """
+    if strategy is None:
+        from strategy import get_strategy
+        strategy = get_strategy(cfg)
+
     opt_cfg     = cfg["optimizer"]
     method      = opt_cfg.get("method", "random")
     max_trials  = opt_cfg.get("max_trials", 500)
@@ -617,7 +677,7 @@ def optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance, progress=None) 
     test_start  = opt_cfg.get("test_start_date", "2025-10-01")
     trading_cfg = cfg["trading"]
     pair_cfg    = cfg["pairs"][symbol]
-    base_params = {**cfg["indicators"], **cfg["sltp"], **cfg["position_mgmt"]}
+    base_params = strategy.base_params(cfg)
 
     # Adat szeletelése train_start-tól (idempotens, ha a hívó már szeletelt)
     ts_train = pd.Timestamp(train_start)
@@ -633,23 +693,24 @@ def optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance, progress=None) 
         log.info("  Optuna Bayesian optimalizálás (%d trial, walk-forward)...", max_trials)
         result = optimize_pair_optuna(
             symbol, df_m15, df_m1, opt_cfg, base_params, pair_cfg, trading_cfg,
-            initial_balance,
+            initial_balance, strategy,
             n_trials=max_trials,
             n_splits=opt_cfg.get("wf_n_splits", 4),
             train_months=opt_cfg.get("wf_train_months", 6),
             test_months=opt_cfg.get("wf_test_months", 2),
             progress_callback=progress)
     elif method == "grid":
-        params_list = generate_grid_params(opt_cfg, base_params)
+        params_list = generate_grid_params(opt_cfg, base_params, strategy.constraints_ok)
         log.info("  Grid search: %d kombináció", len(params_list))
         result = optimize_pair(symbol, df_m15, df_m1, params_list, pair_cfg,
-                               trading_cfg, initial_balance, test_start,
+                               trading_cfg, initial_balance, test_start, strategy,
                                progress_callback=progress)
     else:
-        params_list = generate_random_params(opt_cfg, base_params, max_trials)
+        params_list = generate_random_params(opt_cfg, base_params, max_trials,
+                                             strategy.constraints_ok)
         log.info("  Random search: %d kombináció", len(params_list))
         result = optimize_pair(symbol, df_m15, df_m1, params_list, pair_cfg,
-                               trading_cfg, initial_balance, test_start,
+                               trading_cfg, initial_balance, test_start, strategy,
                                progress_callback=progress)
 
     if result is None:
@@ -659,7 +720,7 @@ def optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance, progress=None) 
     try:
         test_result  = run_pair(symbol, df_m15, df_m1, result["params"],
                                 pair_cfg, trading_cfg, initial_balance,
-                                test_start=test_start)
+                                test_start=test_start, strategy=strategy)
         test_summary = test_result.summary(initial_balance)
     except Exception as e:
         log.warning("  %s — TEST hiba: %s", symbol, e)

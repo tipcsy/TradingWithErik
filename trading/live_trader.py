@@ -30,9 +30,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core import mt5_connector
+from core import mt5_visual
 from core import risky_mode
 from core import correlation
-from core.quality import grade_rank
 from core.indicator_engine import atr as atr_indicator
 from core.risk_manager import calc_sl_tp_pips, calc_lot, calc_effective_slots, SlotManager
 from strategy import get_strategy
@@ -92,9 +92,12 @@ class PairDashboardState:
     timeframe_remaining: dict = field(default_factory=dict)  # {percek: hátralévő mp}
 
     # ── Stratégia-specifikus cellák: {oszlop_kulcs: (szöveg, szín-név)} ───
-    # A stratégia tölti (compute_display); a GUI csak rajzolja. Stratégiacsere
-    # NEM igényli e dataclass módosítását.
+    # LIVE párnál a MOTOR tölti a saját jelzésállapotából (strategy.live_cells) →
+    # a tábla PONTOSAN azt mutatja, amivel a motor kereskedik. STOPPED/preview
+    # párnál a GUI tölti (compute_display). A cells_ts a motor utolsó írásának
+    # ideje: ha friss, a GUI nem írja felül a rekonstrukcióval.
     strategy_cells:   dict = field(default_factory=dict)
+    cells_ts:         float = 0.0
 
 
 # Globális dashboard állapot — a GUI ebből olvas
@@ -112,6 +115,12 @@ optimizer_status: dict[str, str] = {}
 # A motor tölti/karbantartja; a Pozíciók fül ebből olvas és ezt billenti
 # (trailing ki/be, kézi BE jelzése).
 position_state: dict[int, dict] = {}
+
+# MT5 chart-vizualizáció: engedélyezés + írásgyakoriság (run() tölti a configból),
+# és a per-szimbólum utolsó írás ideje (throttle — ne írjunk minden 10 mp-ben mélyet).
+VIZ_ENABLED:      bool  = True
+VIZ_INTERVAL_SEC: float = 15.0
+_viz_last_write:  dict[str, float] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +146,7 @@ def open_position(
     tp: float,
     magic: int,
     comment: str = "ErikBot",
+    strategy_name: str = "",
 ) -> Optional[int]:
     order_type = mt5.ORDER_TYPE_BUY if direction == "BUY" else mt5.ORDER_TYPE_SELL
     tick = mt5.symbol_info_tick(symbol)
@@ -166,8 +176,8 @@ def open_position(
                   result.comment if result else mt5.last_error())
         return None
 
-    log.info("✅ %s %s | Lot: %.2f | SL: %.5f | TP: %.5f | Ticket: %d",
-             symbol, direction, lot, sl, tp, result.order)
+    log.info("✅ [%s] %s %s | Lot: %.2f | SL: %.5f | TP: %.5f | Ticket: %d | magic: %d",
+             strategy_name or comment, symbol, direction, lot, sl, tp, result.order, magic)
     return result.order
 
 
@@ -212,12 +222,33 @@ def seconds_to_candle_close(timeframe_minutes: int) -> int:
     return seconds_in_tf - elapsed
 
 
+# A trades.csv KANONIKUS oszlopsémája (nyitás és zárás egyaránt ezt tölti; a
+# hiányzó mezők üresek maradnak). A "strategy" oszlop mondja meg, MELYIK
+# stratégia nyitotta a pozíciót.
+TRADES_COLUMNS = ["time", "event", "strategy", "symbol", "direction", "lot",
+                  "price", "sl", "tp", "ticket", "magic", "pnl_usd"]
+
+
 def log_trade(row: dict):
-    df = pd.DataFrame([row])
-    if TRADES_CSV.exists():
+    """Egy sor a trades.csv-be, a kanonikus sémára igazítva. Ha a meglévő fájl
+    fejléce eltér (régi formátum), egyszer átírja a kanonikus sémára."""
+    df = pd.DataFrame([row]).reindex(columns=TRADES_COLUMNS)
+    if not TRADES_CSV.exists():
+        df.to_csv(TRADES_CSV, index=False)
+        return
+    try:
+        existing_cols = pd.read_csv(TRADES_CSV, nrows=0).columns.tolist()
+    except Exception:
+        existing_cols = []
+    if existing_cols == TRADES_COLUMNS:
         df.to_csv(TRADES_CSV, mode="a", header=False, index=False)
     else:
-        df.to_csv(TRADES_CSV, index=False)
+        # Régi/eltérő fejléc → egyszeri migráció a kanonikus sémára
+        try:
+            old = pd.read_csv(TRADES_CSV).reindex(columns=TRADES_COLUMNS)
+            pd.concat([old, df], ignore_index=True).to_csv(TRADES_CSV, index=False)
+        except Exception:
+            df.to_csv(TRADES_CSV, mode="a", header=False, index=False)
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +275,30 @@ class LivePairState:
     strat_state: object = None    # a stratégia jelzésállapota (átlátszatlan)
     daily_pnl:   float  = 0.0
     daily_date:  str    = ""
+
+
+# ---------------------------------------------------------------------------
+# MT5 chart-vizualizáció (a stratégia visual_objects-je → Common\Files fájl)
+# ---------------------------------------------------------------------------
+
+def write_pair_visuals(symbol: str, params: dict, strategy, pip_size: float):
+    """A stratégia rajzolási objektumait kiírja a viz-fájlba. MÉLY adatablakot
+    tölt (visual_lookback_bars) — ez több, mint a jelzés-warmup —, hogy a
+    megjelenített előzmény (SMA-szalag) több napra visszamenjen."""
+    bars = {}
+    for tf in strategy.timeframes():
+        n = strategy.visual_lookback_bars(params, tf.label)
+        if n <= 0:
+            continue
+        df = get_candles(symbol, mt5_timeframe(tf.minutes), n)
+        if df is None or len(df) < 3:
+            return
+        bars[tf.label] = df
+    if not bars:
+        return
+    # pip_size a jövőbeli TP/SL-rajzoláshoz (feltétel 3) — a params nem tartalmazza.
+    md = MarketData(symbol=symbol, params={**params, "pip_size": pip_size}, bars=bars)
+    mt5_visual.write(symbol, strategy.visual_objects(md))
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +366,24 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
     # --- Jelzés a stratégiától (ZÁRT gyertyán, állapottartó) ---
     state.strat_state, signal = strategy.on_bar_close(state.strat_state, md)
 
+    # A tábla jelzés-celláit a MOTOR ÉLŐ állapotából töltjük (nem külön
+    # rekonstrukcióból) → a kijelzés PONTOSAN azt mutatja, amivel kereskedünk.
+    try:
+        cells = strategy.live_cells(state.strat_state, md)
+        ds.strategy_cells = {k: (c.text, c.color) for k, c in cells.items()}
+        ds.cells_ts = time.time()
+    except Exception:
+        pass
+
+    # --- MT5 chart-vizualizáció (throttle-olva, mély adatablakkal) ---
+    now_ts = time.time()
+    if VIZ_ENABLED and now_ts - _viz_last_write.get(symbol, 0.0) >= VIZ_INTERVAL_SEC:
+        _viz_last_write[symbol] = now_ts
+        try:
+            write_pair_visuals(symbol, params, strategy, pip_size)
+        except Exception as e:
+            log.debug("%s — viz írás hiba: %s", symbol, e)
+
     # --- ATR (méretezéshez) + spread (kapuhoz) — végrehajtási inputok ---
     # Konvenció: az első deklarált időkeret a "fő" (magasabb) — ezen mérünk ATR-t.
     primary = strategy.timeframes()[0].label
@@ -370,7 +443,7 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
             if trigger and mt5_connector.move_to_breakeven(ticket):
                 slot_mgr.set_risk_free(ticket)
                 pstate["be_done"] = True
-                log.info("✦ %s #%d — breakeven (+spread) beállítva%s", symbol, ticket,
+                log.info("✦ %s #%d — költség-tudatos breakeven beállítva%s", symbol, ticket,
                          " (risky)" if risky else "")
 
         # Trailing stop (kockázatmentes után, és csak ha kézzel nincs kikapcsolva).
@@ -447,12 +520,16 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
                 ds.risk_free      = False
                 slot_mgr.remove(ticket)
                 position_state.pop(ticket, None)
-                log.info("📋 %s #%d zárt | P&L: %.2f$", symbol, ticket, pnl)
+                log.info("📋 [%s] %s #%d zárt | P&L: %.2f$",
+                         strategy.name, symbol, ticket, pnl)
                 log_trade({
-                    "time":    datetime.now(timezone.utc).isoformat(),
-                    "symbol":  symbol,
-                    "ticket":  ticket,
-                    "pnl_usd": pnl,
+                    "time":     datetime.now(timezone.utc).isoformat(),
+                    "event":    "close",
+                    "strategy": strategy.name,
+                    "symbol":   symbol,
+                    "ticket":   ticket,
+                    "magic":    magic,
+                    "pnl_usd":  pnl,
                 })
 
     # --- Belépés a stratégia jelzése alapján ---
@@ -495,9 +572,23 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
                     sl_price   = round(open_price + pip_to_price(sl_pips, pip_size), 5)
                     tp_price   = round(open_price - pip_to_price(tp_pips, pip_size), 5)
 
-                ticket = open_position(symbol, signal, lot, sl_price, tp_price, magic)
+                ticket = open_position(symbol, signal, lot, sl_price, tp_price, magic,
+                                       comment=strategy.name, strategy_name=strategy.name)
                 if ticket:
                     slot_mgr.add(ticket)
+                    log_trade({
+                        "time":      datetime.now(timezone.utc).isoformat(),
+                        "event":     "open",
+                        "strategy":  strategy.name,
+                        "symbol":    symbol,
+                        "direction": signal,
+                        "lot":       lot,
+                        "price":     open_price,
+                        "sl":        sl_price,
+                        "tp":        tp_price,
+                        "ticket":    ticket,
+                        "magic":     magic,
+                    })
 
 
 # ---------------------------------------------------------------------------
@@ -505,9 +596,13 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
 # ---------------------------------------------------------------------------
 
 def run(cfg: dict, slot_mgr: SlotManager):
-    magic       = cfg["broker"]["magic"]
+    global VIZ_ENABLED, VIZ_INTERVAL_SEC
     trading_cfg = cfg["trading"]
+    viz_cfg     = cfg.get("visualization", {})
+    VIZ_ENABLED      = viz_cfg.get("enabled", True)
+    VIZ_INTERVAL_SEC = viz_cfg.get("interval_sec", 15.0)
     strategy    = get_strategy(cfg)
+    magic       = strategy.magic(cfg)   # a stratégia magicje (alap: broker.magic)
     risky_mode.load()                      # induló risky állapot
     last_risky_reload = time.time()
     risky_reload_sec  = cfg.get("trading", {}).get("risky_reload_sec", 3600)
@@ -634,9 +729,8 @@ def run(cfg: dict, slot_mgr: SlotManager):
 # ---------------------------------------------------------------------------
 
 def main():
-    cfg_path = ROOT / "config.json"
-    with open(cfg_path, encoding="utf-8") as f:
-        cfg = json.load(f)
+    from strategy.settings import load_config
+    cfg = load_config(ROOT / "config.json")
 
     if not mt5_connector.connect(cfg):
         sys.exit(1)

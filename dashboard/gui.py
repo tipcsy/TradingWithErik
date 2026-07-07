@@ -39,6 +39,7 @@ from dashboard.theme import (
 )
 from strategy import get_strategy
 from strategy.base import Column
+from strategy.settings import apply_strategy_config, main_config_view
 from core import risky_mode
 from version import APP_NAME, APP_VERSION
 
@@ -1649,11 +1650,7 @@ class DashboardWindow:
             "backtest_spread_pips": spread_pips, "sess_start": 0, "sess_end": 24,
             "description": description,
         }
-        try:
-            with open(ROOT / "config.json", "w", encoding="utf-8") as f:
-                json.dump(self.cfg, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
+        self._save_main_config()
 
         from trading.live_trader import PairDashboardState
         self.dashboard_ref[symbol] = PairDashboardState(
@@ -1693,6 +1690,16 @@ class DashboardWindow:
                 tag = "json_num"
             text.tag_add(tag, f"1.0+{s}c", f"1.0+{e}c")
 
+    # ── config.json perzisztálás (CSAK a váz-szekciók) ───────────────────
+    def _save_main_config(self):
+        """A config.json-ba csak a VÁZ-szekciókat írjuk (a stratégia-config a
+        saját fájljában él) — így a merge-elt futásidejű cfg nem szennyezi vissza."""
+        try:
+            with open(ROOT / "config.json", "w", encoding="utf-8") as f:
+                json.dump(main_config_view(self.cfg), f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
     # ── Beállítás-szerkesztő (config.json) ───────────────────────────────
     def _show_settings(self):
         popup = tk.Toplevel(self.root)
@@ -1702,9 +1709,11 @@ class DashboardWindow:
         popup.grab_set()
         tk.Label(popup, text="config.json szerkesztése (mentéskor JSON-validálás):",
                  bg=BG, fg=FG_BLUE, font=self._header_font).pack(anchor="w", padx=10, pady=(10, 2))
-        tk.Label(popup, text="Megjegyzés: a kereskedési paraméterek menet közben "
-                 "érvényesülnek; a párok listája / stratégia újraindítást igényel.",
-                 bg=BG, fg=FG_GRAY, font=self._small_font).pack(anchor="w", padx=10)
+        tk.Label(popup, text="Megjegyzés: itt csak a VÁZ-config szerkeszthető. A stratégia "
+                 "beállításai (indicators, sltp, position_mgmt, quality, optimizer-tér) a "
+                 "stratégia saját fájljában élnek: strategy/config/<name>.json.",
+                 bg=BG, fg=FG_GRAY, font=self._small_font, justify="left",
+                 wraplength=680).pack(anchor="w", padx=10)
 
         txt_frame = tk.Frame(popup, bg=BG)
         txt_frame.pack(fill="both", expand=True, padx=10, pady=4)
@@ -1719,7 +1728,9 @@ class DashboardWindow:
         text.tag_configure("json_str",  foreground=FG_GREEN)
         text.tag_configure("json_num",  foreground=FG_ORANGE)
         text.tag_configure("json_bool", foreground=FG_CYAN)
-        text.insert("1.0", json.dumps(self.cfg, indent=2, ensure_ascii=False))
+        # Csak a VÁZ-config látszik/szerkeszthető; a stratégia beállításai a
+        # stratégia saját fájljában élnek (strategy/config/<name>.json).
+        text.insert("1.0", json.dumps(main_config_view(self.cfg), indent=2, ensure_ascii=False))
         self._highlight_json(text)
 
         # Élő újraszínezés szerkesztés közben (debounce-olva, hogy ne akadjon)
@@ -1748,9 +1759,12 @@ class DashboardWindow:
             except Exception as e:
                 lbl_err.config(text=f"Mentési hiba: {e}")
                 return
-            # In-place frissítés → a live_trader ugyanazt a dict-et látja
+            # In-place frissítés → a live_trader ugyanazt a dict-et látja.
+            # A `new` a VÁZ-config; a stratégia beállításait újra beolvasztjuk,
+            # hogy a merge-elt futásidejű cfg (indicators/quality/…) megmaradjon.
             self.cfg.clear()
             self.cfg.update(new)
+            apply_strategy_config(self.cfg)
             popup.destroy()
 
         btns = tk.Frame(popup, bg=BG)
@@ -1780,8 +1794,8 @@ class DashboardWindow:
 
         ts = data.get("test_summary", {})
         if ts:
-            from core.quality import grade, metric_colors
-            gtxt, gcol, greason = grade(ts, self.cfg)
+            from core.quality import metric_colors
+            gtxt, gcol, greason = self.strategy.grade(ts, self.cfg)
             mc = metric_colors(ts, self.cfg)
             hdr = tk.Frame(popup, bg=BG)
             hdr.pack(anchor="w", padx=10, pady=(10, 2))
@@ -2029,11 +2043,7 @@ class DashboardWindow:
                 f"Biztosan törlöd a(z) {symbol} instrumentumot a listából?"):
             return
         self.cfg["pairs"].pop(symbol, None)
-        try:
-            with open(ROOT / "config.json", "w", encoding="utf-8") as f:
-                json.dump(self.cfg, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
+        self._save_main_config()
         row = self.rows.pop(symbol, None)
         if row is not None:
             row.frame.destroy()
@@ -2076,14 +2086,21 @@ class DashboardWindow:
             return
         orig_sl = pos["sl"]
         def _w():
+            import logging as _logging
             from core import mt5_connector
             from trading.live_trader import position_state
-            # BE + spread puffer (spread×2 → ×1 → pontos BE), nem pontos entry
+            _log = _logging.getLogger(__name__)
+            # Költség-tudatos BE (spread + jutalék + swap fedezve). Ha az ár még
+            # nincs elég messze a nettó ≥ 0-hoz, a hívás False-t ad → NEM BE-zünk.
             if mt5_connector.move_to_breakeven(ticket):
                 st = position_state.setdefault(
                     ticket, {"original_sl": orig_sl, "trailing_enabled": True,
                              "be_done": False, "trail_points": None, "trail_moved": False})
                 st["be_done"] = True
+                _log.info("✦ #%d — kézi költség-tudatos breakeven beállítva", ticket)
+            else:
+                _log.info("#%d — BE még nem lehetséges (az ár nem fedezi a "
+                          "spread+jutalék+swap költséget) → SL változatlan", ticket)
         threading.Thread(target=_w, daemon=True, name="ManualBE").start()
 
     _DEFAULT_PSTATE = {"original_sl": 0.0, "trailing_enabled": True,
@@ -2163,13 +2180,9 @@ class DashboardWindow:
                 self._on_slots_change(new_max)
             except Exception:
                 pass
-        # Perzisztálás a config.json-ba
+        # Perzisztálás a config.json-ba (csak a váz-szekciók)
         self.cfg["trading"]["max_open_slots"] = new_max
-        try:
-            with open(ROOT / "config.json", "w", encoding="utf-8") as f:
-                json.dump(self.cfg, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
+        self._save_main_config()
         self.lbl_slots.config(
             text=f"Szabad slotok: {self._free_slots}/{self._max_slots}",
             fg=FG_GREEN if self._free_slots > 0 else FG_RED)
@@ -2304,9 +2317,8 @@ class DashboardWindow:
                 data = json.load(f)
             params = data.get("params", {})
             ds.trained = True
-            # Minősítés a test_summary (out-of-sample) alapján
-            from core.quality import grade
-            txt, col, reason = grade(data.get("test_summary", {}), self.cfg)
+            # Minősítés a test_summary (out-of-sample) alapján — a stratégián át
+            txt, col, reason = self.strategy.grade(data.get("test_summary", {}), self.cfg)
             ds.opt_grade = (txt, col)
             ds.opt_grade_reason = reason
             # Külsőleg (más app által) optimalizált párt is "vegyük észre":
@@ -2348,11 +2360,16 @@ class DashboardWindow:
             bars[label] = df
 
         md = MarketData(symbol=symbol, params=params, bars=bars)
-        try:
-            cells = self.strategy.compute_display(md)
-            ds.strategy_cells = {k: (c.text, c.color) for k, c in cells.items()}
-        except Exception:
-            pass
+        # Ha a MOTOR (LIVE pár) frissen írta a jelzés-cellákat a saját
+        # állapotából, NE írjuk felül a rekonstrukcióval — a motor élő állapota
+        # az egyetlen forrás. Ha a motor rég nem frissített (STOPPED / session-en
+        # kívül / demo), a GUI rekonstrukciója veszi át.
+        if time.time() - getattr(ds, "cells_ts", 0.0) >= 30.0:
+            try:
+                cells = self.strategy.compute_display(md)
+                ds.strategy_cells = {k: (c.text, c.color) for k, c in cells.items()}
+            except Exception:
+                pass
 
         # Max spread (ATR-alapú) — a fő időkeret ATR-jéből
         if info and info.point > 0:
@@ -2583,9 +2600,8 @@ def _demo_dashboard(cfg: dict):
         grade_cell, grade_reason = None, ""
         if trained:
             try:
-                from core.quality import grade as _grade
                 _data = json.load(open(params_dir / f"{symbol}.json", encoding="utf-8"))
-                gtxt, gcol, greason = _grade(_data.get("test_summary", {}), cfg)
+                gtxt, gcol, greason = strategy.grade(_data.get("test_summary", {}), cfg)
                 grade_cell, grade_reason = (gtxt, gcol), greason
             except Exception:
                 pass

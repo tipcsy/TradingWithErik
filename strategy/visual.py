@@ -1,0 +1,147 @@
+"""
+Rajzolási primitívek a chart-vizualizációhoz (MT5-MENTES seam-modul).
+
+A stratégia ezeket adja vissza a `visual_objects()`-ból; a `core.mt5_visual`
+sorosítja őket az MT5 Common\\Files fájlba, ahonnan a `TradeForgeViz.mq5`
+indikátor kirajzolja. Ez a modul SZÁNDÉKOSAN nem importál MetaTrader5-öt (mint a
+base.py), hogy a stratégia és a tesztek MT5 nélkül is futtathatók legyenek.
+
+Elv (mint a Cell): a stratégia SZEMANTIKUS színnevet ad; a sorosítás fordítja
+"r,g,b" hármassá (az MQL5 `StringToColor` ezt érti). Minden objektumnak STABIL
+neve van → az indikátor upsert-el (létrehoz vagy módosít), sosem töröl, így egy
+objektum (pl. SMA-doboz) csak NŐ, amíg tart a feltétel.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+# Minden objektum neve ezzel a prefixszel kezdődik — az indikátor ez alapján
+# ismeri fel a SAJÁT objektumait (kézzel rajzolt objektumhoz nem nyúl).
+PREFIX = "TFV_"
+
+# Szemantikus szín-név → (R, G, B). A stratégia sosem ad hex/rgb kódot.
+COLORS: dict[str, tuple[int, int, int]] = {
+    "green":  (0, 170, 0),
+    "lime":   (0, 255, 0),
+    "red":    (220, 0, 0),
+    "blue":   (0, 120, 255),
+    "yellow": (240, 210, 0),
+    "orange": (255, 140, 0),
+    "white":  (255, 255, 255),
+    "black":  (0, 0, 0),
+    "gray":   (128, 128, 128),
+    "muted":  (110, 110, 110),
+}
+
+
+def _rgb(color: str) -> str:
+    r, g, b = COLORS.get(color, COLORS["white"])
+    return f"{r},{g},{b}"
+
+
+def _clean(text: str) -> str:
+    """A szöveges mezőkből eltávolítjuk az elválasztót és a sortörést."""
+    return text.replace(";", ",").replace("\n", " ").replace("\r", " ")
+
+
+def _name(name: str) -> str:
+    return name if name.startswith(PREFIX) else PREFIX + name
+
+
+# ---------------------------------------------------------------------------
+# Primitívek — mindegyik egy `;`-elválasztott sorrá sorosítható (.line()).
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Rect:
+    """Telített téglalap (pl. SMA-irány doboz). Két sarok: (t1,p1)–(t2,p2)."""
+    name: str
+    t1: int
+    p1: float
+    t2: int
+    p2: float
+    color: str = "green"
+    fill: bool = True
+
+    def line(self) -> str:
+        return ";".join([
+            "RECT", _name(self.name),
+            str(int(self.t1)), repr(float(self.p1)),
+            str(int(self.t2)), repr(float(self.p2)),
+            _rgb(self.color), "1" if self.fill else "0",
+        ])
+
+
+@dataclass
+class VLine:
+    """Függőleges vonal egy időpontnál (pl. M15 jelzés / M1 belépő jelölés)."""
+    name: str
+    t1: int
+    color: str = "yellow"
+    width: int = 1
+
+    def line(self) -> str:
+        return ";".join([
+            "VLINE", _name(self.name),
+            str(int(self.t1)), _rgb(self.color), str(int(self.width)),
+        ])
+
+
+@dataclass
+class Trend:
+    """Trendvonal (sugár nélkül): (t1,p1)–(t2,p2). Pl. 6-gyertyás TP/SL szint."""
+    name: str
+    t1: int
+    p1: float
+    t2: int
+    p2: float
+    color: str = "green"
+    width: int = 1
+
+    def line(self) -> str:
+        return ";".join([
+            "TREND", _name(self.name),
+            str(int(self.t1)), repr(float(self.p1)),
+            str(int(self.t2)), repr(float(self.p2)),
+            _rgb(self.color), str(int(self.width)),
+        ])
+
+
+@dataclass
+class Text:
+    """Chart-hoz (idő/ár) horgonyzott szöveg."""
+    name: str
+    t1: int
+    p1: float
+    text: str
+    color: str = "white"
+    fontsize: int = 9
+
+    def line(self) -> str:
+        return ";".join([
+            "TEXT", _name(self.name),
+            str(int(self.t1)), repr(float(self.p1)),
+            _rgb(self.color), str(int(self.fontsize)), _clean(self.text),
+        ])
+
+
+@dataclass
+class Label:
+    """Chart-SAROKHOZ pinnelt szöveg (pixel-koordináta, nem mozog az árral).
+    Pl. a beállítás-táblázat. corner: 0=bal-fent, 1=jobb-fent, 2=bal-lent,
+    3=jobb-lent. x/y: távolság a saroktól pixelben."""
+    name: str
+    text: str
+    corner: int = 0
+    x: int = 10
+    y: int = 20
+    color: str = "white"
+    fontsize: int = 9
+
+    def line(self) -> str:
+        return ";".join([
+            "LABEL", _name(self.name),
+            str(int(self.corner)), str(int(self.x)), str(int(self.y)),
+            _rgb(self.color), str(int(self.fontsize)), _clean(self.text),
+        ])

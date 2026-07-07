@@ -208,13 +208,44 @@ def modify_position_sl(ticket: int, new_sl: float) -> bool:
         return False
 
 
-def move_to_breakeven(ticket: int) -> bool:
-    """SL áthelyezése breakeven + puffer szintre, a spread-költség fedezésére.
+def _position_costs_price(p, info) -> float:
+    """A pozíció TELJES kilépési költsége ÁR-egységben kifejezve (jutalék
+    round-trip + felhalmozott negatív swap). Ennyivel kell az SL-t az entry
+    FÖLÉ (BUY) / ALÁ (SELL) tolni, hogy a zárás nettó (jutalék+swap után) ne
+    legyen mínusz. Ha az adat nem elérhető → 0.0 (csak a spread-puffer marad)."""
+    try:
+        # Jutalék a nyitó deal(ek)ből; a zárás ~ugyanannyi → round-trip ≈ ×2.
+        commission = 0.0
+        deals = mt5.history_deals_get(position=p.identifier)
+        if deals:
+            commission = sum(getattr(d, "commission", 0.0) for d in deals)
+        swap = getattr(p, "swap", 0.0) or 0.0
+        # Csak a levonás számít (negatív swap); a pozitív swap nem ad plusz kockázatot.
+        cost_ccy = 2.0 * abs(commission) + max(0.0, -swap)
+        if cost_ccy <= 0:
+            return 0.0
+        tick_value = getattr(info, "trade_tick_value", 0.0) or 0.0
+        tick_size  = getattr(info, "trade_tick_size", 0.0) or info.point
+        vol = getattr(p, "volume", 0.0) or 0.0
+        if tick_value > 0 and tick_size > 0 and vol > 0:
+            return cost_ccy * tick_size / (tick_value * vol)
+    except Exception:
+        pass
+    return 0.0
 
-    A puffer SOSEM pontos BE: elsőként entry ± spread×2, ha a bróker nem
-    engedi (túl közel a piachoz / min stop távolság), akkor entry ± spread×1,
-    végső esetben pontos entry. Az első sikeres szint nyer.
-    BUY: SL = entry + puffer (a piac alatt) | SELL: SL = entry − puffer.
+
+def move_to_breakeven(ticket: int) -> bool:
+    """SL áthelyezése VALÓDI (költség-tudatos) breakeven + spread-puffer szintre.
+
+    A puffer = spread + a kilépési költség (jutalék round-trip + negatív swap),
+    ÁR-egységre átszámolva. Így a zárás nettó (jutalék/swap után) is ≥ 0, nem
+    csak ár-szinten. BUY: SL = entry + puffer | SELL: SL = entry − puffer.
+
+    KRITIKUS: ha az ár még nincs elég messze ahhoz, hogy ezt az SL-t a helyes
+    oldalra (BUY: az aktuális ár alá / SELL: fölé) tegyük, akkor NEM mozgatunk és
+    False-t adunk vissza — így sosem rögzítünk veszteséget és a slot sem szabadul
+    fel idő előtt. (A régi „pontos entry" fallback ezt a veszteséget okozta.)
+    Ugyanezt hívja a kézi BE gomb és az automatikus BE — azonos viselkedés.
     """
     try:
         with MT5_LOCK:
@@ -223,23 +254,37 @@ def move_to_breakeven(ticket: int) -> bool:
                 return False
             p = pos[0]
             info = mt5.symbol_info(p.symbol)
-            digits       = info.digits if info else 5
-            spread_price = (info.spread * info.point) if info else 0.0
-            entry = p.price_open
-            sign  = 1 if p.type == 0 else -1   # BUY:+ , SELL:-
-            for mult in (2, 1, 0):
-                sl = round(entry + sign * mult * spread_price, digits)
-                req = {
-                    "action":   mt5.TRADE_ACTION_SLTP,
-                    "symbol":   p.symbol,
-                    "position": ticket,
-                    "sl":       sl,
-                    "tp":       p.tp,
-                }
-                res = mt5.order_send(req)
-                if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
-                    return True
-        return False
+            if info is None:
+                return False
+            digits       = info.digits
+            point        = info.point
+            spread_price = info.spread * point
+            entry        = p.price_open
+            is_buy       = (p.type == mt5.ORDER_TYPE_BUY)
+            sign         = 1 if is_buy else -1
+
+            cost_price = _position_costs_price(p, info)
+            # Puffer: költség (jutalék+swap) + spread cushion (min. 1 pont).
+            buffer_price = cost_price + max(spread_price, point)
+            target_sl = round(entry + sign * buffer_price, digits)
+
+            # Csak a HELYES oldalon mozgatunk (különben veszteséget rögzítenénk /
+            # a bróker elutasítja): BUY → target < aktuális ár; SELL → target > ár.
+            cur = p.price_current
+            if is_buy and target_sl >= cur:
+                return False
+            if (not is_buy) and target_sl <= cur:
+                return False
+
+            req = {
+                "action":   mt5.TRADE_ACTION_SLTP,
+                "symbol":   p.symbol,
+                "position": ticket,
+                "sl":       target_sl,
+                "tp":       p.tp,
+            }
+            res = mt5.order_send(req)
+            return res is not None and res.retcode == mt5.TRADE_RETCODE_DONE
     except Exception:
         return False
 

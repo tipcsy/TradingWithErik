@@ -130,6 +130,37 @@ class Strategy(ABC):
         átmeneti ugrás) itt kell kiszűrni. Kulcs = Column.key.
         """
 
+    # --- Megjelenítés a MOTOR élő állapotából -----------------------------
+    def live_cells(self, state: Any, md: MarketData) -> dict[str, Cell]:
+        """A stratégia-oszlopok cellái a MOTOR ÉLŐ jelzésállapotából (state),
+        NEM külön rekonstrukcióból. Így a tábla pontosan azt mutatja, amivel a
+        motor kereskedik (nincs eltérés a compute_display és a motor között).
+
+        Alapértelmezés: visszaesik a rekonstrukcióra (compute_display) — a
+        stratégia felülírhatja, hogy a saját state-jét jelenítse meg.
+        """
+        return self.compute_display(md)
+
+    # --- MT5 chart-vizualizáció (opcionális) ------------------------------
+    def visual_lookback_bars(self, params: dict, timeframe_label: str) -> int:
+        """Hány gyertya kell a vizualizációhoz az adott időkeretre.
+
+        A megjelenítendő ELŐZMÉNY (pl. SMA-irány szalag) általában MÉLYEBB
+        adatablakot igényel, mint a jelzés-warmup (ott csak pár érvényes sor van
+        az indikátor bemelegítése után). A viz-csatorna EZT tölti be a
+        `visual_objects`-hoz. Alap: 0 → nincs vizualizáció.
+        """
+        return 0
+
+    def visual_objects(self, md: MarketData) -> list:
+        """Rajzolási objektumok a charthoz (strategy.visual primitívek).
+
+        A `md.bars` a `visual_lookback_bars` szerinti MÉLY ablak (a hívó tölti).
+        Üres lista = nincs rajzolnivaló. A megjelenítéstől függetlenül, tisztán
+        az adatból számol (mint a compute_display). Alap: üres.
+        """
+        return []
+
     # --- Élő jelzéslogika (a futtatómotor használja, ZÁRT gyertyán) -------
     @abstractmethod
     def new_signal_state(self, symbol: str) -> Any:
@@ -152,3 +183,62 @@ class Strategy(ABC):
     def param_space(self, cfg: dict, base_params: dict, method: str,
                     max_trials: int) -> list[dict]:
         """Optimalizálandó paraméter-kombinációk listája."""
+
+    # --- Minőség-értékelés (a stratégiához tartozik) ----------------------
+    def grade(self, test_summary: dict, cfg: dict) -> tuple[str, str, str]:
+        """Optimalizált eredmény minősítése: (szöveg, szín-név, indok).
+
+        Alapértelmezés: a `core.quality` szabályrendszere a stratégia SAJÁT
+        (merge-elt) `quality` küszöbeivel. A küszöbök a stratégia config-jában
+        élnek; egy másik stratégia felülírhatja ezt a metódust saját logikával.
+        """
+        from core.quality import grade as _grade
+        return _grade(test_summary, cfg)
+
+    def grade_rank(self, grade_text: str) -> int:
+        """A minősítés rangsora (0 = legjobb) — rendezéshez/szűréshez."""
+        from core.quality import grade_rank as _rank
+        return _rank(grade_text)
+
+    # --- Azonosítás: MT5 magic ---------------------------------------------
+    def magic(self, cfg: dict) -> int:
+        """A stratégia MT5 magic száma — ezzel rendelhetők a nyitott pozíciók a
+        stratégiához. Alap: a broker.magic (egy-stratégiás visszafelé
+        kompatibilitás — a meglévő pozíciók magicje nem változik). TÖBB stratégia
+        esetén mindegyik adjon EGYEDI magicet (pl. broker.magic + eltolás), hogy a
+        pozíciók broker-szinten szétválaszthatók legyenek."""
+        return int(cfg.get("broker", {}).get("magic", 0))
+
+    # --- Optimalizálás: paraméter-érvényesség -----------------------------
+    def constraints_ok(self, params: dict) -> bool:
+        """Érvényes-e a paraméter-kombináció? Az optimalizáló ezzel prune-ol
+        (érvénytelen kombináció → kihagyás). Alapértelmezés: minden érvényes."""
+        return True
+
+    # --- Backtest-motor jelzés-hookok -------------------------------------
+    # A VÁZ backtest-motorja (trading.backtest) EZEKEN át kéri a stratégiától
+    # az indikátorokat és a jelzést; a VÉGREHAJTÁS (SL/TP/breakeven/trailing,
+    # slot, lot) a motoré marad. Konvenció: a magasabb időkeret a timeframes()[0],
+    # az alsó a timeframes()[1]; a motor a magasabb tf-en 'atr' oszlopot vár a
+    # pozíciómérethez. A hookok PRECOMPUTED sorokon, szoros ciklusban hívódnak
+    # (ezért nem az on_bar_close-t használják, ami minden híváskor újraszámol).
+    def bt_indicators(self, df_hi, df_lo, params):
+        """Indikátoros DataFrame-ek: (hi, lo). A magasabb tf-en legyen 'atr'."""
+        raise NotImplementedError
+
+    def bt_warmup(self, params: dict, timeframe_label: str) -> int:
+        """A backtest-szeleteléshez szükséges PONTOS warmup sorok száma az adott
+        időkeretre (a live `warmup_bars`-tól eltérhet — ott lehet ráhagyás)."""
+        raise NotImplementedError
+
+    def bt_new_state(self, symbol: str):
+        """Üres, pár-szintű jelzésállapot a backtest-motorhoz."""
+        raise NotImplementedError
+
+    def bt_on_high_close(self, state, hi_row, params):
+        """A magasabb tf egy ZÁRT gyertyája → frissített jelzésállapot."""
+        raise NotImplementedError
+
+    def bt_on_low_close(self, state, prev_lo_row, lo_row, params) -> str:
+        """Az alsó tf egy ZÁRT gyertyája → 'BUY' | 'SELL' | 'NONE'."""
+        raise NotImplementedError
