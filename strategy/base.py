@@ -217,13 +217,16 @@ class Strategy(ABC):
 
     # --- Backtest-motor jelzés-hookok -------------------------------------
     # A VÁZ backtest-motorja (trading.backtest) EZEKEN át kéri a stratégiától
-    # az indikátorokat és a jelzést; a VÉGREHAJTÁS (SL/TP/breakeven/trailing,
-    # slot, lot) a motoré marad. Konvenció: a magasabb időkeret a timeframes()[0],
-    # az alsó a timeframes()[1]; a motor a magasabb tf-en 'atr' oszlopot vár a
-    # pozíciómérethez. A hookok PRECOMPUTED sorokon, szoros ciklusban hívódnak
-    # (ezért nem az on_bar_close-t használják, ami minden híváskor újraszámol).
+    # az indikátorokat, a jelzést ÉS a pozíciótervet (SL/TP + belépés-szűrők);
+    # a VÉGREHAJTÁS (breakeven/trailing, slot, lot, spread, napi limit) a motoré.
+    # A motor STRATÉGIA-FÜGGETLEN: nem ismer konkrét indikátort (pl. 'atr') vagy
+    # méretezést — mindent a stratégia dönt el a `bt_entry` hookban. Konvenció: a
+    # magasabb időkeret a timeframes()[0], az alsó a timeframes()[1]. A hookok
+    # PRECOMPUTED sorokon, szoros ciklusban hívódnak (ezért nem az on_bar_close-t
+    # használják, ami minden híváskor újraszámol).
     def bt_indicators(self, df_hi, df_lo, params):
-        """Indikátoros DataFrame-ek: (hi, lo). A magasabb tf-en legyen 'atr'."""
+        """Indikátoros DataFrame-ek: (hi, lo). A stratégia SAJÁT oszlopai — a
+        motor ezekbe nem néz bele; csak a `bt_*` hookok olvassák."""
         raise NotImplementedError
 
     def bt_warmup(self, params: dict, timeframe_label: str) -> int:
@@ -242,3 +245,21 @@ class Strategy(ABC):
     def bt_on_low_close(self, state, prev_lo_row, lo_row, params) -> str:
         """Az alsó tf egy ZÁRT gyertyája → 'BUY' | 'SELL' | 'NONE'."""
         raise NotImplementedError
+
+    def sl_tp_pips(self, hi_row, params, pip_size):
+        """A pozíció SL/TP mérete PIPBEN a magasabb tf aktuális ZÁRT sorából
+        (hi_row): `(sl_pips, tp_pips)` VAGY `None` (nincs érvényes méret).
+
+        TISZTA méretezés — szűrő NÉLKÜL. A live_trader ÉS a backtest is EZT hívja,
+        így a méretezés stratégia-független (a motor nem ismer 'atr'-t). A stratégia
+        SAJÁT indikátoraiból (pl. ATR) számolja. `pip_size` = a pár tick-mérete."""
+        raise NotImplementedError
+
+    def bt_entry(self, hi_row, params, pip_size):
+        """BACKTEST pozícióterv: belépés-szűrő + méretezés egyben. `(sl_pips,
+        tp_pips)` VAGY `None` (kihagyás — szűrő elbukott / nincs méret).
+
+        Alap: nincs extra szűrő → csak a méretezés (`sl_tp_pips`). A stratégia
+        felülírhatja, hogy a SAJÁT belépés-szűrőit (pl. volatilitás) is alkalmazza
+        — ezt CSAK a backtest hívja (a live piaci szűrői külön kapuk)."""
+        return self.sl_tp_pips(hi_row, params, pip_size)

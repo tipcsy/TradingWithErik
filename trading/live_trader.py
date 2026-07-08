@@ -34,7 +34,7 @@ from core import mt5_visual
 from core import risky_mode
 from core import correlation
 from core.indicator_engine import atr as atr_indicator
-from core.risk_manager import calc_sl_tp_pips, calc_lot, calc_effective_slots, SlotManager
+from core.risk_manager import calc_lot, calc_effective_slots, SlotManager
 from strategy import get_strategy
 from strategy.base import MarketData
 
@@ -451,10 +451,24 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
     except Exception:
         pass
 
-    # --- ATR (méretezéshez) + spread (kapuhoz) — végrehajtási inputok ---
-    # Konvenció: az első deklarált időkeret a "fő" (magasabb) — ezen mérünk ATR-t.
+    # --- Pozícióterv (méretezés) a STRATÉGIÁTÓL + spread-kapu ─────────────
+    # Konvenció: az első deklarált időkeret a "fő" (magasabb). Az SL/TP-méretet a
+    # STRATÉGIA adja a `sl_tp_pips` hookban a SAJÁT indikátoraiból → a motor
+    # stratégia-független (nem ismer 'atr'-t). A stratégia indikátor-sorát a
+    # `bt_indicators`-ból vesszük (ugyanaz, amit a backtest lát).
     primary = strategy.timeframes()[0].label
     df_primary = bars[primary]
+    tfs = strategy.timeframes()
+    df_lo = bars.get(tfs[1].label, df_primary) if len(tfs) > 1 else df_primary
+    try:
+        _hi_ind, _ = strategy.bt_indicators(df_primary, df_lo, params)
+        hi_row = _hi_ind.iloc[-2] if len(_hi_ind) >= 2 else None
+    except Exception:
+        hi_row = None
+
+    # A spread-kapuhoz volatilitás-mérték (ATR): ez KERETRENDSZER-szintű
+    # végrehajtási kapu (a bróker spread-je vs. a piac mozgékonysága), NEM
+    # stratégia-jelzés — generikus ATR-t számol a core-ból.
     atr_ser = atr_indicator(df_primary["high"], df_primary["low"],
                             df_primary["close"], params.get("atr_period", 14))
     atr_val = atr_ser.iloc[-2] if len(atr_ser) >= 2 else float("nan")
@@ -626,7 +640,12 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
                 ctf = {**ctf, "account_risk_pct": ctf["account_risk_pct"] * 0.5}
                 log.info("K: %s fél mérettel (azonos kitettség: %s)",
                          symbol, ", ".join(conflict))
-            sl_pips, tp_pips = calc_sl_tp_pips(atr_val, {**params, "pip_size": pip_size})
+            # A méretezést a STRATÉGIA adja (SL/TP pip) — None → nincs érvényes
+            # méret, kihagyjuk a belépőt.
+            plan = strategy.sl_tp_pips(hi_row, params, pip_size) if hi_row is not None else None
+            if plan is None:
+                return
+            sl_pips, tp_pips = plan
             eff_slots = calc_effective_slots(balance, sl_pips, pair_cfg, ctf)
             lot = calc_lot(balance, sl_pips, pair_cfg, ctf, eff_slots)
 

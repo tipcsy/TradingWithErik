@@ -136,16 +136,6 @@
       "min": 1.2,
       "max": 4.0,
       "step": 0.2
-    },
-    "skip_monday_hours": {
-      "min": 0,
-      "max": 4,
-      "step": 1
-    },
-    "skip_friday_hour": {
-      "min": 18,
-      "max": 24,
-      "step": 1
     }
   }
 }

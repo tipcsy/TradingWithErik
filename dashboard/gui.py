@@ -916,11 +916,13 @@ class PortfolioBacktestTab:
             pf_str = f"{min(pf, 99):.2f}" if pf != float("inf") else "∞"
             sym_final = init_bal + pnl
 
+            is_risky = s.get("risky", False)
+
             bg = BG_ROW_ODD if row_idx % 2 == 0 else BG_ROW_EVEN
             fr = tk.Frame(self._res_rows_frame, bg=bg)
             fr.pack(fill="x")
             vals = [
-                (sym,                            10, FG_WHITE),
+                (f"{sym} ⚠R" if is_risky else sym, 10, FG_ORANGE if is_risky else FG_WHITE),
                 (str(s.get("trades", 0)),         6, FG_WHITE),
                 (f"{s.get('win_rate',0):.0%}",    7, FG_GREEN if s.get('win_rate',0) >= 0.5 else FG_RED),
                 (f"{pnl:+.2f}",                   9, FG_GREEN if pnl >= 0 else FG_RED),
@@ -950,10 +952,13 @@ class PortfolioBacktestTab:
         pf_all   = abs(win_sum / loss_sum) if loss_sum != 0 else float("inf")
         pf_str   = f"{min(pf_all, 99):.2f}" if pf_all != float("inf") else "∞"
 
+        risky_pairs = result.get("risky_pairs", [])
+        risky_note  = (f"   ·   ⚠R risky ({len(risky_pairs)}): {', '.join(risky_pairs)}"
+                       if risky_pairs else "")
         self._lbl_res_total.config(
             text=f"ÖSSZESEN  |  Trade: {n_all}  |  Win: {wr_all:.0%}  |  "
                  f"P&L: {total_pnl:+.2f}$  |  MaxDD: {mdd:.1f}%  |  "
-                 f"PF: {pf_str}  |  Végegyenleg: ${final_bal:.0f}",
+                 f"PF: {pf_str}  |  Végegyenleg: ${final_bal:.0f}{risky_note}",
             fg=FG_GREEN if total_pnl >= 0 else FG_RED,
         )
 
@@ -1916,220 +1921,15 @@ class DashboardWindow:
         tk.Button(btns, text="Mégse", bg=BTN_DIS_BG, fg=BTN_DIS_FG, relief="flat",
                   font=self._small_font, command=popup.destroy).pack(side="left", padx=6)
 
-    # ── Optimalizált paraméterek szerkesztője (instrumentum nevére kattintva) ─
+    # ── Instrumentum-paraméter szerkesztő (a Symbol-cellára kattintva) ──
     def _show_instrument_params(self, symbol: str):
-        from ml.optimizer import PARAMS_DIR
-        pf = PARAMS_DIR / f"{symbol}.json"
-        if not pf.exists():
-            return   # csak optimalizált párra
-        try:
-            with open(pf, encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            return
-        params = data.get("params", {})
-
-        popup = tk.Toplevel(self.root)
-        popup.title(f"{symbol} — optimalizált paraméterek")
-        popup.configure(bg=BG)
-        popup.grab_set()
-
-        ts = data.get("test_summary", {})
-        if ts:
-            from core.quality import metric_colors
-            gtxt, gcol, greason = self.strategy.grade(ts, self.cfg)
-            mc = metric_colors(ts, self.cfg)
-            hdr = tk.Frame(popup, bg=BG)
-            hdr.pack(anchor="w", padx=10, pady=(10, 2))
-            tk.Label(hdr, text=f"Minősítés: {gtxt}", bg=BG, fg=sem_color(gcol),
-                     font=self._header_font).pack(side="left")
-            if greason:
-                tk.Label(hdr, text=f"  ({greason})", bg=BG, fg=FG_GRAY,
-                         font=self._small_font).pack(side="left")
-
-            metrics = tk.Frame(popup, bg=BG)
-            metrics.pack(anchor="w", padx=10, pady=(0, 4))
-
-            def _metric(label, value, color):
-                cell = tk.Frame(metrics, bg=BG)
-                cell.pack(side="left", padx=(0, 12))
-                tk.Label(cell, text=label, bg=BG, fg=FG_GRAY,
-                         font=self._small_font).pack(side="left")
-                tk.Label(cell, text=value, bg=BG, fg=sem_color(color),
-                         font=self._small_font).pack(side="left")
-            _metric("Trade ", str(ts.get("trades", 0)), "white")
-            _metric("P&L ", f"{ts.get('total_pnl',0):+.0f}$", mc.get("total_pnl", "white"))
-            _metric("Win ", f"{ts.get('win_rate',0)*100:.0f}%", mc.get("win_rate", "white"))
-            _metric("PF ", f"{ts.get('profit_factor',0):.2f}", mc.get("profit_factor", "white"))
-            _metric("MaxDD ", f"{ts.get('max_drawdown',0)*100:.1f}%", mc.get("max_drawdown", "white"))
-
-        # ── Kereskedési órák (trade_hours) + óránkénti P&L-bontás ────────────
-        # A live óra-kapuja a config.json pairs.<SYM>.trade_hours listáját nézi.
-        # Az óránkénti P&L (az optimalizált test_summary-ből) segít eldönteni,
-        # mely órákat vegyük ki. Auto-javasol = a mínuszos órákat kiveszi (kézzel
-        # felülbírálható). Ez a config.json-ba ment, NEM az optimalizált JSON-ba.
-        hp_raw = (ts or {}).get("hourly_pnl", {})
-        hourly = {}
-        for _k, _v in hp_raw.items():
-            try:
-                hourly[int(_k)] = _v
-            except (ValueError, TypeError):
-                pass
-
-        _pc = self.cfg.get("pairs", {}).get(symbol, {})
-        _cur = _pc.get("trade_hours")
-        if _cur is not None:
-            _checked0 = {int(h) for h in _cur}
-        else:
-            _hs, _he = params.get("trade_hour_start"), params.get("trade_hour_end")
-            if isinstance(_hs, (int, float)) and isinstance(_he, (int, float)):
-                _checked0 = {h for h in range(24) if int(_hs) <= h < int(_he)}
-            else:
-                _checked0 = set(range(24))
-
-        tk.Label(popup, text="Kereskedési órák (szerver/chart idő) — pipáld be, mely órákban "
-                             "kereskedjen (óránkénti P&L az optimalizálásból):",
-                 bg=BG, fg=FG_GRAY, font=self._small_font).pack(anchor="w", padx=10, pady=(8, 0))
-
-        # Saját kattintható kapcsoló óránként (a natív checkbox rosszul renderel a
-        # sötét témán). Az ÓRA-SZÁM a gomb: ZÖLD = kereskedik, sötét = kihagyja.
-        hours_frame = tk.Frame(popup, bg=BG)
-        hours_frame.pack(anchor="w", padx=10, pady=(2, 2))
-        hour_on = {h: (h in _checked0) for h in range(24)}
-        hour_btns = {}
-
-        def _paint(h):
-            btn = hour_btns[h]
-            if hour_on[h]:
-                btn.config(bg=FG_GREEN, fg="#1e1e2e")     # BE — zöld
-            else:
-                btn.config(bg=BG_HEADER, fg=FG_GRAY_DIM)  # KI — sötét
-
-        def _toggle(h):
-            hour_on[h] = not hour_on[h]
-            _paint(h)
-
-        for h in range(24):
-            colf = tk.Frame(hours_frame, bg=BG)
-            colf.grid(row=0, column=h, padx=1)
-            btn = tk.Label(colf, text=f"{h:02d}", width=2, padx=2, pady=2,
-                           font=("Courier New", 8, "bold"), cursor="hand2")
-            btn.pack()
-            btn.bind("<Button-1>", lambda e, hh=h: _toggle(hh))
-            hour_btns[h] = btn
-            _paint(h)
-            _b = hourly.get(h)
-            if _b:
-                _pnl, _cnt = _b.get("pnl", 0.0), _b.get("count", 0)
-                tk.Label(colf, text=f"{_pnl:+.0f}", bg=BG,
-                         fg=FG_GREEN if _pnl >= 0 else FG_RED,
-                         font=("Courier New", 7)).pack()
-                tk.Label(colf, text=f"{_cnt}", bg=BG, fg=FG_GRAY,
-                         font=("Courier New", 7)).pack()
-            else:
-                tk.Label(colf, text="—", bg=BG, fg=FG_GRAY_DIM,
-                         font=("Courier New", 7)).pack()
-                tk.Label(colf, text="", bg=BG, font=("Courier New", 7)).pack()
-
-        hbtns = tk.Frame(popup, bg=BG)
-        hbtns.pack(anchor="w", padx=10, pady=(0, 6))
-        hlbl = tk.Label(hbtns, text="", bg=BG, fg=FG_GREEN, font=self._small_font)
-
-        def auto_suggest():
-            # Mínuszos óra → ki; nem-mínuszos → be; adat nélküli óra érintetlen.
-            for _h in range(24):
-                _bb = hourly.get(_h)
-                if _bb is not None:
-                    hour_on[_h] = (_bb.get("pnl", 0.0) >= 0)
-                    _paint(_h)
-            hlbl.config(text="Javaslat betöltve — felülbírálható, majd Órák mentése.",
-                        fg=FG_GRAY)
-
-        def save_hours():
-            sel = [h for h in range(24) if hour_on[h]]
-            pcfg = self.cfg.setdefault("pairs", {}).setdefault(symbol, {})
-            pcfg["trade_hours"] = sel
-            try:
-                self._save_main_config()
-                hlbl.config(text=f"Mentve: {len(sel)} óra a config.json-ba.", fg=FG_GREEN)
-            except Exception as ex:
-                hlbl.config(text=f"Mentési hiba: {ex}", fg=FG_RED)
-
-        tk.Button(hbtns, text="Auto-javasol", font=self._small_font, bg=BTN_OPT_BG,
-                  fg="#ffffff", relief="flat", command=auto_suggest).pack(side="left", padx=(0, 6))
-        tk.Button(hbtns, text="Órák mentése", font=self._small_font, bg=BTN_PLAY_BG,
-                  fg="#1e1e2e", relief="flat", command=save_hours).pack(side="left", padx=(0, 6))
-        hlbl.pack(side="left", padx=6)
-
-        tk.Label(popup, text="Kézi módosítás — a következő Play-nél lép életbe:",
-                 bg=BG, fg=FG_GRAY, font=self._small_font).pack(anchor="w", padx=10)
-
-        form = tk.Frame(popup, bg=BG)
-        form.pack(fill="both", expand=True, padx=10, pady=6)
-        entries = {}
-        keys = sorted(k for k in params if not k.startswith("_"))
-        for i, k in enumerate(keys):
-            tk.Label(form, text=k, bg=BG, fg=FG_WHITE, font=self._small_font,
-                     anchor="w", width=24).grid(row=i, column=0, sticky="w", pady=1)
-            e = tk.Entry(form, width=14, bg=BG_HEADER, fg=FG_WHITE,
-                         font=self._small_font, insertbackground=FG_WHITE)
-            e.insert(0, str(params[k]))
-            e.grid(row=i, column=1, padx=6, pady=1)
-            entries[k] = e
-
-        lbl_err = tk.Label(popup, text="", bg=BG, fg=FG_RED, font=self._small_font)
-        lbl_err.pack(anchor="w", padx=10)
-
-        def save():
-            new_params = dict(params)
-            for k, e in entries.items():
-                v = e.get().strip()
-                orig = params[k]
-                try:
-                    if isinstance(orig, bool):
-                        new_params[k] = v.lower() in ("true", "1", "igen", "yes")
-                    elif isinstance(orig, int):
-                        new_params[k] = int(float(v))
-                    elif isinstance(orig, float):
-                        new_params[k] = float(v)
-                    else:
-                        new_params[k] = v
-                except ValueError:
-                    lbl_err.config(text=f"Hibás érték: {k} = {v!r}")
-                    return
-            data["params"] = new_params
-            data["manually_edited_at"] = datetime.utcnow().isoformat()
-            try:
-                tmp = pf.with_suffix(".tmp")
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False, default=str)
-                tmp.replace(pf)
-            except Exception as ex:
-                lbl_err.config(text=f"Mentési hiba: {ex}")
-                return
-            popup.destroy()
-
-        # Az optimalizálás által mentett teljes eredménytáblázat (ha van)
-        trials_csv = PARAMS_DIR / f"{symbol}_trials.csv"
-
-        def open_trials():
-            if not trials_csv.exists():
-                lbl_err.config(text="Nincs trials CSV — futtass optimalizálást előbb.")
-                return
-            try:
-                import os
-                os.startfile(str(trials_csv))   # Windows: alapértelmezett app (Excel)
-            except Exception as ex:
-                lbl_err.config(text=f"Megnyitási hiba: {ex}")
-
-        btns = tk.Frame(popup, bg=BG)
-        btns.pack(pady=10)
-        tk.Button(btns, text="Mentés", bg=BTN_PLAY_BG, fg=BTN_PLAY_FG, relief="flat",
-                  font=self._small_font, command=save).pack(side="left", padx=6)
-        tk.Button(btns, text="Trials CSV", bg=BTN_BT_BG, fg=BTN_BT_FG, relief="flat",
-                  font=self._small_font, command=open_trials).pack(side="left", padx=6)
-        tk.Button(btns, text="Mégse", bg=BTN_DIS_BG, fg=BTN_DIS_FG, relief="flat",
-                  font=self._small_font, command=popup.destroy).pack(side="left", padx=6)
+        """Az ablak a dashboard/instrument_dialog modulban él (a gui.py-t
+        tehermentesítendő). Optimalizálatlan párnál is nyílik: ilyenkor
+        alap-paraméterekkel jön, és a Mentés létrehozza a {symbol}.json-t."""
+        from dashboard.instrument_dialog import InstrumentParamsDialog
+        InstrumentParamsDialog(
+            self.root, symbol, self.cfg, self.strategy,
+            self._header_font, self._small_font, self._save_main_config)
 
     # ── Opt státusz részletek (a státusz-cellára kattintva) ──────────────
     @staticmethod

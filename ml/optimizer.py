@@ -61,11 +61,14 @@ def study_db(symbol: str) -> Path:
 
 
 # A trials CSV formátuma: ';' elválasztó + ',' tizedesjel (magyar Excel),
-# utf-8-sig BOM. A GUI csak sort számol és Excelben nyitja — nem parse-olja.
+# utf-8-sig BOM. A GUI Excelben nyitja, ill. a paraméter-szerkesztő a `rank`
+# oszlop (minőségi rangsor, 1 = legjobb) szerint tölti be az egyes sorokat.
 def _write_trials_csv(rows: list[dict], out_csv: Path) -> int:
     if not rows:
         return 0
-    df = pd.DataFrame(rows).sort_values("score", ascending=False)
+    df = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
+    # Explicit sorszám (rank): a score-rendezés utáni pozíció → 1 = legjobb.
+    df.insert(0, "rank", range(1, len(df) + 1))
     df.to_csv(out_csv, index=False, encoding="utf-8-sig", sep=";", decimal=",")
     return len(rows)
 

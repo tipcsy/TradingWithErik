@@ -28,7 +28,8 @@ RESULTS_DIR = Path(__file__).resolve().parents[1] / "data" / "backtest_results"
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from core.risk_manager import calc_sl_tp_pips, calc_lot, calc_effective_slots
+from core.risk_manager import calc_lot, calc_effective_slots
+from core import risky_mode
 from strategy import get_strategy
 
 logging.basicConfig(
@@ -157,6 +158,64 @@ def calc_pnl(trade: Trade, close_price: float) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Risky mód — a live_trader viselkedésének modellezése a backtestben
+# ---------------------------------------------------------------------------
+# Instabil / gyenge minősítésű instrumentumnál a live óvatosabb. A backtestben
+# ugyanezt modellezzük (különben a portfólió-BT túlbecsüli a gyenge párokat):
+#   • feleződő kockázat (account_risk_pct × 0.5) → kisebb lot
+#   • azonnali SL→BE (amint profitban van, nem vár a breakeven_pct küszöbre)
+#   • azonnali trailing-aktiválás (0 pip) + feleződő trailing-távolság
+
+RISKY_RISK_FACTOR  = 0.5   # account_risk_pct szorzó risky módban
+RISKY_TRAIL_FACTOR = 0.5   # trail_distance szorzó risky módban
+
+
+def _risky_trading_cfg(trading_cfg: dict, risky: bool) -> dict:
+    """A méretezéshez használt trading_cfg — risky módban feleződő kockázattal."""
+    if not risky:
+        return trading_cfg
+    return {**trading_cfg,
+            "account_risk_pct": trading_cfg["account_risk_pct"] * RISKY_RISK_FACTOR}
+
+
+def _update_stops(trade: "Trade", high: float, low: float, params: dict,
+                  pip_size: float, risky: bool) -> None:
+    """BE + trailing SL frissítése egy nyitott trade-re (mutálja trade.sl /
+    risk_free). risky=False esetén BITAZONOS a korábbi inline logikával; risky=True
+    a live_trader-t modellezi (azonnali BE, azonnali trailing, felezett távolság)."""
+    be_pct     = params.get("breakeven_pct", 0.5)
+    trail_act  = 0.0 if risky else params.get("trail_activation_pips", 8)
+    trail_dist = params.get("trail_distance_pips", 6) * (RISKY_TRAIL_FACTOR if risky else 1.0)
+
+    if trade.direction == "BUY":
+        if (risky or be_pct > 0) and not trade.risk_free:
+            be_trigger = (trade.open_price if risky
+                          else trade.open_price + (trade.tp - trade.open_price) * be_pct)
+            if high >= be_trigger:
+                trade.sl = trade.open_price
+                trade.risk_free = True
+        if trade.risk_free:
+            trail_trigger = trade.open_price + pip_to_price(trail_act, pip_size)
+            if high >= trail_trigger:
+                new_sl = high - pip_to_price(trail_dist, pip_size)
+                if new_sl > trade.sl:
+                    trade.sl = new_sl
+    else:  # SELL
+        if (risky or be_pct > 0) and not trade.risk_free:
+            be_trigger = (trade.open_price if risky
+                          else trade.open_price - (trade.open_price - trade.tp) * be_pct)
+            if low <= be_trigger:
+                trade.sl = trade.open_price
+                trade.risk_free = True
+        if trade.risk_free:
+            trail_trigger = trade.open_price - pip_to_price(trail_act, pip_size)
+            if low <= trail_trigger:
+                new_sl = low + pip_to_price(trail_dist, pip_size)
+                if new_sl < trade.sl:
+                    trade.sl = new_sl
+
+
+# ---------------------------------------------------------------------------
 # Fő szimuláció egy párra
 # ---------------------------------------------------------------------------
 
@@ -171,11 +230,16 @@ def run_pair(
     test_start: Optional[str] = None,
     strategy=None,
     allowed_hours: Optional[set] = None,
+    risky: bool = False,
 ) -> BacktestResult:
     # A jelzést/indikátorokat a STRATÉGIA adja (seam); a végrehajtás (SL/TP/
     # breakeven/trailing, slot, lot) a motoré. strategy=None → config szerinti.
+    # risky=True → a live_trader óvatos módját modellezzük (felezett kockázat,
+    # azonnali BE, azonnali+felezett trailing). Az optimalizáló risky=False-szal
+    # hív (a mentett test_summary/minősítés az ALAP-viselkedést tükrözze).
     if strategy is None:
         strategy = get_strategy({})
+    sizing_cfg = _risky_trading_cfg(trading_cfg, risky)
     tf_hi = strategy.timeframes()[0].label
     tf_lo = strategy.timeframes()[1].label
 
@@ -200,13 +264,8 @@ def run_pair(
     # Óra-szűrő: alapból MINDEN órát kereskedünk (az optimalizáló így teljes
     # óránkénti bontást ad, amiből a trade_hours kézzel dönthető el). Az
     # allowed_hours (ha adott) csak a preview-hoz szűr — a live óra-kapuja külön.
-    skip_monday_hours = int(params.get("skip_monday_hours", 0))
-    skip_friday_hour  = int(params.get("skip_friday_hour", 24))
-
-    # ATR minőség szűrő (0 = kikapcs)
-    atr_min_pct = float(params.get("atr_min_pct", 0.0))
-    atr_max_pct = float(params.get("atr_max_pct", 0.0))
-    avg_atr = float(m15["atr"].mean()) if "atr" in m15.columns and len(m15) > 0 else 0.0
+    # A belépés-szűrőket (pl. volatilitás) és az SL/TP-méretezést a STRATÉGIA adja
+    # a `bt_entry` hookban → a motor stratégia-független.
 
     pip_size = pair_cfg["pip_size"]
     pv1_usd  = pair_cfg["pv1_usd"]
@@ -229,17 +288,6 @@ def run_pair(
             prev_m1_row = m1_row
             continue
 
-        # Hétfő reggeli gap szűrő
-        dow = m1_time.weekday()
-        if dow == 0 and hour < skip_monday_hours:
-            prev_m1_row = m1_row
-            continue
-
-        # Péntek délután szűrő
-        if dow == 4 and hour >= skip_friday_hour:
-            prev_m1_row = m1_row
-            continue
-
         # Napi veszteség limit ellenőrzés
         day_key = str(m1_time.date())
         daily_loss = daily_pnl.get(day_key, 0.0)
@@ -254,18 +302,6 @@ def run_pair(
 
         if m15_ptr < len(m15_times):
             m15_row = m15.iloc[m15_ptr]
-
-            # ATR minőség szűrő — csendes/kaotikus piac kizárása
-            if avg_atr > 0 and "atr" in m15_row.index:
-                cur_atr = m15_row["atr"]
-                if not pd.isna(cur_atr):
-                    if atr_min_pct > 0 and cur_atr < avg_atr * atr_min_pct:
-                        prev_m1_row = m1_row
-                        continue
-                    if atr_max_pct > 0 and cur_atr > avg_atr * atr_max_pct:
-                        prev_m1_row = m1_row
-                        continue
-
             state = strategy.bt_on_high_close(state, m15_row, params)
 
         # Nyitott pozíciók kezelése (SL/TP/breakeven/trailing)
@@ -295,22 +331,8 @@ def run_pair(
                     trade.status      = "sl"
                     closed = True
                 else:
-                    # Breakeven
-                    be_pct = params.get("breakeven_pct", 0.5)
-                    if be_pct > 0 and not trade.risk_free:
-                        be_trigger_price = trade.open_price + (trade.tp - trade.open_price) * be_pct
-                        if m1_row["high"] >= be_trigger_price:
-                            trade.sl = trade.open_price
-                            trade.risk_free = True
-                    # Trailing stop
-                    trail_act = params.get("trail_activation_pips", 8)
-                    trail_dist = params.get("trail_distance_pips", 6)
-                    if trade.risk_free:
-                        trail_trigger = trade.open_price + pip_to_price(trail_act, pip_size)
-                        if m1_row["high"] >= trail_trigger:
-                            new_sl = m1_row["high"] - pip_to_price(trail_dist, pip_size)
-                            if new_sl > trade.sl:
-                                trade.sl = new_sl
+                    _update_stops(trade, m1_row["high"], m1_row["low"],
+                                  params, pip_size, risky)
 
             elif trade.direction == "SELL":
                 if m1_row["low"] <= trade.tp:
@@ -326,20 +348,8 @@ def run_pair(
                     trade.status      = "sl"
                     closed = True
                 else:
-                    be_pct = params.get("breakeven_pct", 0.5)
-                    if be_pct > 0 and not trade.risk_free:
-                        be_trigger_price = trade.open_price - (trade.open_price - trade.tp) * be_pct
-                        if m1_row["low"] <= be_trigger_price:
-                            trade.sl = trade.open_price
-                            trade.risk_free = True
-                    trail_act = params.get("trail_activation_pips", 8)
-                    trail_dist = params.get("trail_distance_pips", 6)
-                    if trade.risk_free:
-                        trail_trigger = trade.open_price - pip_to_price(trail_act, pip_size)
-                        if m1_row["low"] <= trail_trigger:
-                            new_sl = m1_row["low"] + pip_to_price(trail_dist, pip_size)
-                            if new_sl < trade.sl:
-                                trade.sl = new_sl
+                    _update_stops(trade, m1_row["high"], m1_row["low"],
+                                  params, pip_size, risky)
 
             if closed:
                 # pnl_pips számítás
@@ -363,14 +373,13 @@ def run_pair(
 
             if signal != "NONE" and m15_ptr < len(m15_times):
                 m15_row = m15.iloc[m15_ptr]
-                atr_val = m15_row.get("atr", 0)
+                # A stratégia adja a pozíciótervet (SL/TP + saját szűrők); None → kihagyás
+                plan = strategy.bt_entry(m15_row, params, pip_size)
 
-                if atr_val and atr_val > 0:
-                    sl_pips, tp_pips = calc_sl_tp_pips(
-                        atr_val, {**params, "pip_size": pip_size}
-                    )
-                    eff_slots = calc_effective_slots(balance, sl_pips, pair_cfg, trading_cfg)
-                    lot = calc_lot(balance, sl_pips, pair_cfg, trading_cfg, eff_slots)
+                if plan is not None:
+                    sl_pips, tp_pips = plan
+                    eff_slots = calc_effective_slots(balance, sl_pips, pair_cfg, sizing_cfg)
+                    lot = calc_lot(balance, sl_pips, pair_cfg, sizing_cfg, eff_slots)
 
                     open_price = m1_row["close"]
                     if signal == "BUY":
@@ -426,6 +435,8 @@ def run_backtest(cfg: dict, params: Optional[dict] = None, test_mode: bool = Fal
     summaries  = []
     all_trades: list[Trade] = []
 
+    risky_mode.load()   # kézi risky állapot a data/risky_mode.json-ból
+
     for symbol, pair_cfg in pairs.items():
         df_m15, df_m1 = load_data(symbol)
         if df_m15 is None:
@@ -435,6 +446,7 @@ def run_backtest(cfg: dict, params: Optional[dict] = None, test_mode: bool = Fal
             symbol, df_m15, df_m1,
             params, pair_cfg, trading_cfg,
             initial_balance, test_start, strategy=strategy,
+            risky=risky_mode.is_risky(symbol),
         )
         summary = result.summary(initial_balance)
         summaries.append(summary)
@@ -637,14 +649,26 @@ def run_portfolio_backtest(
     tf_hi = strategy.timeframes()[0].label
     tf_lo = strategy.timeframes()[1].label
 
-    # ── Per-pár optimalizált paraméterek betöltése ────────────────────────
+    # Risky mód forrásai: (1) kézi kapcsoló (data/risky_mode.json) + (2) auto:
+    # a Közepes/Gyenge/Rossz minősítésű pár CSAK risky módban futhat (mint élőben).
+    risky_mode.load()
+    auto_risky = bool(trading_cfg.get("auto_risky_weak", True))
+
+    # ── Per-pár optimalizált paraméterek + risky állapot betöltése ─────────
     pair_params: dict = {}
+    pair_risky:  dict = {}
     for sym in symbols:
         f = PARAMS_DIR / f"{sym}.json"
         if f.exists():
             with open(f, encoding="utf-8") as fh:
                 data = json.load(fh)
             pair_params[sym] = data.get("params")
+            gtxt, _, _ = strategy.grade(data.get("test_summary", {}), cfg)
+            weak = 1 <= strategy.grade_rank(gtxt) <= 3   # Közepes/Gyenge/Rossz
+            pair_risky[sym] = risky_mode.is_risky(sym) or (auto_risky and weak)
+            if pair_risky[sym]:
+                log.info("Portfolio BT: %s — RISKY mód (minősítés: %s%s)", sym, gtxt,
+                         ", kézi" if risky_mode.is_risky(sym) else "")
         else:
             log.warning("Portfolio BT: %s — nincs optimalizált params, kihagyva.", sym)
 
@@ -692,6 +716,7 @@ def run_portfolio_backtest(
             "m15_ptr":   0,
             "params":    params,
             "pair_cfg":  cfg["pairs"][sym],
+            "risky":     pair_risky.get(sym, False),
             "state":     strategy.bt_new_state(sym),
             "prev_row":  None,
         }
@@ -756,6 +781,7 @@ def run_portfolio_backtest(
             row      = m1_df.loc[m1_time]
             pip_size = trade.pip_size
             sp       = info["pair_cfg"].get("backtest_spread_pips", spread_default)
+            risky    = info.get("risky", False)
             closed   = False
 
             if trade.direction == "BUY":
@@ -772,16 +798,7 @@ def run_portfolio_backtest(
                     trade.pnl_pips    = (trade.sl - trade.open_price) / pip_size - sp
                     trade.status      = "sl";  closed = True
                 else:
-                    be_pct = params.get("breakeven_pct", 0.5)
-                    if be_pct > 0 and not trade.risk_free:
-                        if row["high"] >= trade.open_price + (trade.tp - trade.open_price) * be_pct:
-                            trade.sl = trade.open_price;  trade.risk_free = True
-                    if trade.risk_free:
-                        trig = trade.open_price + pip_to_price(params.get("trail_activation_pips", 8), pip_size)
-                        if row["high"] >= trig:
-                            cand = row["high"] - pip_to_price(params.get("trail_distance_pips", 6), pip_size)
-                            if cand > trade.sl:
-                                trade.sl = cand
+                    _update_stops(trade, row["high"], row["low"], params, pip_size, risky)
 
             else:  # SELL
                 if row["low"] <= trade.tp:
@@ -797,16 +814,7 @@ def run_portfolio_backtest(
                     trade.pnl_pips    = (trade.open_price - trade.sl) / pip_size - sp
                     trade.status      = "sl";  closed = True
                 else:
-                    be_pct = params.get("breakeven_pct", 0.5)
-                    if be_pct > 0 and not trade.risk_free:
-                        if row["low"] <= trade.open_price - (trade.open_price - trade.tp) * be_pct:
-                            trade.sl = trade.open_price;  trade.risk_free = True
-                    if trade.risk_free:
-                        trig = trade.open_price - pip_to_price(params.get("trail_activation_pips", 8), pip_size)
-                        if row["low"] <= trig:
-                            cand = row["low"] + pip_to_price(params.get("trail_distance_pips", 6), pip_size)
-                            if cand < trade.sl:
-                                trade.sl = cand
+                    _update_stops(trade, row["high"], row["low"], params, pip_size, risky)
 
             if closed:
                 del open_trades[sym]
@@ -851,17 +859,17 @@ def run_portfolio_backtest(
                     m15_df = info["m15"]
                     if ptr < len(m15_df):
                         m15_row = m15_df.iloc[ptr]
-                        atr_val = m15_row.get("atr", 0)
-                        if atr_val and atr_val > 0:
-                            pip_size = pair_cfg["pip_size"]
-                            pv1_usd  = pair_cfg["pv1_usd"]
-                            sp       = pair_cfg.get("backtest_spread_pips", spread_default)
-
-                            sl_pips, tp_pips = calc_sl_tp_pips(
-                                atr_val, {**params, "pip_size": pip_size}
-                            )
-                            eff_slots = calc_effective_slots(balance, sl_pips, pair_cfg, trading_cfg)
-                            lot = calc_lot(balance, sl_pips, pair_cfg, trading_cfg, eff_slots)
+                        pip_size = pair_cfg["pip_size"]
+                        pv1_usd  = pair_cfg["pv1_usd"]
+                        sp       = pair_cfg.get("backtest_spread_pips", spread_default)
+                        # A stratégia adja a pozíciótervet (SL/TP + saját szűrők)
+                        plan = strategy.bt_entry(m15_row, params, pip_size)
+                        if plan is not None:
+                            sl_pips, tp_pips = plan
+                            # risky pár → feleződő kockázat a méretezésnél
+                            sizing_cfg = _risky_trading_cfg(trading_cfg, info.get("risky", False))
+                            eff_slots = calc_effective_slots(balance, sl_pips, pair_cfg, sizing_cfg)
+                            lot = calc_lot(balance, sl_pips, pair_cfg, sizing_cfg, eff_slots)
 
                             open_price = float(row["close"])
                             if signal == "BUY":
@@ -901,10 +909,14 @@ def run_portfolio_backtest(
     per_pair: dict = {}
     for sym, tt in by_sym.items():
         r = BacktestResult(symbol=sym, trades=tt)
-        per_pair[sym] = r.summary(initial_balance)
+        s = r.summary(initial_balance)
+        s["risky"] = pair_risky.get(sym, False)   # a GUI jelzi a risky párokat
+        per_pair[sym] = s
 
-    log.info("Portfolio BT kész | Kötések: %d | P&L: $%.2f | Végegyenleg: $%.2f",
-             len(closed_trades), balance - initial_balance, balance)
+    risky_syms = [s for s, v in pair_risky.items() if v and s in pair_data]
+    log.info("Portfolio BT kész | Kötések: %d | P&L: $%.2f | Végegyenleg: $%.2f | Risky: %s",
+             len(closed_trades), balance - initial_balance, balance,
+             ", ".join(risky_syms) if risky_syms else "—")
 
     return {
         "trades":          closed_trades,
@@ -912,6 +924,7 @@ def run_portfolio_backtest(
         "final_balance":   balance,
         "initial_balance": initial_balance,
         "per_pair":        per_pair,
+        "risky_pairs":     risky_syms,
         "equity_curve":    equity_curve,
     }
 

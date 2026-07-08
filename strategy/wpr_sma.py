@@ -550,7 +550,14 @@ class WprSmaStrategy(Strategy):
     # --- Backtest-motor hookok (a core signal/indicator becsomagolva) ------
 
     def bt_indicators(self, df_hi, df_lo, params):
-        return compute_indicators(df_hi, df_lo, params)
+        m15, m1 = compute_indicators(df_hi, df_lo, params)
+        # A volatilitás-szűrő baseline-ja: a teljes (indikátoros) ablak ATR-átlaga,
+        # konstans oszlopként — így a `bt_entry` a motortól függetlenül elérheti
+        # (a motor NEM ismeri az 'atr'-t). Mindkét backtest-motor ugyanezt látja.
+        if "atr" in m15.columns and len(m15) > 0:
+            m15 = m15.copy()
+            m15["atr_avg"] = float(m15["atr"].mean())
+        return m15, m1
 
     def bt_warmup(self, params: dict, timeframe_label: str) -> int:
         if timeframe_label == "M15":
@@ -577,3 +584,29 @@ class WprSmaStrategy(Strategy):
         if pd.isna(prev_wpr) or pd.isna(cur_wpr):
             return "NONE"
         return check_m1_entry(state, float(prev_wpr), float(cur_wpr), params)
+
+    def sl_tp_pips(self, hi_row, params, pip_size):
+        """SL/TP méretezés ATR-ből (szűrő nélkül). None → nincs érvényes ATR."""
+        atr_v = hi_row.get("atr", 0)
+        if not atr_v or pd.isna(atr_v) or atr_v <= 0:
+            return None
+        sl_pips, tp_pips = calc_sl_tp_pips(float(atr_v), {**params, "pip_size": pip_size})
+        return sl_pips, tp_pips
+
+    def bt_entry(self, hi_row, params, pip_size):
+        """Backtest: volatilitás-szűrő + ATR-méretezés. None → kihagyás."""
+        atr_v = hi_row.get("atr", 0)
+        if not atr_v or pd.isna(atr_v) or atr_v <= 0:
+            return None
+        # Volatilitás-szűrő: a túl csendes/kaotikus gyertyák kizárása. Baseline az
+        # ablak ATR-átlaga (atr_avg oszlop, a bt_indicators teszi rá). 0 = kikapcs.
+        # CSAK a backtest belépés-gátja (a live spread-kapuja ettől független).
+        atr_avg = hi_row.get("atr_avg", 0)
+        if atr_avg and atr_avg > 0:
+            atr_min_pct = float(params.get("atr_min_pct", 0.0))
+            atr_max_pct = float(params.get("atr_max_pct", 0.0))
+            if atr_min_pct > 0 and atr_v < atr_avg * atr_min_pct:
+                return None
+            if atr_max_pct > 0 and atr_v > atr_avg * atr_max_pct:
+                return None
+        return self.sl_tp_pips(hi_row, params, pip_size)
