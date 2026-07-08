@@ -1,0 +1,99 @@
+{
+  "_README": "PÉLDA config. Másold 'config.json' néven, és töltsd ki a broker-adatokat + az mt5.path-ot. A config.json GITIGNORE-olt (érzékeny adat: login/jelszó) — SOSE kerüljön fel a repóra! Ez a fájl (config.example.json) csak a szerkezetet mutatja.",
+  "strategy": {
+    "_comment": "Az aktív stratégia modul a strategy/ csomagból. Cseréhez csak ezt kell átírni + új modult írni.",
+    "name": "wpr_sma"
+  },
+  "dashboard": {
+    "_comment": "Felület frissítési ütem. price_refresh_sec: BID/ASK/spread MINDEN párra (1-5 ajánlott). live_refresh_sec: indikátor (WPR) a FUTÓ pároknál. all_refresh_sec: indikátor minden párra. watchdog_threshold_sec: ennyi mp blokkolás fölött figyelmeztet a fagyás-watchdog (data/ui_watchdog.log).",
+    "price_refresh_sec": 3,
+    "live_refresh_sec": 7,
+    "all_refresh_sec": 30,
+    "watchdog_threshold_sec": 2.0,
+    "_comment_countdown": "Mely időkeretek visszaszámlálója látszik a felső sávban (percben). Üres/hiányzó = a stratégia összes időkerete.",
+    "countdown_timeframes": [
+      15,
+      1
+    ]
+  },
+  "broker": {
+    "_comment": "MT5 belépési adatok — a valós config.json-ban töltsd ki. is_demo=true amíg demón tesztelsz.",
+    "name": "YourBroker",
+    "server": "YourBroker-Demo",
+    "login": 0,
+    "password": "",
+    "is_demo": true,
+    "magic": 20260627
+  },
+  "mt5": {
+    "_comment": "MetaTrader 5 terminál elérési útja. Kötelező ha egy gépen több MT5 fut!",
+    "path": "C:\\Path\\To\\MetaTrader5\\terminal64.exe",
+    "_comment_portable": "portable=true: az MT5 a saját könyvtárából olvassa az adatait",
+    "portable": true
+  },
+  "trading": {
+    "_comment_risk": "Az összes nyitott slot EGYÜTTES kockázata (nem per-trade!). 0.01 = 1%",
+    "account_risk_pct": 0.01,
+    "_comment_loss": "Ha a napi veszteség eléri ezt, aznap leáll a kereskedés",
+    "daily_loss_limit_pct": 0.015,
+    "_comment_slots": "Egyszerre max ennyi nyitott pozíció (összes pár együtt). AI optimalizálható: 2-8",
+    "max_open_slots": 4,
+    "_comment_session": "Globális nyitás/zárás UTC-ben. Páronként felülírható a pairs.sess_start/sess_end-del",
+    "global_session_start_utc": 10,
+    "global_session_end_utc": 21,
+    "_comment_breach": "Mit tegyen ha a min_lot kockázat meghaladja a célt: always_trade | ai_decide | skip",
+    "min_lot_breach_action": "always_trade",
+    "_comment_risky": "Risky mód (data/risky_mode.json) újraolvasási gyakorisága mp-ben — külső program is írhatja a fájlt. A gombnyomás azonnal ment.",
+    "risky_reload_sec": 3600,
+    "_comment_auto_risky": "Portfólió-backtest: a Közepes/Gyenge/Rossz minősítésű pár automatikusan RISKY módban fut (felezett kockázat, azonnali BE, azonnali+felezett trailing) — mint élőben. false = csak a kézi kapcsoló számít.",
+    "auto_risky_weak": true
+  },
+  "optimizer": {
+    "_comment_method": "Optimalizálási módszer: optuna | random | grid",
+    "method": "optuna",
+    "max_trials": 500,
+    "max_parallel_optimizers": 6,
+    "_comment_timeout": "Beragadás-védelem: NEM a teljes futásidőt limitálja (ezek hosszú folyamatok!), hanem azt figyeli, halad-e. stall_timeout_sec: ennyi mp NINCS haladás = beragadt, lezárja. hard_timeout_sec: opcionális abszolút végső határ mp-ben (0 = kikapcsolva).",
+    "stall_timeout_sec": 1200,
+    "hard_timeout_sec": 0,
+    "_comment_wf": "Walk-forward: n_splits ablak, mindegyikben train_months tanítás + test_months validálás",
+    "wf_n_splits": 4,
+    "wf_train_months": 6,
+    "wf_test_months": 2,
+    "_comment_split": "train_start_date: ettől dolgozik az optimizer | test_start_date: végső out-of-sample teszt",
+    "train_start_date": "2025-01-01",
+    "test_start_date": "2025-10-01"
+  },
+  "data": {
+    "history_start_date": "2024-10-01",
+    "overwrite_existing": false
+  },
+  "pairs": {
+    "_comment": "pip_size: 1 pip értéke az árfolyamban. min_lot/lot_step: MT5 korlátok. sess_start/end: UTC óra. Új párt a GUI-ból is felvehetsz (a bróker adataival automatikusan kitölti), vagy ide kézzel az alábbi minták szerint.",
+    "EURUSD": {
+      "_comment": "Forex-pár minta",
+      "enabled": true,
+      "pip_size": 0.0001,
+      "min_lot": 0.01,
+      "lot_step": 0.01,
+      "pv1_usd": 8.6027,
+      "backtest_spread_pips": 1.3,
+      "sess_start": 10,
+      "sess_end": 21,
+      "contract_size": 100000.0,
+      "viz_enabled": false
+    },
+    "GER40": {
+      "_comment": "Index/CFD minta",
+      "enabled": false,
+      "pip_size": 1.0,
+      "pv1_usd": 1.0,
+      "min_lot": 0.1,
+      "lot_step": 0.1,
+      "backtest_spread_pips": 1.6,
+      "sess_start": 0,
+      "sess_end": 24,
+      "description": "GER40 Cash"
+    }
+  }
+}
