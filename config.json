@@ -48,7 +48,7 @@
     "_comment_method": "Optimalizálási módszer: optuna | random | grid",
     "method": "optuna",
     "max_trials": 500,
-    "max_parallel_optimizers": 2,
+    "max_parallel_optimizers": 6,
     "_comment_timeout": "Beragadás-védelem: NEM a teljes futásidőt limitálja (ezek hosszú folyamatok!), hanem azt figyeli, halad-e. stall_timeout_sec: ennyi mp NINCS haladás = beragadt, lezárja. hard_timeout_sec: opcionális abszolút végső határ mp-ben (0 = kikapcsolva).",
     "stall_timeout_sec": 1200,
     "hard_timeout_sec": 0,
@@ -75,7 +75,8 @@
       "backtest_spread_pips": 1.3,
       "sess_start": 10,
       "sess_end": 21,
-      "contract_size": 100000.0
+      "contract_size": 100000.0,
+      "viz_enabled": false
     },
     "GBPUSD": {
       "enabled": true,
@@ -86,7 +87,8 @@
       "backtest_spread_pips": 1.6,
       "sess_start": 10,
       "sess_end": 21,
-      "contract_size": 100000.0
+      "contract_size": 100000.0,
+      "viz_enabled": false
     },
     "NZDUSD": {
       "enabled": true,
@@ -97,7 +99,8 @@
       "backtest_spread_pips": 1.4,
       "sess_start": 10,
       "sess_end": 21,
-      "contract_size": 100000.0
+      "contract_size": 100000.0,
+      "viz_enabled": false
     },
     "GBPAUD": {
       "enabled": true,
@@ -108,7 +111,8 @@
       "backtest_spread_pips": 1.8,
       "sess_start": 10,
       "sess_end": 21,
-      "contract_size": 100000.0
+      "contract_size": 100000.0,
+      "viz_enabled": false
     },
     "USDCHF": {
       "enabled": false,
@@ -299,7 +303,8 @@
       "backtest_spread_pips": 1.9,
       "sess_start": 10,
       "sess_end": 21,
-      "contract_size": 100000.0
+      "contract_size": 100000.0,
+      "viz_enabled": false
     },
     "EURJPY": {
       "enabled": false,
@@ -322,7 +327,8 @@
       "backtest_spread_pips": 2.1,
       "sess_start": 10,
       "sess_end": 21,
-      "contract_size": 100000.0
+      "contract_size": 100000.0,
+      "viz_enabled": false
     },
     "CHFJPY": {
       "enabled": false,
@@ -345,7 +351,8 @@
       "backtest_spread_pips": 1.6,
       "sess_start": 10,
       "sess_end": 21,
-      "contract_size": 100000.0
+      "contract_size": 100000.0,
+      "viz_enabled": false
     },
     "AUDJPY": {
       "enabled": true,
@@ -356,7 +363,8 @@
       "backtest_spread_pips": 1.7,
       "sess_start": 10,
       "sess_end": 21,
-      "contract_size": 100000.0
+      "contract_size": 100000.0,
+      "viz_enabled": false
     },
     "NZDJPY": {
       "enabled": false,
@@ -379,7 +387,8 @@
       "backtest_spread_pips": 16.0,
       "sess_start": 8,
       "sess_end": 17,
-      "contract_size": 1.0
+      "contract_size": 1.0,
+      "viz_enabled": false
     },
     "NAS100": {
       "enabled": true,
@@ -390,7 +399,8 @@
       "backtest_spread_pips": 8.0,
       "sess_start": 14,
       "sess_end": 21,
-      "contract_size": 1.0
+      "contract_size": 1.0,
+      "viz_enabled": true
     },
     "SP500": {
       "enabled": true,
@@ -401,7 +411,8 @@
       "backtest_spread_pips": 3.6,
       "sess_start": 14,
       "sess_end": 21,
-      "contract_size": 1.0
+      "contract_size": 1.0,
+      "viz_enabled": false
     },
     "Nikkei225": {
       "enabled": true,
@@ -412,7 +423,8 @@
       "backtest_spread_pips": 130.0,
       "sess_start": 0,
       "sess_end": 5,
-      "contract_size": 1.0
+      "contract_size": 1.0,
+      "viz_enabled": false
     },
     "DJ30": {
       "enabled": true,
@@ -423,7 +435,8 @@
       "backtest_spread_pips": 11.0,
       "sess_start": 14,
       "sess_end": 21,
-      "contract_size": 1.0
+      "contract_size": 1.0,
+      "viz_enabled": true
     },
     "EU50": {
       "enabled": true,
@@ -434,7 +447,8 @@
       "backtest_spread_pips": 13.0,
       "sess_start": 8,
       "sess_end": 17,
-      "contract_size": 1.0
+      "contract_size": 1.0,
+      "viz_enabled": false
     },
     "XAUUSD": {
       "enabled": true,
@@ -446,7 +460,7 @@
       "sess_start": 10,
       "sess_end": 21,
       "contract_size": 100.0,
-      "viz_enabled": true
+      "viz_enabled": false
     },
     "XAGUSD": {
       "enabled": true,
@@ -469,7 +483,8 @@
       "backtest_spread_pips": 3.3,
       "sess_start": 9,
       "sess_end": 21,
-      "contract_size": 1000.0
+      "contract_size": 1000.0,
+      "viz_enabled": false
     },
     "NG-C": {
       "enabled": false,
@@ -480,7 +495,8 @@
       "backtest_spread_pips": 0.6,
       "sess_start": 14,
       "sess_end": 21,
-      "contract_size": 10000.0
+      "contract_size": 10000.0,
+      "viz_enabled": false
     },
     "BTCUSD": {
       "enabled": true,
@@ -490,7 +506,8 @@
       "pv1_usd": 0.0878,
       "backtest_spread_pips": 1.5,
       "sess_start": 0,
-      "sess_end": 24
+      "sess_end": 24,
+      "viz_enabled": false
     },
     "HUBS": {
       "enabled": true,
@@ -498,18 +515,8 @@
       "pv1_usd": 0.8771,
       "backtest_spread_pips": 0.0,
       "sess_start": 0,
-      "sess_end": 24
-    },
-    "VIX": {
-      "enabled": true,
-      "pip_size": 0.1,
-      "pv1_usd": 87.5825,
-      "min_lot": 0.1,
-      "lot_step": 0.1,
-      "backtest_spread_pips": 0.0,
-      "sess_start": 0,
       "sess_end": 24,
-      "description": "Volatility Index"
+      "viz_enabled": false
     },
     "VOW": {
       "enabled": false,
@@ -520,7 +527,8 @@
       "backtest_spread_pips": 0.0,
       "sess_start": 0,
       "sess_end": 24,
-      "description": "Volkswagen AG"
+      "description": "Volkswagen AG",
+      "viz_enabled": false
     },
     "SPCX": {
       "enabled": true,
@@ -531,7 +539,8 @@
       "backtest_spread_pips": 0.0,
       "sess_start": 0,
       "sess_end": 24,
-      "description": "Space Exploration Technologies Corp."
+      "description": "Space Exploration Technologies Corp.",
+      "viz_enabled": false
     }
   }
 }
