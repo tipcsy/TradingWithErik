@@ -22,12 +22,13 @@ from __future__ import annotations
 
 import csv
 import json
+import threading
 import tkinter as tk
 from datetime import datetime
 
 from dashboard.theme import (
     BG, BG_HEADER,
-    FG_WHITE, FG_GREEN, FG_RED, FG_GRAY, FG_GRAY_DIM,
+    FG_WHITE, FG_GREEN, FG_RED, FG_YELLOW, FG_GRAY, FG_GRAY_DIM,
     BTN_PLAY_BG, BTN_PLAY_FG, BTN_OPT_BG, BTN_BT_BG, BTN_BT_FG,
     BTN_DIS_BG, BTN_DIS_FG,
     color as sem_color,
@@ -108,6 +109,11 @@ class InstrumentParamsDialog:
         # ── trials CSV betöltése → {rank: {oszlop: nyers_str}} ──────────────
         self._rank_rows = self._load_trials()
         self._ranks = sorted(self._rank_rows)
+
+        # A Backtest gomb eredménye (a Mentés ezt írja test_summary-ként a JSON-ba,
+        # így a minősítés megjelenik a soron). None = még nem futott backtest.
+        self._bt_summary = None
+        self._bt_running = False
 
         self._build()
 
@@ -223,11 +229,19 @@ class InstrumentParamsDialog:
         self.lbl_err = tk.Label(popup, text="", bg=BG, fg=FG_RED, font=self._sf)
         self.lbl_err.pack(anchor="w", padx=10)
 
+        # ── Backtest-eredmény sor (a Backtest gomb tölti) ───────────────────
+        self.lbl_bt = tk.Label(popup, text="", bg=BG, fg=FG_GRAY_DIM, font=self._sf,
+                               justify="left", wraplength=560)
+        self.lbl_bt.pack(anchor="w", padx=10, pady=(0, 2))
+
         # ── Gombsor ─────────────────────────────────────────────────────────
         btns = tk.Frame(popup, bg=BG)
         btns.pack(pady=10)
         tk.Button(btns, text="Mentés", bg=BTN_PLAY_BG, fg=BTN_PLAY_FG, relief="flat",
                   font=self._sf, command=self._save).pack(side="left", padx=6)
+        self._btn_bt = tk.Button(btns, text="Backtest", bg=BTN_BT_BG, fg=BTN_BT_FG,
+                                 relief="flat", font=self._sf, command=self._run_backtest)
+        self._btn_bt.pack(side="left", padx=6)
         if self._ranks:
             tk.Button(btns, text="Ment új sorszámként", bg=BTN_OPT_BG, fg="#ffffff",
                       relief="flat", font=self._sf,
@@ -460,6 +474,11 @@ class InstrumentParamsDialog:
         data["manually_edited_at"] = datetime.utcnow().isoformat()
         if self.is_new and "source" not in data:
             data["source"] = "manual"
+        # Ha futott Backtest, a friss összegzés kerül a JSON-ba → a soron
+        # megjelenik a minősítés (Win/MaxDD/P&L a test_summary-ből).
+        if self._bt_summary is not None:
+            data["test_summary"] = self._bt_summary
+            data["backtested_at"] = datetime.utcnow().isoformat()
         if extra:
             data.update(extra)
         try:
@@ -486,6 +505,15 @@ class InstrumentParamsDialog:
         trials CSV-be (501…) + a JSON-ba, hogy később visszatölthető legyen."""
         new_params = self._collect_params()
         if new_params is None:
+            return
+        # Duplikátum-ellenőrzés: ne mentsük ugyanazt a kombinációt új sorszámra.
+        dup = self._find_matching_rank(new_params)
+        if dup is not None:
+            self.lbl_err.config(
+                text=f"Ez a paraméter-kombináció már a #{dup} sorszámon mentve van "
+                     f"— nem mentem újra.", fg=FG_YELLOW)
+            self.rank_var.set(str(dup))
+            self._load_rank(dup)
             return
         new_rank = _MANUAL_RANK_BASE
         while new_rank in self._rank_rows:
@@ -543,3 +571,94 @@ class InstrumentParamsDialog:
             os.startfile(str(self.trials_csv))   # Windows: alap app (Excel)
         except Exception as ex:
             self.lbl_err.config(text=f"Megnyitási hiba: {ex}")
+
+    # ── Duplikátum-keresés a rangsorban ─────────────────────────────────────
+    def _find_matching_rank(self, params: dict):
+        """Van-e már olyan sorszám, aminek a szerkeszthető paraméterei (az űrlap
+        mezői) numerikusan megegyeznek a `params`-szal? Visszaad rangot vagy None."""
+        import math
+        for rank in sorted(self._rank_rows):
+            row = self._rank_rows[rank]
+            ok = True
+            for k in self.entries:
+                rv = _num(row.get(k))
+                pv = params.get(k)
+                if rv is None or pv is None:
+                    ok = False
+                    break
+                try:
+                    if not math.isclose(float(rv), float(pv), rel_tol=1e-9, abs_tol=1e-6):
+                        ok = False
+                        break
+                except (TypeError, ValueError):
+                    ok = False
+                    break
+            if ok:
+                return rank
+        return None
+
+    # ── Backtest a jelenlegi paraméterekkel (Win/MaxDD/P&L + minősítés) ──────
+    def _run_backtest(self):
+        if self._bt_running:
+            return
+        params = self._collect_params()
+        if params is None:
+            return
+        pair_cfg = self.cfg.get("pairs", {}).get(self.symbol)
+        if not isinstance(pair_cfg, dict):
+            self.lbl_bt.config(text="Nincs pár-config ehhez az instrumentumhoz.", fg=FG_RED)
+            return
+        self._bt_running = True
+        self._btn_bt.config(text="Backtest fut…", state="disabled")
+        self.lbl_bt.config(text="Backtest fut (teljes historikus) — kis türelmet…",
+                           fg=FG_GRAY)
+
+        def work():
+            summary, err = None, None
+            try:
+                from trading.backtest import load_data, run_pair
+                df15, df1 = load_data(self.symbol)
+                if df15 is None:
+                    err = "Nincs letöltött adat (data/m15, data/m1) ehhez a párhoz."
+                else:
+                    ib = float(self.cfg.get("ml", {}).get("starting_balance_eur", 1000.0))
+                    res = run_pair(self.symbol, df15, df1, params, pair_cfg,
+                                   self.cfg["trading"], ib, strategy=self.strategy)
+                    summary = res.summary(ib)
+            except Exception as ex:
+                err = str(ex)
+            try:
+                self.popup.after(0, lambda: self._bt_done(summary, err))
+            except Exception:
+                pass
+
+        threading.Thread(target=work, daemon=True, name="InstrBacktest").start()
+
+    def _bt_done(self, summary, err):
+        self._bt_running = False
+        try:
+            self._btn_bt.config(text="Backtest", state="normal")
+        except Exception:
+            return   # a popup közben bezárult
+        if err:
+            self.lbl_bt.config(text=f"Backtest hiba: {err}", fg=FG_RED)
+            return
+        if not summary or summary.get("trades", 0) == 0:
+            self._bt_summary = summary or {"trades": 0}
+            self.lbl_bt.config(text="Backtest: 0 trade ezen a paraméterezésen.",
+                               fg=FG_YELLOW)
+            return
+        self._bt_summary = summary
+        gtxt, gcol, greason = self.strategy.grade(summary, self.cfg)
+        pf = summary.get("profit_factor", 0.0)
+        pf_s = f"{pf:.2f}" if pf != float("inf") else "∞"
+        self.lbl_bt.config(
+            text=(f"Backtest (teljes hist.) — Minősítés: {gtxt}"
+                  + (f" ({greason})" if greason else "")
+                  + f"   |   Trade {summary.get('trades',0)}"
+                    f"   Win {summary.get('win_rate',0)*100:.0f}%"
+                    f"   MaxDD {summary.get('max_drawdown',0)*100:.1f}%"
+                    f"   P&L {summary.get('total_pnl',0):+.0f}$"
+                    f"   PF {pf_s}"
+                    f"   →  a Mentés a JSON-ba írja (minősítés a soron)."),
+            fg=sem_color(gcol))
