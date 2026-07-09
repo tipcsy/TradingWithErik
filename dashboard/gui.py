@@ -224,11 +224,16 @@ class PairRow:
 
         sym_lbl = self.labels["symbol"]
 
-        # Risky gomb — bármely állapotban kapcsolható; narancs, ha aktív
-        if getattr(ds, "risky", False):
-            self.btn_risky.config(text="R", bg=FG_ORANGE, fg="#1e1e2e", state="normal")
+        # „R" gomb = kockázatcsökkentő PRESET (kattintásra körbe-vált). A gomb a
+        # ténylegesen érvényes presetet mutatja: — Ki | R Risky | F Felező | P Pajzs.
+        _rp = getattr(ds, "rr_preset", "off")
+        _rrmap = {"risky": ("R", FG_ORANGE), "halving": ("F", FG_CYAN),
+                  "shield": ("P", FG_GREEN)}
+        if _rp in _rrmap:
+            _txt, _col = _rrmap[_rp]
+            self.btn_risky.config(text=_txt, bg=_col, fg="#1e1e2e", state="normal")
         else:
-            self.btn_risky.config(text="R", bg=BTN_DIS_BG, fg=FG_GRAY, state="normal")
+            self.btn_risky.config(text="—", bg=BTN_DIS_BG, fg=FG_GRAY, state="normal")
 
         # Viz gomb — bármely állapotban kapcsolható; zöld, ha a viz BE van kapcsolva
         if getattr(ds, "viz_enabled", True):
@@ -1552,7 +1557,8 @@ class DashboardWindow:
             ("■ LIVE", FG_GREEN), ("■ STOPPED", FG_GRAY),
             ("■ Nem tanított", FG_GRAY_DIM),
             ("■ Optimalizálás", FG_YELLOW), ("✦ Kockázatmentes", FG_CYAN),
-            ("R Risky", FG_ORANGE),
+            ("Kockázatcsökk. (kattints):", FG_GRAY),
+            ("R Risky", FG_ORANGE), ("F Felező", FG_CYAN), ("P Pajzs", FG_GREEN),
         ]:
             tk.Label(legend, text=text, bg=BG, fg=col, font=small_font, padx=6).pack(side="left")
 
@@ -2093,17 +2099,25 @@ class DashboardWindow:
                        connected=getattr(self, "_connected", True))
 
     def _handle_risky(self, symbol: str):
-        """Risky mód váltása — azonnal menti a data/risky_mode.json-ba."""
-        from core import risky_mode
-        new_val = risky_mode.toggle(symbol)
+        """Az „R" gomb: a kockázatcsökkentő PRESET körbe-váltása
+        (Ki → Risky → Felező → Pajzs), per-pár mentve (data/risk_mode.json).
+        A régi risky_mode-ot szinkronban tartjuk (preset==risky), hogy az azt
+        olvasó live/backtest változatlanul működjön."""
+        from core import rr_state, risky_mode, risk_reduction as _rr
+        preset = rr_state.cycle_preset(symbol)
+        risky_mode.set_risky(symbol, preset == _rr.PRESET_RISKY)
         ds = self.dashboard_ref.get(symbol)
         if ds is not None:
-            ds.risky = new_val
+            ds.rr_preset = preset
+            ds.risky = (preset == _rr.PRESET_RISKY)
             row = self.rows.get(symbol)
             if row is not None:
+                no_trade = (self.instrument_state.get(symbol) == "LIVE"
+                            and self._is_no_trade_now(symbol))
                 row.update(ds, self.instrument_state.get(symbol, "STOPPED"),
                            self.optimizer_status.get(symbol, ""),
-                           connected=getattr(self, "_connected", False))
+                           connected=getattr(self, "_connected", False),
+                           no_trade=no_trade)
 
     def _handle_viz(self, symbol: str):
         """Vizualizáció ki/be az adott instrumentumhoz. Bekapcsoláskor azonnali
@@ -2596,6 +2610,8 @@ class DashboardWindow:
             self._conn_tick = 0
             self._last_heartbeat = time.monotonic()
             risky_mode.load()                 # induló risky állapot
+            from core import rr_state as _rrs0
+            _rrs0.load()                      # induló per-pár preset állapot
             self._start_bg_poller()
             self._start_market_data_poll()
             self._start_watchdog()
@@ -2675,7 +2691,9 @@ class DashboardWindow:
                     ds.pos_count    = pos.get("count", 1) if pos else 0
                     ds.risk_free    = pos["risk_free"] if pos else False
                 if ds is not None:
-                    ds.risky = risky_mode.is_risky(symbol)
+                    from core import rr_state as _rrs
+                    ds.rr_preset = _rrs.effective_preset(symbol)
+                    ds.risky = (ds.rr_preset == "risky")
                     no_trade = (inst_state == "LIVE" and self._is_no_trade_now(symbol))
                     row.update(ds, inst_state, opt_status,
                                connected=getattr(self, "_connected", False),

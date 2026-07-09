@@ -628,8 +628,15 @@ class InstrumentParamsDialog:
         return {v: k for k, v in self._rrs.NAME.items()}.get(name, self._rrs.PRESET_OFF)
 
     def _on_rr_change(self, name: str):
-        """A választott preset mentése a per-pár állapotba (data/risk_mode.json)."""
-        self._rrs.set_preset(self.symbol, self._preset_from_name(name))
+        """A választott preset mentése a per-pár állapotba (data/risk_mode.json).
+        A régi risky_mode-ot szinkronban tartjuk (preset==risky), mint a sor R gombja."""
+        preset = self._preset_from_name(name)
+        self._rrs.set_preset(self.symbol, preset)
+        try:
+            from core import risky_mode, risk_reduction as _rr
+            risky_mode.set_risky(self.symbol, preset == _rr.PRESET_RISKY)
+        except Exception:
+            pass
 
     def _rr_spec_from_ui(self):
         """A UI-ban választott preset → run_pair rr spec (None, ha 'Ki')."""
