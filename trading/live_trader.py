@@ -374,15 +374,24 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
     # végrehajtási tények: pozíció P&L, napi P&L).
     ds = dashboard.setdefault(symbol, PairDashboardState(symbol=symbol, trained=True))
 
-    # Risky mód: instabil piac → óvatosabb kockázat. Hatások:
-    #   • feleződő kockázat (account_risk_pct × 0.5), amennyiben a min_lot engedi
-    #   • azonnali SL→BE (amint profitban van)
-    #   • feleződő trailing-távolság
-    risky = risky_mode.is_risky(symbol)
+    # Kockázatcsökkentő PRESET (per-pár, data/risk_mode.json) — a backtesttel
+    # AZONOS modell:
+    #   • off    : sima BE (breakeven_pct) + trailing
+    #   • risky  : felezett méret + azonnali BE + azonnali/felezett trailing
+    #   • halving/shield : 1R-nél RÉSZLEGES ZÁRÁS (Felező 50% / Pajzs 75%) + runner-
+    #     stop (keep|breakeven|trailing). A részleges zárás után a pozíció
+    #     kockázatmentes (a lezárt profit fedezi a runner max veszteségét).
+    from core import rr_state, risk_reduction as _rr
+    _spec    = rr_state.spec_for(symbol)
+    _preset  = _spec.get("preset", _rr.PRESET_OFF)
+    _cautious = bool(_spec.get("cautious", False))
+    risky    = (_preset == _rr.PRESET_RISKY)      # a régi BE/trailing ág ehhez igazodik
     ds.risky = risky
+    ds.rr_preset = _preset
+    # Óvatos (felezett) méret: risky preset VAGY kézi 'cautious' override.
     risk_trading_cfg = (
         {**trading_cfg, "account_risk_pct": trading_cfg["account_risk_pct"] * 0.5}
-        if risky else trading_cfg)
+        if _cautious else trading_cfg)
 
     # --- MT5 chart-vizualizáció (throttle-olva, mély adatablakkal) ---
     # A kereskedési kapuk (session/napi limit/adathiány) ELŐTT: a viz MEGJELENÍTÉS,
@@ -516,30 +525,76 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
             slot_mgr.set_risk_free(ticket)
             is_rf = True
 
-        # Breakeven ellenőrzés (risky módban AZONNAL, amint profitban van).
-        # A tényleges SL nem pontos BE, hanem BE + spread puffer (lásd
-        # mt5_connector.move_to_breakeven): spread×2 → ×1 → pontos BE fallback.
-        be_pct = params.get("breakeven_pct", 0.5)
-        if (risky or be_pct > 0) and not is_rf:
-            if pos.type == mt5.ORDER_TYPE_BUY:
-                be_price = (pos.price_open if risky
-                            else pos.price_open + (pos.tp - pos.price_open) * be_pct)
-                trigger = pos.price_current >= be_price
-            else:
-                be_price = (pos.price_open if risky
-                            else pos.price_open - (pos.price_open - pos.tp) * be_pct)
-                trigger = pos.price_current <= be_price
-            if trigger and mt5_connector.move_to_breakeven(ticket):
+        _is_partial = _preset in (_rr.PRESET_HALVING, _rr.PRESET_SHIELD)
+
+        # Restart-védelem: ha a bot újraindult egy MÁR részlegesen zárt (Felező/
+        # Pajzs) pozíció közben, a pstate elveszett → az MT5 history-ból derítsük ki,
+        # hogy volt-e már részleges zárás, és NE zárjunk megint (dupla zárás ellen).
+        if _is_partial and "rr_reduced" not in pstate:
+            if mt5_connector.has_partial_close(ticket):
+                pstate["rr_reduced"]  = True
+                pstate.setdefault("runner_mode", _spec.get("runner_stop", _rr.RUNNER_TRAILING))
                 slot_mgr.set_risk_free(ticket)
-                pstate["be_done"] = True
-                log.info("✦ %s #%d — költség-tudatos breakeven beállítva%s", symbol, ticket,
-                         " (risky)" if risky else "")
+                is_rf = True
+
+        if _is_partial:
+            # ── Felező/Pajzs: 1R-nél RÉSZLEGES ZÁRÁS (egyszer); a stop TÁVOL marad ──
+            _minlot  = pair_cfg.get("min_lot", 0.01)
+            _lotstep = pair_cfg.get("lot_step", 0.01)
+            if not pstate.get("rr_reduced") and not is_rf:
+                one_r = abs(pos.price_open - pstate.get("original_sl", pos.sl))
+                reached = (pos.price_current >= pos.price_open + one_r
+                           if pos.type == mt5.ORDER_TYPE_BUY
+                           else pos.price_current <= pos.price_open - one_r)
+                if one_r > 0 and reached:
+                    _plan = _rr.plan_at_trigger(_preset, _spec, pos.volume, _minlot, _lotstep)
+                    if _plan.close_lot > 0.0 and mt5_connector.close_position_partial(
+                            ticket, _plan.close_lot):
+                        pstate["rr_reduced"]  = True
+                        pstate["runner_mode"] = _plan.runner_stop
+                        slot_mgr.set_risk_free(ticket)    # kockázatmentes → slot felszabadul
+                        log.info("◐ %s #%d — %s: %.2f lot lezárva 1R-nél, runner=%s",
+                                 symbol, ticket, _plan.effective, _plan.close_lot, _plan.runner_stop)
+                    elif _plan.close_lot <= 0.0:
+                        # túl kicsi a pozíció az osztáshoz → Risky/BE fallback
+                        if mt5_connector.move_to_breakeven(ticket):
+                            slot_mgr.set_risk_free(ticket)
+                            pstate["rr_reduced"]  = True
+                            pstate["runner_mode"] = _rr.RUNNER_BREAKEVEN
+                            pstate["be_done"]     = True
+            # runner BE (ha reduced + runner=breakeven, egyszer)
+            if (pstate.get("rr_reduced") and pstate.get("runner_mode") == _rr.RUNNER_BREAKEVEN
+                    and not pstate.get("be_done")):
+                if mt5_connector.move_to_breakeven(ticket):
+                    pstate["be_done"] = True
+        else:
+            # ── off/risky: költség-tudatos breakeven (VÁLTOZATLAN) ──
+            # A tényleges SL nem pontos BE, hanem BE + spread puffer (lásd
+            # mt5_connector.move_to_breakeven): spread×2 → ×1 → pontos BE fallback.
+            be_pct = params.get("breakeven_pct", 0.5)
+            if (risky or be_pct > 0) and not is_rf:
+                if pos.type == mt5.ORDER_TYPE_BUY:
+                    be_price = (pos.price_open if risky
+                                else pos.price_open + (pos.tp - pos.price_open) * be_pct)
+                    trigger = pos.price_current >= be_price
+                else:
+                    be_price = (pos.price_open if risky
+                                else pos.price_open - (pos.price_open - pos.tp) * be_pct)
+                    trigger = pos.price_current <= be_price
+                if trigger and mt5_connector.move_to_breakeven(ticket):
+                    slot_mgr.set_risk_free(ticket)
+                    pstate["be_done"] = True
+                    log.info("✦ %s #%d — költség-tudatos breakeven beállítva%s", symbol, ticket,
+                             " (risky)" if risky else "")
 
         # Trailing stop (kockázatmentes után, és csak ha kézzel nincs kikapcsolva).
         # MINDEN számítás PONTBAN (bróker-egység), hogy a kijelzés és a motor
         # egyértelmű legyen (a "pip" félreérthető volt).
         is_rf = slot_mgr.is_risk_free(ticket)
-        if is_rf and pstate.get("trailing_enabled", True):
+        # Trailing: off/risky mint eddig; Felező/Pajzsnál CSAK ha a runner-mód trailing.
+        _do_trailing = (is_rf and pstate.get("trailing_enabled", True) and
+                        (not _is_partial or pstate.get("runner_mode") == _rr.RUNNER_TRAILING))
+        if _do_trailing:
             point  = sym_info.point if (sym_info and sym_info.point > 0) else pip_size
             digits = sym_info.digits if sym_info else 5
 

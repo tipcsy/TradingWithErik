@@ -283,6 +283,64 @@ def close_position(ticket: int) -> bool:
         return False
 
 
+def close_position_partial(ticket: int, volume: float) -> bool:
+    """Egy pozíció RÉSZLEGES piaci zárása `volume` lot mennyiséggel (Felező/Pajzs
+    kockázatcsökkentés). Biztonság: a `volume` lot_step-re illesztve (lefelé), és
+    úgy, hogy a lezárt rész ÉS a maradék runner is ≥ volume_min maradjon. Ha a
+    mennyiség érvénytelen (0, > pozíció, vagy a runner min_lot alá menne) → False,
+    NEM zár."""
+    try:
+        import math
+        with MT5_LOCK:
+            pos = mt5.positions_get(ticket=ticket)
+            if not pos:
+                return False
+            p = pos[0]
+            info = mt5.symbol_info(p.symbol)
+            tick = mt5.symbol_info_tick(p.symbol)
+            if info is None or tick is None:
+                return False
+            step = info.volume_step or 0.01
+            vmin = info.volume_min or 0.01
+            vol = math.floor(round(volume / step, 9)) * step   # step-re, lefelé
+            vol = round(vol, 8)
+            if vol < vmin - 1e-9 or vol > p.volume - vmin + 1e-9:
+                return False   # a lezárt rész vagy a runner min_lot alá menne
+            close_type = mt5.ORDER_TYPE_SELL if p.type == 0 else mt5.ORDER_TYPE_BUY
+            price = tick.bid if p.type == 0 else tick.ask
+            req = {
+                "action":       mt5.TRADE_ACTION_DEAL,
+                "symbol":       p.symbol,
+                "volume":       vol,
+                "type":         close_type,
+                "position":     ticket,
+                "price":        price,
+                "magic":        p.magic,
+                "comment":      "rr_partial",
+                "type_time":    mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_IOC,
+            }
+            res = mt5.order_send(req)
+        return res is not None and res.retcode == mt5.TRADE_RETCODE_DONE
+    except Exception:
+        return False
+
+
+def has_partial_close(ticket: int) -> bool:
+    """Volt-e már RÉSZLEGES zárás (rr_partial deal) ezen a pozíción? Restart-védelem
+    a Felező/Pajzs kockázatcsökkentéshez — hogy újraindítás után NE duplázzon."""
+    try:
+        with MT5_LOCK:
+            deals = mt5.history_deals_get(position=ticket)
+        for d in deals or []:
+            if (d.entry in (mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_OUT_BY)
+                    and "rr_partial" in (getattr(d, "comment", "") or "")):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def modify_position_sl(ticket: int, new_sl: float) -> bool:
     """Egy pozíció SL szintjének módosítása (TP marad)."""
     try:
