@@ -1,13 +1,15 @@
 """
-Per-pár kockázatcsökkentő PRESET állapot — perzisztens JSON-ban.
+Per-pár kockázatcsökkentő ÁLLAPOT — perzisztens JSON-ban (`data/risk_mode.json`).
 
-A felületen (instrument-ablak / Live sor) instrumentumonként választható a
-kockázatcsökkentő preset (off|risky|halving/Felező|shield/Pajzs). Ez a modul
-tárolja/olvassa (`data/risk_mode.json`), mint a `risky_mode.py` a risky-t.
+Instrumentumonként: PRESET (off|risky|halving/Felező|shield/Pajzs) + haladó
+felülbírálások: `cautious` (óvatos/felezett belépő-méret, None=preset szerint) és
+`runner` (a maradék stopja: keep|breakeven|trailing, None=default=trailing).
 
-A régi `risky_mode` (R gomb, kívülről is írható fájl) MEGMARAD: az `effective`
-egyesíti — ha itt nincs kifejezett preset (off) DE a risky_mode be van kapcsolva,
-akkor 'risky'. Így az R gomb továbbra is működik, a preset-választás felülírja.
+Fájlformátum (visszafelé kompatibilis): érték lehet sima string (csak preset) VAGY
+dict {"preset","cautious","runner"}. Régi string → {"preset": string}.
+
+A régi `risky_mode` (R gomb, kívülről is írható) MEGMARAD: `effective_preset`
+egyesíti — ha itt 'off' de a risky_mode be van kapcsolva → 'risky'.
 """
 
 import json
@@ -17,19 +19,38 @@ from pathlib import Path
 from core import risky_mode
 from core.risk_reduction import (
     PRESET_OFF, PRESET_RISKY, PRESET_HALVING, PRESET_SHIELD, PRESETS,
+    RUNNER_KEEP, RUNNER_BREAKEVEN, RUNNER_TRAILING,
+    default_config, wants_cautious_size,
 )
 
 PATH = Path(__file__).resolve().parents[1] / "data" / "risk_mode.json"
 
-# Sorrend a felületi „körbe-váltáshoz" (R gomb / kattintás)
 CYCLE = (PRESET_OFF, PRESET_RISKY, PRESET_HALVING, PRESET_SHIELD)
-# Rövid felirat + szín-név a soron/gombon
 LABEL = {PRESET_OFF: "—", PRESET_RISKY: "R", PRESET_HALVING: "F", PRESET_SHIELD: "P"}
 NAME  = {PRESET_OFF: "Ki", PRESET_RISKY: "Risky", PRESET_HALVING: "Felező",
          PRESET_SHIELD: "Pajzs"}
+RUNNERS = (RUNNER_TRAILING, RUNNER_KEEP, RUNNER_BREAKEVEN)
+RUNNER_NAME = {RUNNER_TRAILING: "Trailing", RUNNER_KEEP: "Marad távol",
+               RUNNER_BREAKEVEN: "BE"}
 
 _lock = threading.Lock()
-_state: dict[str, str] = {}
+_state: dict[str, dict] = {}
+
+
+def _norm(v) -> dict:
+    """Érték normalizálása dict-re (régi string → {preset})."""
+    if isinstance(v, str):
+        return {"preset": v if v in PRESETS else PRESET_OFF}
+    if isinstance(v, dict):
+        d = {"preset": v.get("preset", PRESET_OFF)}
+        if d["preset"] not in PRESETS:
+            d["preset"] = PRESET_OFF
+        if v.get("cautious") is not None:
+            d["cautious"] = bool(v["cautious"])
+        if v.get("runner") in RUNNERS:
+            d["runner"] = v["runner"]
+        return d
+    return {"preset": PRESET_OFF}
 
 
 def load() -> dict:
@@ -40,47 +61,85 @@ def load() -> dict:
                     data = json.load(f)
                 if isinstance(data, dict):
                     _state.clear()
-                    _state.update({str(k): str(v) for k, v in data.items()
-                                   if str(v) in PRESETS})
+                    _state.update({str(k): _norm(v) for k, v in data.items()})
         except Exception:
             pass
         return dict(_state)
 
 
+def _entry(symbol: str) -> dict:
+    return _state.get(symbol, {"preset": PRESET_OFF})
+
+
 def get_preset(symbol: str) -> str:
     with _lock:
-        return _state.get(symbol, PRESET_OFF)
+        return _entry(symbol).get("preset", PRESET_OFF)
+
+
+def get_runner(symbol: str) -> str:
+    with _lock:
+        return _entry(symbol).get("runner", default_config()["runner_stop"])
+
+
+def get_cautious(symbol: str):
+    """None = a preset szerint (Risky→igen); True/False = kézi felülbírálás."""
+    with _lock:
+        return _entry(symbol).get("cautious", None)
+
+
+def _set(symbol: str, **kw):
+    with _lock:
+        d = dict(_entry(symbol))
+        d.update(kw)
+        _state[symbol] = _norm(d)
+        _save_locked()
 
 
 def set_preset(symbol: str, preset: str):
-    if preset not in PRESETS:
-        preset = PRESET_OFF
-    with _lock:
-        _state[symbol] = preset
-        _save_locked()
+    _set(symbol, preset=preset if preset in PRESETS else PRESET_OFF)
+
+
+def set_runner(symbol: str, runner: str):
+    _set(symbol, runner=runner if runner in RUNNERS else RUNNER_TRAILING)
+
+
+def set_cautious(symbol: str, value):
+    _set(symbol, cautious=(None if value is None else bool(value)))
 
 
 def cycle_preset(symbol: str) -> str:
     with _lock:
-        cur = _state.get(symbol, PRESET_OFF)
+        d = dict(_entry(symbol))
+        cur = d.get("preset", PRESET_OFF)
         nxt = CYCLE[(CYCLE.index(cur) + 1) % len(CYCLE)] if cur in CYCLE else PRESET_RISKY
-        _state[symbol] = nxt
+        d["preset"] = nxt
+        _state[symbol] = _norm(d)
         _save_locked()
         return nxt
 
 
 def effective_preset(symbol: str) -> str:
-    """A ténylegesen érvényes preset: a per-pár választás, DE ha az 'off' és a
-    régi risky_mode (R gomb / külső fájl) be van kapcsolva → 'risky'."""
+    """A ténylegesen érvényes preset: a per-pár választás, DE ha 'off' és a régi
+    risky_mode (R gomb / külső fájl) be van kapcsolva → 'risky'."""
     p = get_preset(symbol)
     if p == PRESET_OFF and risky_mode.is_risky(symbol):
         return PRESET_RISKY
     return p
 
 
+def spec_for(symbol: str) -> dict:
+    """Teljes run_pair kockázatcsökkentő spec az adott párra (preset + runner +
+    cautious felülbírálás). A run_pair a `cautious` kulcsot a méretezéshez nézi."""
+    preset = effective_preset(symbol)
+    spec = {**default_config(), "preset": preset, "runner_stop": get_runner(symbol)}
+    c = get_cautious(symbol)
+    spec["cautious"] = wants_cautious_size(preset) if c is None else bool(c)
+    return spec
+
+
 def all_states() -> dict:
     with _lock:
-        return dict(_state)
+        return {k: dict(v) for k, v in _state.items()}
 
 
 def _save_locked():

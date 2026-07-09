@@ -313,9 +313,12 @@ def run_pair(
         strategy = get_strategy({})
     from core import risk_reduction as _rrm
     rr_spec    = _rr_spec(rr, risky)
-    # Óvatos (felezett) méret? A preset dönti (Risky felezi; a többi alap normál).
-    _cautious  = _rrm.wants_cautious_size(rr_spec.get("preset", _rrm.PRESET_OFF))
-    sizing_cfg = _risky_trading_cfg(trading_cfg, _cautious)
+    # Óvatos (felezett) méret? A spec `cautious` felülbírálja, különben a preset
+    # dönti (Risky felezi; a többi alap normál).
+    _cautious  = rr_spec.get("cautious")
+    if _cautious is None:
+        _cautious = _rrm.wants_cautious_size(rr_spec.get("preset", _rrm.PRESET_OFF))
+    sizing_cfg = _risky_trading_cfg(trading_cfg, bool(_cautious))
     tf_hi = strategy.timeframes()[0].label
     tf_lo = strategy.timeframes()[1].label
 
@@ -746,10 +749,10 @@ def run_portfolio_backtest(
     auto_risky = bool(trading_cfg.get("auto_risky_weak", True))
 
     def _pair_auto_rr(sym: str, weak_risky: bool) -> dict:
-        preset = _rr_state.effective_preset(sym)          # per-pár választás (+R gomb)
-        if preset == _rrm2.PRESET_OFF and weak_risky:     # gyenge minősítés → risky
-            preset = _rrm2.PRESET_RISKY
-        return {**_rrm2.default_config(), "preset": preset}
+        spec = _rr_state.spec_for(sym)                     # per-pár preset + runner + cautious
+        if spec.get("preset") == _rrm2.PRESET_OFF and weak_risky:  # gyenge → risky
+            spec = {**spec, "preset": _rrm2.PRESET_RISKY, "cautious": True}
+        return spec
 
     # ── Per-pár optimalizált paraméterek + risky állapot betöltése ─────────
     pair_params: dict = {}

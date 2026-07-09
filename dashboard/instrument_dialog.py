@@ -244,8 +244,38 @@ class InstrumentParamsDialog:
                   highlightthickness=0, activebackground=BG_HEADER)
         om["menu"].config(bg=BG_HEADER, fg=FG_WHITE)
         om.pack(side="left", padx=(4, 0))
-        tk.Label(rrbar, text="(a Backtest ezt méri)", bg=BG, fg=FG_GRAY_DIM,
-                 font=self._sf).pack(side="left", padx=(6, 0))
+
+        # Haladó: Óvatos (felezett) méret pipa
+        _c0 = _rrs.get_cautious(self.symbol)
+        from core import risk_reduction as _rrx
+        if _c0 is None:
+            _c0 = _rrx.wants_cautious_size(_rrs.get_preset(self.symbol))
+        self._cautious_var = tk.BooleanVar(value=bool(_c0))
+        tk.Checkbutton(rrbar, text="Óvatos méret", variable=self._cautious_var,
+                       bg=BG, fg=FG_GRAY, selectcolor=BG_HEADER, font=self._sf,
+                       activebackground=BG, activeforeground=FG_WHITE,
+                       command=self._on_cautious_change).pack(side="left", padx=(10, 0))
+
+        # Haladó: runner stop
+        tk.Label(rrbar, text="Runner:", bg=BG, fg=FG_GRAY,
+                 font=self._sf).pack(side="left", padx=(10, 0))
+        self._runner_name = tk.StringVar(
+            value=_rrs.RUNNER_NAME.get(_rrs.get_runner(self.symbol), "Trailing"))
+        omr = tk.OptionMenu(rrbar, self._runner_name,
+                            *[_rrs.RUNNER_NAME[r] for r in _rrs.RUNNERS],
+                            command=self._on_runner_change)
+        omr.config(bg=BG_HEADER, fg=FG_WHITE, font=self._sf, relief="flat",
+                   highlightthickness=0, activebackground=BG_HEADER)
+        omr["menu"].config(bg=BG_HEADER, fg=FG_WHITE)
+        omr.pack(side="left", padx=(4, 0))
+
+        # Lot-létra tipp (a részleges záráshoz ≥2× min_lot kell)
+        _ml = (self.cfg.get("pairs", {}).get(self.symbol, {}) or {}).get("min_lot", 0.01)
+        tk.Label(popup, text=f"(A Felező/Pajzs részleges záráshoz ≥2× min_lot ({_ml}) "
+                             f"kell; kisebbnél Risky/BE-re esik vissza. A Backtest a "
+                             f"ténylegesen alkalmazott technikát mutatja.)",
+                 bg=BG, fg=FG_GRAY_DIM, font=self._sf, justify="left",
+                 wraplength=560).pack(anchor="w", padx=10, pady=(1, 0))
 
         # ── Backtest-eredmény sor (a Backtest gomb tölti) ───────────────────
         self.lbl_bt = tk.Label(popup, text="", bg=BG, fg=FG_GRAY_DIM, font=self._sf,
@@ -627,6 +657,10 @@ class InstrumentParamsDialog:
     def _preset_from_name(self, name: str) -> str:
         return {v: k for k, v in self._rrs.NAME.items()}.get(name, self._rrs.PRESET_OFF)
 
+    def _runner_from_name(self, name: str) -> str:
+        return {v: k for k, v in self._rrs.RUNNER_NAME.items()}.get(
+            name, self._rrs.RUNNER_TRAILING)
+
     def _on_rr_change(self, name: str):
         """A választott preset mentése a per-pár állapotba (data/risk_mode.json).
         A régi risky_mode-ot szinkronban tartjuk (preset==risky), mint a sor R gombja."""
@@ -638,13 +672,22 @@ class InstrumentParamsDialog:
         except Exception:
             pass
 
+    def _on_cautious_change(self):
+        self._rrs.set_cautious(self.symbol, bool(self._cautious_var.get()))
+
+    def _on_runner_change(self, name: str):
+        self._rrs.set_runner(self.symbol, self._runner_from_name(name))
+
     def _rr_spec_from_ui(self):
-        """A UI-ban választott preset → run_pair rr spec (None, ha 'Ki')."""
+        """A UI-ban beállított teljes spec (preset + óvatos méret + runner). None,
+        ha 'Ki' (→ a run_pair az alap OFF viselkedést futtatja)."""
         from core import risk_reduction as _rr
         preset = self._preset_from_name(self._rr_name.get())
         if preset == _rr.PRESET_OFF:
             return None
-        return {**_rr.default_config(), "preset": preset}
+        return {**_rr.default_config(), "preset": preset,
+                "runner_stop": self._runner_from_name(self._runner_name.get()),
+                "cautious": bool(self._cautious_var.get())}
 
     # ── Backtest a jelenlegi paraméterekkel (Win/MaxDD/P&L + minősítés) ──────
     def _run_backtest(self):
@@ -677,6 +720,12 @@ class InstrumentParamsDialog:
                                    self.cfg["trading"], ib, strategy=self.strategy,
                                    rr=rr_spec)
                     summary = res.summary(ib)
+                    # A ténylegesen alkalmazott technikák (lot-létra hatása)
+                    from collections import Counter
+                    tech = Counter(t.rr_technique for t in res.closed
+                                   if getattr(t, "rr_technique", ""))
+                    if summary and tech:
+                        summary["_rr_tech"] = dict(tech)
             except Exception as ex:
                 err = str(ex)
             try:
@@ -704,6 +753,12 @@ class InstrumentParamsDialog:
         gtxt, gcol, greason = self.strategy.grade(summary, self.cfg)
         pf = summary.get("profit_factor", 0.0)
         pf_s = f"{pf:.2f}" if pf != float("inf") else "∞"
+        # Ténylegesen alkalmazott technikák (a lot-létra degradálása látszik).
+        # pop → ne kerüljön a mentett test_summary-be.
+        tech = summary.pop("_rr_tech", None) or {}
+        _names = {"shield": "Pajzs", "halving": "Felező", "risky": "Risky"}
+        tech_s = ("   |   technika: " +
+                  ", ".join(f"{_names.get(k, k)}×{v}" for k, v in tech.items())) if tech else ""
         self.lbl_bt.config(
             text=(f"Backtest (teljes hist.) — Minősítés: {gtxt}"
                   + (f" ({greason})" if greason else "")
@@ -711,6 +766,5 @@ class InstrumentParamsDialog:
                     f"   Win {summary.get('win_rate',0)*100:.0f}%"
                     f"   MaxDD {summary.get('max_drawdown',0)*100:.1f}%"
                     f"   P&L {summary.get('total_pnl',0):+.0f}$"
-                    f"   PF {pf_s}"
-                    f"   →  a Mentés a JSON-ba írja (minősítés a soron)."),
+                    f"   PF {pf_s}" + tech_s),
             fg=sem_color(gcol))
