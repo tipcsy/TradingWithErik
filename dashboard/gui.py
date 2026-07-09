@@ -679,6 +679,17 @@ class PortfolioBacktestTab:
             self.cfg.get("ml", {}).get("starting_balance_eur", 1000))))
         self._entry_bal.grid(row=date_row+1, column=1, padx=4)
 
+        # Kockázatcsökkentés preset (MIND a párra) — a technikák összevetéséhez.
+        tk.Label(ctrl, text="Kockázatcsökkentés:", bg=BG_BT, fg=FG_GRAY,
+                 font=self._small).grid(row=date_row+1, column=2, sticky="e", pady=4)
+        self._rr_var = tk.StringVar(value="Auto (jelenlegi)")
+        self._rr_combo = ttk.Combobox(
+            ctrl, textvariable=self._rr_var, width=16, state="readonly",
+            font=self._small,
+            values=["Auto (jelenlegi)", "Ki (mind)", "Risky (mind)",
+                    "Felező (mind)", "Pajzs (mind)"])
+        self._rr_combo.grid(row=date_row+1, column=3, padx=4, sticky="w")
+
         btn_row = date_row + 2
         self._btn_start = tk.Button(ctrl, text="▶  Backtest indítása", width=20,
                                     bg=BTN_BT_BG, fg=BTN_BT_FG, font=self._small,
@@ -778,7 +789,7 @@ class PortfolioBacktestTab:
 
         self._thread = threading.Thread(
             target=self._run_thread,
-            args=(symbols, date_from, date_to, init_bal),
+            args=(symbols, date_from, date_to, init_bal, self._rr_spec()),
             daemon=True,
         )
         self._thread.start()
@@ -788,7 +799,18 @@ class PortfolioBacktestTab:
         self._stop_flag.set()
         self._lbl_status.config(text="Leállítás...", fg=FG_ORANGE)
 
-    def _run_thread(self, symbols, date_from, date_to, init_bal):
+    def _rr_spec(self):
+        """A választott preset → kockázatcsökkentő spec (mind a párra), vagy None
+        ('Auto' = a per-pár auto-risky, a jelenlegi viselkedés)."""
+        from core import risk_reduction as _rr
+        preset = {"Ki (mind)": _rr.PRESET_OFF, "Risky (mind)": _rr.PRESET_RISKY,
+                  "Felező (mind)": _rr.PRESET_HALVING,
+                  "Pajzs (mind)": _rr.PRESET_SHIELD}.get(self._rr_var.get())
+        if preset is None:
+            return None
+        return {**_rr.default_config(), "preset": preset}
+
+    def _run_thread(self, symbols, date_from, date_to, init_bal, rr_spec=None):
         from trading.backtest import run_portfolio_backtest, _save_backtest_results
 
         def on_progress(date_str, balance, n_open, n_closed, pct):
@@ -804,6 +826,7 @@ class PortfolioBacktestTab:
                 initial_balance=init_bal,
                 progress_callback=on_progress,
                 stop_flag=self._stop_flag,
+                rr=rr_spec,
             )
             if result.get("trades"):
                 _save_backtest_results(

@@ -65,6 +65,11 @@ class Trade:
     entry_balance: float = 0.0
     risk_usd: float = 0.0
     risk_pct: float = 0.0
+    # ── Kockázatcsökkentés (Felező/Pajzs) — részleges zárás modellezése ──
+    booked_pnl: float = 0.0     # a részleges zárás(ok)ból már realizált P&L
+    reduced: bool = False       # megtörtént-e a részleges zárás (1R-nél, egyszer)
+    runner_mode: str = "keep"   # a maradék stopja: keep|breakeven|trailing
+    rr_technique: str = ""      # a ténylegesen alkalmazott technika (log/CSV)
 
 
 @dataclass
@@ -215,6 +220,70 @@ def _update_stops(trade: "Trade", high: float, low: float, params: dict,
                     trade.sl = new_sl
 
 
+def _rr_spec(rr: "dict | None", risky: bool) -> dict:
+    """A run_pair kockázatcsökkentő specje. rr=None → a régi viselkedés a `risky`
+    flagből (preset off/risky), így a meglévő hívók BITAZONOSAK maradnak."""
+    if rr:
+        return rr
+    from core import risk_reduction as _rrm
+    spec = _rrm.default_config()
+    spec["preset"] = _rrm.PRESET_RISKY if risky else _rrm.PRESET_OFF
+    return spec
+
+
+def _manage_position(trade: "Trade", high: float, low: float, params: dict,
+                     pip_size: float, min_lot: float, lot_step: float,
+                     rr: dict) -> None:
+    """Nyitott trade menedzselése egy bar-on: a preset szerint BE/trailing VAGY
+    részleges zárás (Felező/Pajzs) 1R-nél + a runner stopja. Mutálja a trade-et
+    (sl, lot, booked_pnl, reduced, runner_mode). A `booked_pnl` a záráskor adódik
+    a végső P&L-hez.
+
+    Meghívás: CSAK a nem-lezáró bar-okon (miután a TP/SL check nem zárt) — így a
+    részleges zárás a beszálló és a stop KÖZÖTTI mozgásnál történik, 1R-nél."""
+    from core import risk_reduction as _rrm
+    preset = rr.get("preset", _rrm.PRESET_OFF)
+
+    # off / risky → a régi stop-menedzsment (BITAZONOS a korábbival)
+    if preset == _rrm.PRESET_OFF:
+        _update_stops(trade, high, low, params, pip_size, risky=False)
+        return
+    if preset == _rrm.PRESET_RISKY:
+        _update_stops(trade, high, low, params, pip_size, risky=True)
+        return
+
+    # halving / shield → 1R-nél részleges zárás (egyszer), utána runner-stop
+    if not trade.reduced:
+        one_r = trade.sl_pips * pip_size
+        hit = (high >= trade.open_price + one_r if trade.direction == "BUY"
+               else low <= trade.open_price - one_r)
+        if hit:
+            plan = _rrm.plan_at_trigger(preset, rr, trade.lot, min_lot, lot_step)
+            trade.reduced = True
+            trade.runner_mode = plan.runner_stop
+            trade.rr_technique = plan.effective
+            if plan.close_lot > 0.0:
+                # a lezárt lot +1R-t realizál (a 1R áron zárunk részlegesen)
+                trade.booked_pnl += trade.sl_pips * plan.close_lot * trade.pv1_usd
+                trade.lot = round(trade.lot - plan.close_lot, 8)
+                # A trade mostantól KOCKÁZATMENTES: a lezárt (≥50%) profit fedezi a
+                # runner max veszteségét (nettó ≥ 0). Ezért felszabadítja a slotot
+                # (mint az OFF-nál a BE 1R-nél) — a runner "house money".
+                trade.risk_free = True
+
+    # A runner stopjának kezelése (a részleges zárás UTÁN, vagy risky-degradált BE)
+    if trade.reduced:
+        if trade.runner_mode == _rrm.RUNNER_BREAKEVEN and not trade.risk_free:
+            if ((trade.direction == "BUY" and trade.sl < trade.open_price) or
+                    (trade.direction == "SELL" and trade.sl > trade.open_price)):
+                trade.sl = trade.open_price
+                trade.risk_free = True
+        elif trade.runner_mode == _rrm.RUNNER_TRAILING:
+            trade.risk_free = True
+            _update_stops(trade, high, low, params, pip_size, risky=False)
+        # RUNNER_KEEP → a stop marad az EREDETI (távol) helyén — a videó Pajzsa
+
+
 # ---------------------------------------------------------------------------
 # Fő szimuláció egy párra
 # ---------------------------------------------------------------------------
@@ -231,15 +300,22 @@ def run_pair(
     strategy=None,
     allowed_hours: Optional[set] = None,
     risky: bool = False,
+    rr: "dict | None" = None,
 ) -> BacktestResult:
     # A jelzést/indikátorokat a STRATÉGIA adja (seam); a végrehajtás (SL/TP/
     # breakeven/trailing, slot, lot) a motoré. strategy=None → config szerinti.
     # risky=True → a live_trader óvatos módját modellezzük (felezett kockázat,
     # azonnali BE, azonnali+felezett trailing). Az optimalizáló risky=False-szal
     # hív (a mentett test_summary/minősítés az ALAP-viselkedést tükrözze).
+    # rr = kockázatcsökkentő spec (preset + kalibráció); None → a `risky` flagből
+    # (off/risky) → a meglévő hívók BITAZONOSAK maradnak.
     if strategy is None:
         strategy = get_strategy({})
-    sizing_cfg = _risky_trading_cfg(trading_cfg, risky)
+    from core import risk_reduction as _rrm
+    rr_spec    = _rr_spec(rr, risky)
+    # Óvatos (felezett) méret? A preset dönti (Risky felezi; a többi alap normál).
+    _cautious  = _rrm.wants_cautious_size(rr_spec.get("preset", _rrm.PRESET_OFF))
+    sizing_cfg = _risky_trading_cfg(trading_cfg, _cautious)
     tf_hi = strategy.timeframes()[0].label
     tf_lo = strategy.timeframes()[1].label
 
@@ -269,6 +345,8 @@ def run_pair(
 
     pip_size = pair_cfg["pip_size"]
     pv1_usd  = pair_cfg["pv1_usd"]
+    min_lot  = pair_cfg.get("min_lot", 0.01)    # a lot-létrához (részleges zárás)
+    lot_step = pair_cfg.get("lot_step", 0.01)
 
     state = strategy.bt_new_state(symbol)
     open_trades: list[Trade] = []
@@ -331,8 +409,8 @@ def run_pair(
                     trade.status      = "sl"
                     closed = True
                 else:
-                    _update_stops(trade, m1_row["high"], m1_row["low"],
-                                  params, pip_size, risky)
+                    _manage_position(trade, m1_row["high"], m1_row["low"],
+                                     params, pip_size, min_lot, lot_step, rr_spec)
 
             elif trade.direction == "SELL":
                 if m1_row["low"] <= trade.tp:
@@ -348,11 +426,14 @@ def run_pair(
                     trade.status      = "sl"
                     closed = True
                 else:
-                    _update_stops(trade, m1_row["high"], m1_row["low"],
-                                  params, pip_size, risky)
+                    _manage_position(trade, m1_row["high"], m1_row["low"],
+                                     params, pip_size, min_lot, lot_step, rr_spec)
 
             if closed:
-                # pnl_pips számítás
+                # A részleges zárás(ok)ból már realizált P&L hozzáadása a runner
+                # (maradék lot) záró P&L-jéhez → teljes trade P&L.
+                trade.pnl_usd += trade.booked_pnl
+                # pnl_pips számítás (kozmetikai, a runner mozgásából)
                 if trade.direction == "BUY":
                     trade.pnl_pips = (trade.close_price - trade.open_price) / trade.pip_size - spread_pips
                 else:
@@ -634,12 +715,17 @@ def run_portfolio_backtest(
     initial_balance: Optional[float] = None,
     progress_callback=None,   # fn(date_str, balance, n_open, n_closed, pct_done)
     stop_flag=None,           # threading.Event — ha set(), leállítja
+    rr: "dict | None" = None, # globális kockázatcsökkentő preset (mind a párra); None = a per-pár auto-risky
 ) -> dict:
     """
     Portfólió szintű backtest: az összes szimbólum közös tőkén,
     kronológiai M1 szimulációval fut.
 
     Optimalizált params betöltése: data/optimized_params/<SYMBOL>.json
+
+    rr: ha adott (pl. {"preset":"shield",...}), MINDEN pár erre a preset-re fut →
+    így a GUI-ból összevethetők a technikák. None → a jelenlegi per-pár auto-risky
+    (gyenge minősítés → risky).
     """
     if initial_balance is None:
         initial_balance = float(cfg.get("ml", {}).get("starting_balance_eur", 1000.0))
@@ -717,6 +803,9 @@ def run_portfolio_backtest(
             "params":    params,
             "pair_cfg":  cfg["pairs"][sym],
             "risky":     pair_risky.get(sym, False),
+            # A kockázatcsökkentő spec: globális rr (mind a párra), különben a
+            # per-pár auto-risky (off/risky) → BITAZONOS a korábbi viselkedéssel.
+            "rr":        rr if rr else _rr_spec(None, pair_risky.get(sym, False)),
             "state":     strategy.bt_new_state(sym),
             "prev_row":  None,
         }
@@ -781,7 +870,10 @@ def run_portfolio_backtest(
             row      = m1_df.loc[m1_time]
             pip_size = trade.pip_size
             sp       = info["pair_cfg"].get("backtest_spread_pips", spread_default)
-            risky    = info.get("risky", False)
+            rr_spec  = info.get("rr") or _rr_spec(None, info.get("risky", False))
+            _pc      = info["pair_cfg"]
+            _minlot  = _pc.get("min_lot", 0.01)
+            _lotstep = _pc.get("lot_step", 0.01)
             closed   = False
 
             if trade.direction == "BUY":
@@ -798,7 +890,8 @@ def run_portfolio_backtest(
                     trade.pnl_pips    = (trade.sl - trade.open_price) / pip_size - sp
                     trade.status      = "sl";  closed = True
                 else:
-                    _update_stops(trade, row["high"], row["low"], params, pip_size, risky)
+                    _manage_position(trade, row["high"], row["low"], params,
+                                     pip_size, _minlot, _lotstep, rr_spec)
 
             else:  # SELL
                 if row["low"] <= trade.tp:
@@ -814,9 +907,11 @@ def run_portfolio_backtest(
                     trade.pnl_pips    = (trade.open_price - trade.sl) / pip_size - sp
                     trade.status      = "sl";  closed = True
                 else:
-                    _update_stops(trade, row["high"], row["low"], params, pip_size, risky)
+                    _manage_position(trade, row["high"], row["low"], params,
+                                     pip_size, _minlot, _lotstep, rr_spec)
 
             if closed:
+                trade.pnl_usd += trade.booked_pnl   # a részleges zárás(ok) realizált P&L-je
                 del open_trades[sym]
                 closed_trades.append(trade)
                 balance += trade.pnl_usd
@@ -866,8 +961,12 @@ def run_portfolio_backtest(
                         plan = strategy.bt_entry(m15_row, params, pip_size)
                         if plan is not None:
                             sl_pips, tp_pips = plan
-                            # risky pár → feleződő kockázat a méretezésnél
-                            sizing_cfg = _risky_trading_cfg(trading_cfg, info.get("risky", False))
+                            # Óvatos (felezett) méret? A kockázatcsökkentő preset dönti
+                            # (Risky felezi; a Felező/Pajzs alap: normál méret).
+                            from core import risk_reduction as _rrm
+                            _rrp = (info.get("rr") or {}).get("preset", _rrm.PRESET_OFF)
+                            sizing_cfg = _risky_trading_cfg(trading_cfg,
+                                                            _rrm.wants_cautious_size(_rrp))
                             eff_slots = calc_effective_slots(balance, sl_pips, pair_cfg, sizing_cfg)
                             lot = calc_lot(balance, sl_pips, pair_cfg, sizing_cfg, eff_slots)
 
