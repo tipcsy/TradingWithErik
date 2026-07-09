@@ -393,7 +393,13 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
             and now_ts - _viz_last_write.get(symbol, 0.0) >= VIZ_INTERVAL_SEC):
         _viz_last_write[symbol] = now_ts
         try:
-            write_pair_visuals(symbol, params, strategy, pip_size, pair_cfg)
+            # A viz a LEGFRISSEBB JSON-paramétert használja → ha az instrumentum-
+            # ablakban átírod a paramétereket (Mentés), a chart-rajz KÖVETI (a
+            # következő viz-ciklusban). A KERESKEDÉS ellenben marad a Play-kori
+            # `state.params`-nál (nyitott pozíciót ne zavarjon meg) — az a következő
+            # Play-nél frissül. A V ki/be azonnal újrarajzoltat.
+            viz_params = load_pair_params(symbol) or params
+            write_pair_visuals(symbol, viz_params, strategy, pip_size, pair_cfg)
         except Exception as e:
             log.debug("%s — viz írás hiba: %s", symbol, e)
 

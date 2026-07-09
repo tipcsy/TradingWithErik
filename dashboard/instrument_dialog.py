@@ -491,6 +491,14 @@ class InstrumentParamsDialog:
             return False
         self.data = data
         self.is_new = False
+        # A chart-viz a friss JSON-paramétert olvassa → nullázzuk a viz-időzítőt,
+        # hogy a TradeForgeViz a KÖVETKEZŐ ciklusban azonnal az új paraméterekkel
+        # rajzoljon (ne kelljen a V-t ki/be kapcsolni). Csak ha fut a live loop.
+        try:
+            from trading import live_trader as _lt
+            _lt._viz_last_write.pop(self.symbol, None)
+        except Exception:
+            pass
         return True
 
     def _save(self):

@@ -2660,8 +2660,10 @@ class DashboardWindow:
                     live_count += 1
 
         if hasattr(self, "lbl_status"):
+            # "Utolsó frissítés" = lokális UI-esemény → HELYI idő (nem UTC/bróker).
+            local_now = datetime.now().strftime("%H:%M:%S")
             self.lbl_status.config(
-                text=f"Utolsó frissítés: {now.strftime('%H:%M:%S')}  |  LIVE: {live_count}")
+                text=f"Utolsó frissítés: {local_now}  |  LIVE: {live_count}")
 
         # Pozíciók fül frissítése
         if hasattr(self, "_pos_tab"):
