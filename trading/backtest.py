@@ -737,8 +737,19 @@ def run_portfolio_backtest(
 
     # Risky mód forrásai: (1) kézi kapcsoló (data/risky_mode.json) + (2) auto:
     # a Közepes/Gyenge/Rossz minősítésű pár CSAK risky módban futhat (mint élőben).
+    # (3) per-pár kockázatcsökkentő preset (data/risk_mode.json) — ha 'rr' (globális)
+    # nincs megadva ("Auto"), a pár a saját választott presetjén fut.
+    from core import rr_state as _rr_state
+    from core import risk_reduction as _rrm2
     risky_mode.load()
+    _rr_state.load()
     auto_risky = bool(trading_cfg.get("auto_risky_weak", True))
+
+    def _pair_auto_rr(sym: str, weak_risky: bool) -> dict:
+        preset = _rr_state.effective_preset(sym)          # per-pár választás (+R gomb)
+        if preset == _rrm2.PRESET_OFF and weak_risky:     # gyenge minősítés → risky
+            preset = _rrm2.PRESET_RISKY
+        return {**_rrm2.default_config(), "preset": preset}
 
     # ── Per-pár optimalizált paraméterek + risky állapot betöltése ─────────
     pair_params: dict = {}
@@ -804,8 +815,8 @@ def run_portfolio_backtest(
             "pair_cfg":  cfg["pairs"][sym],
             "risky":     pair_risky.get(sym, False),
             # A kockázatcsökkentő spec: globális rr (mind a párra), különben a
-            # per-pár auto-risky (off/risky) → BITAZONOS a korábbi viselkedéssel.
-            "rr":        rr if rr else _rr_spec(None, pair_risky.get(sym, False)),
+            # per-pár választott preset (rr_state) + gyenge-minősítés auto-risky.
+            "rr":        rr if rr else _pair_auto_rr(sym, pair_risky.get(sym, False)),
             "state":     strategy.bt_new_state(sym),
             "prev_row":  None,
         }

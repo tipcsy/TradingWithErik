@@ -229,6 +229,24 @@ class InstrumentParamsDialog:
         self.lbl_err = tk.Label(popup, text="", bg=BG, fg=FG_RED, font=self._sf)
         self.lbl_err.pack(anchor="w", padx=10)
 
+        # ── Kockázatcsökkentés preset (per-pár) ─────────────────────────────
+        # A Backtest gomb EZT méri; a Live-on a Fázis 3-mal lép majd életbe.
+        from core import rr_state as _rrs
+        self._rrs = _rrs
+        rrbar = tk.Frame(popup, bg=BG)
+        rrbar.pack(anchor="w", padx=10, pady=(4, 0))
+        tk.Label(rrbar, text="Kockázatcsökkentés:", bg=BG, fg=FG_GRAY,
+                 font=self._sf).pack(side="left")
+        self._rr_name = tk.StringVar(value=_rrs.NAME.get(_rrs.get_preset(self.symbol), "Ki"))
+        om = tk.OptionMenu(rrbar, self._rr_name, *[_rrs.NAME[p] for p in _rrs.CYCLE],
+                           command=self._on_rr_change)
+        om.config(bg=BG_HEADER, fg=FG_WHITE, font=self._sf, relief="flat",
+                  highlightthickness=0, activebackground=BG_HEADER)
+        om["menu"].config(bg=BG_HEADER, fg=FG_WHITE)
+        om.pack(side="left", padx=(4, 0))
+        tk.Label(rrbar, text="(a Backtest ezt méri)", bg=BG, fg=FG_GRAY_DIM,
+                 font=self._sf).pack(side="left", padx=(6, 0))
+
         # ── Backtest-eredmény sor (a Backtest gomb tölti) ───────────────────
         self.lbl_bt = tk.Label(popup, text="", bg=BG, fg=FG_GRAY_DIM, font=self._sf,
                                justify="left", wraplength=560)
@@ -605,6 +623,22 @@ class InstrumentParamsDialog:
                 return rank
         return None
 
+    # ── Kockázatcsökkentés preset (per-pár) ─────────────────────────────────
+    def _preset_from_name(self, name: str) -> str:
+        return {v: k for k, v in self._rrs.NAME.items()}.get(name, self._rrs.PRESET_OFF)
+
+    def _on_rr_change(self, name: str):
+        """A választott preset mentése a per-pár állapotba (data/risk_mode.json)."""
+        self._rrs.set_preset(self.symbol, self._preset_from_name(name))
+
+    def _rr_spec_from_ui(self):
+        """A UI-ban választott preset → run_pair rr spec (None, ha 'Ki')."""
+        from core import risk_reduction as _rr
+        preset = self._preset_from_name(self._rr_name.get())
+        if preset == _rr.PRESET_OFF:
+            return None
+        return {**_rr.default_config(), "preset": preset}
+
     # ── Backtest a jelenlegi paraméterekkel (Win/MaxDD/P&L + minősítés) ──────
     def _run_backtest(self):
         if self._bt_running:
@@ -617,8 +651,10 @@ class InstrumentParamsDialog:
             self.lbl_bt.config(text="Nincs pár-config ehhez az instrumentumhoz.", fg=FG_RED)
             return
         self._bt_running = True
+        rr_spec = self._rr_spec_from_ui()          # a választott preset (vagy None)
         self._btn_bt.config(text="Backtest fut…", state="disabled")
-        self.lbl_bt.config(text="Backtest fut (teljes historikus) — kis türelmet…",
+        _pname = self._rr_name.get()
+        self.lbl_bt.config(text=f"Backtest fut (teljes hist., {_pname}) — kis türelmet…",
                            fg=FG_GRAY)
 
         def work():
@@ -631,7 +667,8 @@ class InstrumentParamsDialog:
                 else:
                     ib = float(self.cfg.get("ml", {}).get("starting_balance_eur", 1000.0))
                     res = run_pair(self.symbol, df15, df1, params, pair_cfg,
-                                   self.cfg["trading"], ib, strategy=self.strategy)
+                                   self.cfg["trading"], ib, strategy=self.strategy,
+                                   rr=rr_spec)
                     summary = res.summary(ib)
             except Exception as ex:
                 err = str(ex)
