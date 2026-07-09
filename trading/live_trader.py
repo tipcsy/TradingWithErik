@@ -619,6 +619,18 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
     # Egy szimbólumon EGYSZERRE csak egy pozíció lehet — soha ne halmozzon
     # ugyanarra a párra (ez okozta a 8 GBPAUD-pozíciót 4 slotra).
     already_open = len(symbol_positions) > 0
+    # Diagnosztika: ha a stratégia JELET adott (a viz ezt rajzolja — a NYERS
+    # jelet, végrehajtási szűrők nélkül), de egy VÉGREHAJTÁSI kapu blokkol, írjuk
+    # ki, MELYIK — különben úgy tűnik, "látta a jelet, mégsem lépett be". A jel
+    # pillanatnyi (az adott M1 átütés gyertyáján), ezért ez ritkán logol.
+    if signal != "NONE":
+        _block = ("már van nyitott pozíció ezen a páron" if already_open else
+                  "nincs érvényes ATR (adathiány)" if atr_val is None else
+                  "nincs szabad slot" if not slot_mgr.can_open() else
+                  "spread túl nagy (piac-kapu)" if not spread_ok else None)
+        if _block:
+            log.info("⏭ %s %s jel — belépő KIHAGYVA: %s", symbol, signal, _block)
+
     if (signal != "NONE" and not already_open and atr_val is not None
             and slot_mgr.can_open() and spread_ok):
         # ── Korreláció / devizakitettség kapu ──────────────────────────────
@@ -644,6 +656,8 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
             # méret, kihagyjuk a belépőt.
             plan = strategy.sl_tp_pips(hi_row, params, pip_size) if hi_row is not None else None
             if plan is None:
+                log.info("⏭ %s %s jel — belépő KIHAGYVA: a stratégia nem adott "
+                         "érvényes SL/TP méretet (hi_row/indikátor hiány).", symbol, signal)
                 return
             sl_pips, tp_pips = plan
             eff_slots = calc_effective_slots(balance, sl_pips, pair_cfg, ctf)

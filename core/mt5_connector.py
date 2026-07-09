@@ -355,6 +355,28 @@ def is_connected() -> bool:
         return False
 
 
+def server_offset_sec(symbols) -> Optional[float]:
+    """A bróker/szerver-idő eltolása a valós UTC-hez képest, MÁSODPERCben.
+
+    A megadott szimbólumok LEGFRISSEBB tickjéből (a bróker faliórája epoch-ként).
+    EHHEZ igazodik az óra-kapu (trade_hours), a chart és a no-trade szürke sáv —
+    ezért a felületen a BRÓKER-időt ebből számoljuk. None, ha nincs elérhető tick
+    (pl. nincs kapcsolat). Zárt piacon a legutóbbi tick alapján közelít."""
+    try:
+        latest = None
+        with MT5_LOCK:
+            for sym in symbols:
+                tick = mt5.symbol_info_tick(sym)
+                if tick and tick.time and (latest is None or tick.time > latest):
+                    latest = int(tick.time)
+        if latest is not None:
+            from datetime import datetime, timezone
+            return float(latest - datetime.now(timezone.utc).timestamp())
+    except Exception:
+        pass
+    return None
+
+
 def connection_info(cfg: dict) -> dict:
     """
     Visszaadja a kapcsolat állapotát és a számla adatait.

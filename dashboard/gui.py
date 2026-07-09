@@ -19,7 +19,7 @@ import time
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import ttk
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 import sys
@@ -203,7 +203,8 @@ class PairRow:
                 continue
             self.labels[col.key].config(text="—", fg=fg)
 
-    def update(self, ds, inst_state: str, opt_status: str, connected: bool = True):
+    def update(self, ds, inst_state: str, opt_status: str, connected: bool = True,
+               no_trade: bool = False):
         trained      = ds.trained
         has_position = ds.position_pnl is not None
 
@@ -213,6 +214,8 @@ class PairRow:
             bg = BG_UNTRAINED
         elif inst_state == "STOPPED":
             bg = BG_INACTIVE
+        elif no_trade:
+            bg = BG_INACTIVE   # LIVE, de no-trade óra (aktív stratégia) → "letiltva"
         else:
             bg = self._bg
         self.frame.config(bg=bg)
@@ -261,7 +264,13 @@ class PairRow:
 
         # ── LIVE / STOPPED ──────────────────────────────────────────────────
         if inst_state == "LIVE":
-            sym_lbl.config(text=self.symbol, fg=FG_WHITE, font=("Courier", 9, "bold"))
+            if no_trade:
+                # Aktív, de az aktuális (bróker-)óra a stratégia trade_hours-ából
+                # kimarad → "letiltott" kinézet (mint egy disabled gomb) + ⏸ jel.
+                sym_lbl.config(text=f"⏸ {self.symbol}", fg=FG_GRAY,
+                               font=("Courier", 9, "italic"))
+            else:
+                sym_lbl.config(text=self.symbol, fg=FG_WHITE, font=("Courier", 9, "bold"))
         elif trained:
             sym_lbl.config(text=self.symbol, fg=FG_GRAY, font=("Courier", 9, "normal"))
         else:
@@ -2492,7 +2501,7 @@ class DashboardWindow:
                     from core.mt5_connector import (
                         connection_info, daily_pnl as _dpnl,
                         open_positions_by_symbol, open_positions_detailed,
-                        closed_positions_today)
+                        closed_positions_today, server_offset_sec)
                     info = connection_info(self.cfg)
                     self._mt5_cache["connected"] = info.get("connected", False)
                     self._mt5_cache["info"]      = info
@@ -2501,6 +2510,10 @@ class DashboardWindow:
                         self._mt5_cache["positions"] = open_positions_by_symbol()
                         self._mt5_cache["positions_detail"] = open_positions_detailed()
                         self._mt5_cache["closed_today"] = closed_positions_today()
+                        # Bróker-idő eltolás (a trade_hours/chart szerver-idejéhez)
+                        _off = server_offset_sec(list(self.cfg.get("pairs", {}).keys()))
+                        if _off is not None:
+                            self._mt5_cache["server_offset_sec"] = _off
                     else:
                         self._mt5_cache["daily_pnl"] = None
                         self._mt5_cache["positions"] = {}
@@ -2511,10 +2524,36 @@ class DashboardWindow:
                 _t.sleep(5)
         threading.Thread(target=_loop, daemon=True, name="MT5BgPoller").start()
 
+    def _is_no_trade_now(self, symbol: str) -> bool:
+        """A jelenlegi BRÓKER-óra kimarad-e az aktív stratégia trade_hours-ából
+        erre a párra? (A live óra-kapujával azonos logika — szerver/chart idő.)
+        A jelölés így STRATÉGIA-hatókörű: a sor = aktív stratégia + instrumentum.
+        Több stratégiánál a trade_hours per-stratégiára költözik, a jelölés követi."""
+        off = getattr(self, "_mt5_cache", {}).get("server_offset_sec")
+        if off is None:
+            return False   # nincs bróker-idő → ne jelezzünk félre
+        pc = self.cfg.get("pairs", {}).get(symbol, {})
+        if not isinstance(pc, dict):
+            return False
+        bh = (datetime.now(timezone.utc) + timedelta(seconds=off)).hour
+        th = pc.get("trade_hours")
+        if th is not None:
+            return bh not in {int(h) for h in th}
+        # Visszafelé kompatibilis: sess_start/sess_end tartomány (mint a live).
+        return not (pc.get("sess_start", 0) <= bh < pc.get("sess_end", 24))
+
     # ── Fő frissítés (1 mp, csak Python — nem blokkol MT5-re) ────────────
     def _refresh(self):
         now = datetime.now(timezone.utc)
-        self.lbl_time.config(text=now.strftime("%Y-%m-%d %H:%M:%S UTC"))
+        # A felső óra a BRÓKER-időt mutatja (a trade_hours/óra-kapu és a chart is
+        # ezen jár), az UTC-t másodlagosként. Így nincs félreértés a no-trade
+        # órákkal. Ha nincs kapcsolat/offset, csak UTC látszik.
+        _off = getattr(self, "_mt5_cache", {}).get("server_offset_sec")
+        if _off is not None:
+            bt = now + timedelta(seconds=_off)
+            self.lbl_time.config(text=f"Bróker {bt:%H:%M:%S}  ·  UTC {now:%H:%M}")
+        else:
+            self.lbl_time.config(text=now.strftime("%Y-%m-%d %H:%M:%S UTC"))
 
         # Visszaszámlálók a stratégia időkereteire (közös felső sáv + per-pár állapot)
         try:
@@ -2547,6 +2586,22 @@ class DashboardWindow:
         mt5_info  = cache.get("info", {})
         mt5_pnl   = cache.get("daily_pnl", None)
         mt5_positions = cache.get("positions", {})
+
+        # Per-instrumentum NAPI P&L a MAI lezárt trade-ekből (MT5 history — HITELES,
+        # újraindítás-biztos). Korábban a state.daily_pnl session-local volt: bot-
+        # újraindítás után a korábbi zárt trade-eket "elfelejtette", és egy páron a
+        # napi P&L csak az UTOLSÓ zárt trade-et mutatta (nem az összeg). Így most a
+        # "Lezárt (ma)" füllel és a felső összesítővel is egyezik. Csak kapcsolódva
+        # írjuk felül (offline a closed_today [] fallback → nem hiteles).
+        if connected:
+            daily_by_symbol: dict = {}
+            for c in (cache.get("closed_today") or []):
+                s = c.get("symbol")
+                if s is not None:
+                    daily_by_symbol[s] = daily_by_symbol.get(s, 0.0) + c.get("pnl", 0.0)
+            for _sym, _ds in self.dashboard_ref.items():
+                if _ds is not None:
+                    _ds.daily_pnl = daily_by_symbol.get(_sym, 0.0)
 
         if mt5_info:
             self._update_connection_ui(mt5_info)
@@ -2597,8 +2652,10 @@ class DashboardWindow:
                     ds.risk_free    = pos["risk_free"] if pos else False
                 if ds is not None:
                     ds.risky = risky_mode.is_risky(symbol)
+                    no_trade = (inst_state == "LIVE" and self._is_no_trade_now(symbol))
                     row.update(ds, inst_state, opt_status,
-                               connected=getattr(self, "_connected", False))
+                               connected=getattr(self, "_connected", False),
+                               no_trade=no_trade)
                 if inst_state == "LIVE":
                     live_count += 1
 
