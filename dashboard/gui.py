@@ -469,15 +469,16 @@ class OptimizerController:
             opt_cfg     = self.cfg["optimizer"]
             initial_bal = self.cfg.get("ml", {}).get("starting_balance_eur", 1000.0)
 
-            # ── Adat előkészítés (MT5_LOCK alatt, háttérszálon) ───────────
-            from core.mt5_connector import MT5_LOCK
+            # ── Adat előkészítés (háttérszálon) ───────────────────────────
+            from core import mt5_connector as _mt5c
             from tools.download_history import download_pair, _fill_gap
             from datetime import datetime as _dt, timezone as _tz
-            import MetaTrader5 as _mt5_dl
 
             end_dt = _dt.now(_tz.utc)
-            with MT5_LOCK:
-                connected = _mt5_dl.initialize()
+            # MINDENKI ugyanazt a connect()-et használja → egységes terminál
+            # (config mt5.path) + fiók-ellenőrzés. (A connect() maga foglalja a
+            # MT5_LOCK-ot, ezért NEM tesszük külön lock-blokkba — az deadlock lenne.)
+            connected = _mt5c.connect(self.cfg)
 
             if connected:
                 for tf in (t.label for t in self.strategy.timeframes()):

@@ -10,40 +10,70 @@ log = logging.getLogger(__name__)
 MT5_LOCK = threading.Lock()
 
 
-def connect(cfg: dict) -> bool:
-    """MT5 inicializálás és bejelentkezés a config alapján."""
-    broker = cfg["broker"]
-    mt5_cfg = cfg.get("mt5", {})
-
+def _init_kwargs(mt5_cfg: dict) -> dict:
+    """A config `mt5` szekciójából az initialize kwargs-ai (path + portable).
+    A `path` a KONKRÉT terminált adja meg — több MT5 esetén EZ dönti el, melyikhez
+    kapcsolódunk; portable módban a terminál a saját mappájából olvas."""
     kwargs = {}
-    if "path" in mt5_cfg:
+    if mt5_cfg.get("path"):
         kwargs["path"] = mt5_cfg["path"]
     if mt5_cfg.get("portable"):
         kwargs["portable"] = True
+    return kwargs
+
+
+def connect(cfg: dict) -> bool:
+    """MT5 inicializálás + bejelentkezés a config alapján, ELLENŐRZÉSSEL.
+
+    Több MT5 párhuzamos futásakor kulcsfontosságú, hogy a config `mt5.path`
+    terminálját a config `broker` fiókjával nyissuk — NEM a futó/alap MT5-öt.
+    Ezért: (1) a login/server-t átadjuk az initialize-nak (a config terminálját
+    a config fiókjával indítja), (2) a végén ELLENŐRIZZÜK, hogy tényleg a várt
+    login@server-re kapcsolódtunk — ha nem, HIBÁVAL leállunk (nem dolgozunk
+    csendben rossz fiókon)."""
+    broker  = cfg["broker"]
+    mt5_cfg = cfg.get("mt5", {})
+    kwargs  = _init_kwargs(mt5_cfg)
+    want_login  = int(broker["login"])
+    want_server = broker["server"]
 
     with MT5_LOCK:
-        if not mt5.initialize(**kwargs):
-            log.error("MT5 initialize hiba: %s", mt5.last_error())
-            return False
-
-        if not mt5.login(
-            broker["login"],
-            password=broker["password"],
-            server=broker["server"],
-        ):
-            log.error("MT5 login hiba: %s", mt5.last_error())
-            mt5.shutdown()
-            return False
-
+        # Robusztus út: path + portable + login/password/server EGYSZERRE →
+        # a config terminálját a config fiókjával indítja/kapcsolja.
+        ok = mt5.initialize(login=want_login, password=broker["password"],
+                            server=want_server, **kwargs)
+        if not ok:
+            # Fallback (régi út): initialize path-tal, majd külön login.
+            log.warning("MT5 initialize(login) sikertelen: %s — próbálom path+login úttal.",
+                        mt5.last_error())
+            if not mt5.initialize(**kwargs):
+                log.error("MT5 initialize hiba: %s", mt5.last_error())
+                return False
+            if not mt5.login(want_login, password=broker["password"], server=want_server):
+                log.error("MT5 login hiba: %s", mt5.last_error())
+                mt5.shutdown()
+                return False
         info = mt5.account_info()
+        term = mt5.terminal_info()
 
-    log.info(
-        "MT5 kapcsolódva | %s | Egyenleg: %.2f %s | Demo: %s",
-        broker["server"],
-        info.balance,
-        info.currency,
-        broker.get("is_demo", True),
-    )
+    # ── ELLENŐRZÉS: tényleg a config fiókjához/szerveréhez kapcsolódtunk? ──
+    if info is None:
+        log.error("MT5 account_info üres a kapcsolódás után.")
+        return False
+    if int(info.login) != want_login or str(info.server) != str(want_server):
+        term_path = getattr(term, "path", "?") if term else "?"
+        log.error(
+            "MT5 ROSSZ FIÓK/TERMINÁL! Vártam: %s@%s, kaptam: %s@%s (terminál: %s). "
+            "Több MT5 fut? Ellenőrizd a config mt5.path-ot, és hogy MINDEN terminál "
+            "PORTABLE módban fusson (külön mappával).",
+            want_login, want_server, info.login, info.server, term_path)
+        with MT5_LOCK:
+            mt5.shutdown()
+        return False
+
+    log.info("MT5 kapcsolódva | %s (login %s) | Egyenleg: %.2f %s | terminál: %s",
+             info.server, info.login, info.balance, info.currency,
+             mt5_cfg.get("path", "(alapértelmezett)"))
     return True
 
 
