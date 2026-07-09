@@ -56,20 +56,29 @@ def connect(cfg: dict) -> bool:
         info = mt5.account_info()
         term = mt5.terminal_info()
 
-    # ── ELLENŐRZÉS: tényleg a config fiókjához/szerveréhez kapcsolódtunk? ──
+    # ── ELLENŐRZÉS: tényleg a config FIÓKJÁHOZ kapcsolódtunk? ─────────────
+    # A LOGIN a mérvadó fiók-azonosító (ez különbözteti meg a rossz terminált /
+    # rossz brókert). A szerver-NÉV eltérése (azonos login mellett) NEM hiba, csak
+    # elavult config-érték (pl. bróker átnevezte a szervert) → figyelmeztetés.
     if info is None:
         log.error("MT5 account_info üres a kapcsolódás után.")
         return False
-    if int(info.login) != want_login or str(info.server) != str(want_server):
+    if int(info.login) != want_login:
         term_path = getattr(term, "path", "?") if term else "?"
         log.error(
-            "MT5 ROSSZ FIÓK/TERMINÁL! Vártam: %s@%s, kaptam: %s@%s (terminál: %s). "
+            "MT5 ROSSZ FIÓK/TERMINÁL! Vártam login: %s (%s), kaptam: %s@%s (terminál: %s). "
             "Több MT5 fut? Ellenőrizd a config mt5.path-ot, és hogy MINDEN terminál "
             "PORTABLE módban fusson (külön mappával).",
             want_login, want_server, info.login, info.server, term_path)
         with MT5_LOCK:
             mt5.shutdown()
         return False
+    if str(info.server) != str(want_server):
+        log.warning(
+            "MT5 szerver-név eltér: config '%s' != tényleges '%s' (login EGYEZIK: %s). "
+            "Valószínűleg elavult config broker.server — ezzel a fiókkal FOLYTATOM. "
+            "Érdemes a config-ban a broker.server-t '%s'-re frissíteni.",
+            want_server, info.server, want_login, info.server)
 
     log.info("MT5 kapcsolódva | %s (login %s) | Egyenleg: %.2f %s | terminál: %s",
              info.server, info.login, info.balance, info.currency,
