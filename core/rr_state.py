@@ -36,6 +36,11 @@ RUNNER_NAME = {RUNNER_TRAILING: "Trailing", RUNNER_KEEP: "Marad távol",
 _lock = threading.Lock()
 _state: dict[str, dict] = {}
 
+# Numerikus kalibrációs override-ok (az optimalizáló írhatja): ha jelen vannak, a
+# spec_for felülírja velük a default_config() megfelelő kulcsait. Hiányukban a
+# default_config érvényes (visszafelé kompatibilis: a régi fájlokban nincsenek).
+_CALIB_KEYS = ("trigger_R", "halving_fraction", "shield_fraction")
+
 
 def _norm(v) -> dict:
     """Érték normalizálása dict-re (régi string → {preset})."""
@@ -49,6 +54,9 @@ def _norm(v) -> dict:
             d["cautious"] = bool(v["cautious"])
         if v.get("runner") in RUNNERS:
             d["runner"] = v["runner"]
+        for k in _CALIB_KEYS:
+            if isinstance(v.get(k), (int, float)):
+                d[k] = float(v[k])
         return d
     return {"preset": PRESET_OFF}
 
@@ -87,6 +95,14 @@ def get_cautious(symbol: str):
         return _entry(symbol).get("cautious", None)
 
 
+def get_calibration(symbol: str) -> dict:
+    """A per-pár numerikus kalibrációs override-ok (trigger_R/frakciók), ha vannak.
+    Üres dict, ha nincs (→ a default_config érvényes)."""
+    with _lock:
+        e = _entry(symbol)
+        return {k: float(e[k]) for k in _CALIB_KEYS if isinstance(e.get(k), (int, float))}
+
+
 def _set(symbol: str, **kw):
     with _lock:
         d = dict(_entry(symbol))
@@ -105,6 +121,20 @@ def set_runner(symbol: str, runner: str):
 
 def set_cautious(symbol: str, value):
     _set(symbol, cautious=(None if value is None else bool(value)))
+
+
+def set_from_optimizer(symbol: str, rr: dict):
+    """Az optimalizáló nyertes rr-jét a per-pár állapotba írja: preset + runner +
+    cautious + numerikus kalibráció (trigger_R/frakciók). A live/GUI ezt veszi át."""
+    if not rr:
+        return
+    kw = {"preset": rr.get("preset", PRESET_OFF),
+          "runner": rr.get("runner_stop", RUNNER_TRAILING),
+          "cautious": rr.get("cautious")}
+    for k in _CALIB_KEYS:
+        if isinstance(rr.get(k), (int, float)):
+            kw[k] = float(rr[k])
+    _set(symbol, **kw)
 
 
 def cycle_preset(symbol: str) -> str:
@@ -132,6 +162,8 @@ def spec_for(symbol: str) -> dict:
     cautious felülbírálás). A run_pair a `cautious` kulcsot a méretezéshez nézi."""
     preset = effective_preset(symbol)
     spec = {**default_config(), "preset": preset, "runner_stop": get_runner(symbol)}
+    # Numerikus kalibráció-override (ha az optimalizáló beírta) — különben a default.
+    spec.update(get_calibration(symbol))
     c = get_cautious(symbol)
     spec["cautious"] = wants_cautious_size(preset) if c is None else bool(c)
     return spec

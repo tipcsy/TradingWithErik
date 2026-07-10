@@ -254,6 +254,47 @@ def _score_trades(trades: list, initial_balance: float, min_trades: int = 5) -> 
 # Optuna alapú optimalizálás walk-forward validációval
 # ---------------------------------------------------------------------------
 
+# ── Kockázatcsökkentés (rr) optimalizálási tere — opt-in: optimizer.optimize_rr ──
+# Framework-szintű (bármely stratégiával), ezért a config.json optimizer-blokkban
+# felülírható (optimizer.rr_space); a preset+runner kategorikus, a trigger_R és a
+# frakciók float dimenziók. KRITIKUS invariáns: a részleges zárás ≥50% → a
+# halving_fraction alsó határa ≥0.5 (különben stopnál nettó mínusz).
+_RR_PRESETS = ("off", "risky", "halving", "shield")
+_RR_RUNNERS = ("trailing", "keep", "breakeven")
+_RR_SPACE_DEFAULT = {
+    "trigger_R":        {"min": 0.5, "max": 2.0, "step": 0.1},
+    "halving_fraction": {"min": 0.5, "max": 0.75, "step": 0.05},
+    "shield_fraction":  {"min": 0.6, "max": 0.9, "step": 0.05},
+}
+
+
+def _suggest_rr(trial, opt_cfg: dict) -> dict:
+    """Optuna trial → TELJES rr-spec (preset + runner + trigger_R/frakció kalibráció).
+
+    Mindig FIX keresési teret ad (a preset akkor is off lehet) — a preset='off'
+    esetén a run_pair felé None-ra fordítjuk (`_rr_for_run`), de a spec-et
+    rögzítjük (a CSV-be + a nyertes rr-hez). A `cautious` a preset szerint."""
+    from core import risk_reduction as _rr
+    space = {**_RR_SPACE_DEFAULT, **(opt_cfg.get("rr_space") or {})}
+    preset = trial.suggest_categorical("rr_preset", list(_RR_PRESETS))
+    runner = trial.suggest_categorical("rr_runner", list(_RR_RUNNERS))
+    vals = {}
+    for key in ("trigger_R", "halving_fraction", "shield_fraction"):
+        s = space[key]
+        vals[key] = trial.suggest_float(f"rr_{key}", float(s["min"]),
+                                        float(s["max"]), step=float(s["step"]))
+    return {"preset": preset, "runner_stop": runner,
+            "cautious": _rr.wants_cautious_size(preset), **vals}
+
+
+def _rr_for_run(spec: "dict | None"):
+    """A run_pair-nek átadható rr: None ha nincs spec vagy a preset 'off' (tiszta
+    OFF-viselkedés, bitazonos a rr=None úttal)."""
+    if not spec or spec.get("preset", "off") == "off":
+        return None
+    return spec
+
+
 def _suggest_params(trial, opt_cfg: dict, base_params: dict) -> dict:
     """Optuna trial → paraméter dict."""
     params = deepcopy(base_params)
@@ -290,6 +331,10 @@ def optimize_pair_optuna(
     """
     from trading.backtest import run_pair
 
+    # Opt-in: az rr (kockázatcsökkentés) is optimalizált dimenzió? Alapból NEM →
+    # a keresési tér és a viselkedés bitazonos a korábbival.
+    optimize_rr = bool(opt_cfg.get("optimize_rr", False))
+
     windows = _walk_forward_windows(df_m15, n_splits, train_months, test_months)
     if not windows:
         log.warning("%s — nincs elég adat walk-forward ablakokhoz.", symbol)
@@ -306,12 +351,13 @@ def optimize_pair_optuna(
     call_count = [0]
     best_score_so_far = [-float("inf")]
 
-    def _record_trial(trial, params, score, summary=None, note=""):
+    def _record_trial(trial, params, score, summary=None, note="", rr=None):
         """Egy trial sora a CSV-hez — MINDEN trialról (érvénytelen/0-trade is),
         hogy az eredménytáblázat mindig létrejöjjön és lássék, mi történt.
         A sort a TRIAL user_attr-jébe tesszük (a study-val perzisztálódik → a CSV
         a study-ból bármikor újraépíthető, folytatás után is).
-        note: elbukás oka (pl. hiányzó config-kulcs), hogy a CSV-ből kiderüljön."""
+        note: elbukás oka (pl. hiányzó config-kulcs), hogy a CSV-ből kiderüljön.
+        rr: az adott trial rr-spec-je (ha optimize_rr) → külön oszlopokban."""
         row = {"score": round(score, 2) if score > -999999.0 else score}
         if summary:
             pf = summary["profit_factor"]
@@ -328,6 +374,12 @@ def optimize_pair_optuna(
         for pk, pv in params.items():
             if not pk.startswith("_"):
                 row[pk] = pv
+        if optimize_rr and rr:
+            row["rr_preset"] = rr.get("preset", "off")
+            row["rr_runner"] = rr.get("runner_stop", "")
+            row["rr_trigger_R"] = rr.get("trigger_R", "")
+            row["rr_halving_fraction"] = rr.get("halving_fraction", "")
+            row["rr_shield_fraction"] = rr.get("shield_fraction", "")
         trial.set_user_attr("row", row)
 
     def objective(trial):
@@ -345,8 +397,12 @@ def optimize_pair_optuna(
                      symbol, call_count[0], n_trials, best_score_so_far[0])
 
         params = _suggest_params(trial, opt_cfg, base_params)
+        # rr (kockázatcsökkentés) dimenziók — csak ha opt-in (különben None → OFF).
+        rr_spec = _suggest_rr(trial, opt_cfg) if optimize_rr else None
+        rr_run  = _rr_for_run(rr_spec)
         if not strategy.constraints_ok(params):
-            _record_trial(trial, params, -999999.0, note="paraméter-kényszer nem teljesült")
+            _record_trial(trial, params, -999999.0,
+                          note="paraméter-kényszer nem teljesült", rr=rr_spec)
             return -999999.0
 
         window_scores = []
@@ -364,6 +420,7 @@ def optimize_pair_optuna(
                     initial_balance,
                     test_start=None,  # teljes ablakot futtatjuk
                     strategy=strategy,
+                    rr=rr_run,
                 )
 
                 # Csak a TEST periódus trade-jeit értékeljük
@@ -381,7 +438,7 @@ def optimize_pair_optuna(
         valid = [s for s in window_scores if s > -999999.0]
         if not valid:
             # Ha kivétel volt → az az ok; ha nem, akkor tényleg nincs értékelhető trade.
-            _record_trial(trial, params, -999999.0,
+            _record_trial(trial, params, -999999.0, rr=rr_spec,
                           note=last_err or "nincs értékelhető trade a TEST ablakokban")
             return -999999.0
 
@@ -410,7 +467,7 @@ def optimize_pair_optuna(
                 "max_drawdown":  mdd,
                 "profit_factor": pf,
             }
-        _record_trial(trial, params, final_score, summary)
+        _record_trial(trial, params, final_score, summary, rr=rr_spec)
 
         if final_score > best_score_so_far[0]:
             best_score_so_far[0] = final_score
@@ -494,6 +551,10 @@ def optimize_pair_optuna(
         return None
 
     best_params = _suggest_params(study.best_trial, opt_cfg, base_params)
+    # A nyertes trial rr-je (ugyanabból a trialból visszafejtve) — a train/TEST
+    # validáció is EZZEL fut, hogy a mentett minősítés konzisztens legyen.
+    best_rr     = _suggest_rr(study.best_trial, opt_cfg) if optimize_rr else None
+    best_rr_run = _rr_for_run(best_rr)
 
     # TRAIN summary a teljes train perióduson (utolsó ablak train_start → test_start)
     last_window = windows[-1]
@@ -502,7 +563,7 @@ def optimize_pair_optuna(
         m15_tr = df_m15[df_m15.index >= windows[0]["train_start"]]
         m1_tr  = df_m1[df_m1.index  >= windows[0]["train_start"]]
         train_result = _rp(symbol, m15_tr, m1_tr, best_params, pair_cfg, trading_cfg,
-                           initial_balance, strategy=strategy)
+                           initial_balance, strategy=strategy, rr=best_rr_run)
         train_trades = [
             t for t in train_result.closed
             if t.close_time is not None and t.close_time < last_window["test_start"]
@@ -533,7 +594,7 @@ def optimize_pair_optuna(
         log.warning("  %s — train summary hiba: %s", symbol, e)
         train_summary = {"symbol": symbol, "trades": 0, "wf_score": study.best_value}
 
-    return {"params": best_params, "train_summary": train_summary}
+    return {"params": best_params, "train_summary": train_summary, "rr": best_rr}
 
 
 # ---------------------------------------------------------------------------
@@ -719,11 +780,14 @@ def optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance, progress=None,
     if result is None:
         return {"error": "nincs eredmény"}
 
-    # Out-of-sample (TEST) validálás — szintén itt, egységesen
+    # Out-of-sample (TEST) validálás — szintén itt, egységesen. A nyertes rr-rel
+    # (ha volt rr-optimalizálás), hogy a mentett test_summary konzisztens legyen.
+    _best_rr = result.get("rr")   # csak az optuna-ág adja; grid/random → None (OFF)
     try:
         test_result  = run_pair(symbol, df_m15, df_m1, result["params"],
                                 pair_cfg, trading_cfg, initial_balance,
-                                test_start=test_start, strategy=strategy)
+                                test_start=test_start, strategy=strategy,
+                                rr=_rr_for_run(_best_rr))
         test_summary = test_result.summary(initial_balance)
     except Exception as e:
         log.warning("  %s — TEST hiba: %s", symbol, e)
@@ -733,7 +797,24 @@ def optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance, progress=None,
         "train_summary": result["train_summary"],
         "test_summary":  test_summary,
         "params":        result["params"],
+        "rr":            _best_rr,
     }
+
+
+def apply_optimized_rr(symbol: str, rr: dict):
+    """A nyertes rr-t a per-pár állapotba írja (data/risk_mode.json) → a live/GUI
+    ezt veszi át (mint az optimalizált paramétereket). Naplózza az alkalmazást."""
+    if not rr:
+        return
+    try:
+        from core import rr_state
+        rr_state.set_from_optimizer(symbol, rr)
+        log.info("  %s — rr alkalmazva a live-ra: preset=%s runner=%s "
+                 "trigger_R=%s halving=%s shield=%s", symbol, rr.get("preset"),
+                 rr.get("runner_stop"), rr.get("trigger_R"),
+                 rr.get("halving_fraction"), rr.get("shield_fraction"))
+    except Exception as e:
+        log.warning("  %s — rr_state alkalmazás hiba: %s", symbol, e)
 
 
 def run_optimizer(cfg: dict, symbols: Optional[list[str]] = None):
@@ -804,12 +885,17 @@ def run_optimizer(cfg: dict, symbols: Optional[list[str]] = None):
             "test_summary":  test_summary,
             "params":        result["params"],
         }
+        _rr = result.get("rr")
+        if _rr:
+            entry["rr"] = _rr
         out = params_file(symbol)
         tmp = out.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(entry, f, indent=2, ensure_ascii=False, default=str)
         tmp.replace(out)
         log.info("  Mentve: %s", out)
+        if _rr:
+            apply_optimized_rr(symbol, _rr)
 
     log.info("=" * 60)
     log.info("Optimalizálás kész. Eredmények: %s", PARAMS_DIR)

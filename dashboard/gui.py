@@ -561,11 +561,19 @@ class OptimizerController:
                 "optimized_at": datetime.utcnow().isoformat(),
                 **entry,
             }
+            # rr-optimalizálás eredménye (ha volt): tisztán ne írjunk "rr": null-t;
+            # ha van, a JSON-ba kerül ÉS a live per-pár állapotba (rr_state).
+            _rr = full.get("rr")
+            if not _rr:
+                full.pop("rr", None)
             out = params_file(symbol)
             tmp = out.with_suffix(".tmp")
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(full, f, indent=2, ensure_ascii=False, default=str)
             tmp.replace(out)
+            if _rr:
+                from ml.optimizer import apply_optimized_rr
+                apply_optimized_rr(symbol, _rr)
 
             # Sikeres: a pár azonnal "tanított" → Play aktiválható
             ds = self.dashboard_ref.get(symbol)

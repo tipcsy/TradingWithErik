@@ -33,6 +33,9 @@ OPTIMIZER_ENGINE_KEYS = frozenset({
     "_comment_timeout", "stall_timeout_sec", "hard_timeout_sec",
     "_comment_wf", "wf_n_splits", "wf_train_months", "wf_test_months",
     "_comment_split", "train_start_date", "test_start_date",
+    # Kockázatcsökkentés (rr) mint optimalizált dimenzió — framework-szintű engine
+    # kapcsoló (opt-in) + a hangolható rr-tér; a config.json-ban marad (nem strat.).
+    "_comment_rr", "optimize_rr", "rr_space",
 })
 
 
