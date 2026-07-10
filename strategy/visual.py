@@ -90,7 +90,10 @@ class VLine:
 
 @dataclass
 class Trend:
-    """Trendvonal (sugár nélkül): (t1,p1)–(t2,p2). Pl. 6-gyertyás TP/SL szint."""
+    """Trendvonal (sugár nélkül): (t1,p1)–(t2,p2). Pl. 6-gyertyás TP/SL szint.
+    style: MT5 vonalstílus (0=folytonos, 1=szaggatott, 2=pont, …) — a szaggatott
+    CSAK width=1-nél látszik. A valós kötés SL/TP-jét szaggatottal különböztetjük
+    meg a replay tömör szegmensétől."""
     name: str
     t1: int
     p1: float
@@ -98,13 +101,35 @@ class Trend:
     p2: float
     color: str = "green"
     width: int = 1
+    style: int = 0
 
     def line(self) -> str:
         return ";".join([
             "TREND", _name(self.name),
             str(int(self.t1)), repr(float(self.p1)),
             str(int(self.t2)), repr(float(self.p2)),
-            _rgb(self.color), str(int(self.width)),
+            _rgb(self.color), str(int(self.width)), str(int(self.style)),
+        ])
+
+
+@dataclass
+class Arrow:
+    """Nyíl egy (idő, ár) ponton — pl. VALÓS kötés belépő-jelölése (MT5 deal). A
+    jel-vonalaktól (VLine, replay) SZÁNDÉKOSAN eltérő alakzat: a betöltési áron ül a
+    gyertyán, így egyből látszik, melyik jelből lett tényleges trade. `code` =
+    Wingdings nyíl-kód (233 fel = BUY, 234 le = SELL)."""
+    name: str
+    t1: int
+    p1: float
+    code: int = 233
+    color: str = "white"
+    width: int = 1
+
+    def line(self) -> str:
+        return ";".join([
+            "ARROW", _name(self.name),
+            str(int(self.t1)), repr(float(self.p1)),
+            str(int(self.code)), _rgb(self.color), str(int(self.width)),
         ])
 
 
@@ -123,6 +148,35 @@ class Text:
             "TEXT", _name(self.name),
             str(int(self.t1)), repr(float(self.p1)),
             _rgb(self.color), str(int(self.fontsize)), _clean(self.text),
+        ])
+
+
+@dataclass
+class BarState:
+    """Per-M15-gyertya SÁV-ÁLLAPOT a dedikált al-ablakhoz (TradeForgeBands).
+
+    Nem klasszikus rajz-objektum (nincs neve/upsertje): a Python gyertyánként egy
+    STATE sort ad, az indikátor SZÍNBUFFERBE (DRAW_COLOR_HISTOGRAM2) tölti — három
+    fix magasságú sávban: szürke no-trade / zöld-piros trend / kék M15-ablak.
+
+    Mezők:
+      t:       nyers bar-idő (epoch, mint a copy_rates)
+      notrade: 1 ha az adott gyertya no-trade órában van (különben 0)
+      dir:     -1 SELL (piros), 0 nincs, 1 BUY (zöld) — az SMA-irány
+      window:  1 ha aktív az M15 jelzési ablak, különben 0
+
+    A no-trade maszkolást a KÜLDŐ (live_trader) végzi: no-trade gyertyánál
+    notrade=1 ÉS dir=0, window=0 (így a Viz csak a szürkét mutatja). A stratégia
+    az órákról nem tud → mindig notrade=0-t ad, a keret írja felül."""
+    t: int
+    notrade: int = 0
+    dir: int = 0
+    window: int = 0
+
+    def line(self) -> str:
+        return ";".join([
+            "STATE", str(int(self.t)), str(int(self.notrade)),
+            str(int(self.dir)), str(int(self.window)),
         ])
 
 

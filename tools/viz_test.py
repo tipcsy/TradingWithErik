@@ -1,14 +1,13 @@
 """
 MT5 vizualizáció — MINIMÁLIS PRÓBA (végpontig működő csővezeték).
 
-Kiír EGYETLEN telített dobozt a `TradeForgeViz.mq5` indikátornak: a megadott
-szimbólum utolsó ~20 M1 gyertyáját fedő zöld sávot a chart aljára.
+Kiír egy rövid per-gyertya SÁV-CSÍKOT a `TradeForgeBands.mq5` al-ablaknak: a
+megadott szimbólum utolsó ~20 M1 gyertyájára STATE sorokat (zöld trend + kék
+M15-ablak jelölés), amit az indikátor színbufferbe tölt.
 
 Cél: bizonyítani a teljes csatornát (Python → Common\\Files fájl → MQL5
-indikátor → chart-objektum). Mivel a doboz jobb sarka (t2) mindig a LEGUTOLSÓ
-gyertyához igazodik, a szkript ÚJRAFUTTATÁSA MEGNÖVELI ugyanazt a dobozt
-(stabil név → az indikátor ObjectMove-val módosítja, nem újat rajzol) — így az
-UPSERT/„nő, nem törlődik" viselkedés is látszik.
+indikátor → al-ablak sávjai). Tedd a TradeForgeViz-t egy chartra (az auto-felrakja
+a TradeForgeBands al-ablakot is), és futtasd a szkriptet → megjelenik a csík.
 
 Futtatás:  python tools/viz_test.py [SYMBOL]   (alapértelmezett: EURUSD)
 """
@@ -23,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core import mt5_connector, mt5_visual
-from strategy.visual import Rect
+from strategy.visual import BarState
 from strategy.settings import load_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s %(message)s",
@@ -49,29 +48,21 @@ def main():
             sys.exit(1)
 
         # NYERS bar-idő integerek (nincs TZ-konverzió — pontosan a gyertyára esik).
-        t1 = int(rates["time"][-20])
-        t2 = int(rates["time"][-1])
-
-        lows  = [float(x) for x in rates["low"][-20:]]
-        highs = [float(x) for x in rates["high"][-20:]]
-        lo, hi = min(lows), max(highs)
-        band = (hi - lo) or (lo * 0.001)
-        # A chart aljához közeli, jól látható sáv (a valódi SMA-doboz később a
-        # chart aljához lesz pinnelve; a próbához explicit ársáv is elég).
-        p1 = lo
-        p2 = lo + band * 0.15
-
-        box = Rect(name="test_box", t1=t1, p1=p1, t2=t2, p2=p2,
-                   color="green", fill=True)
-        path = mt5_visual.write(symbol, [box])
+        # Az utolsó 20 gyertyára egy próba-csík: zöld trend végig, a középső ötnél
+        # kék M15-ablak-jelölés is → mindhárom sáv-mechanika látszik.
+        cells = []
+        for k in range(20, 0, -1):
+            t = int(rates["time"][-k])
+            window = 1 if 8 <= k <= 12 else 0
+            cells.append(BarState(t=t, notrade=0, dir=1, window=window))
+        path = mt5_visual.write(symbol, cells)
 
         if path is None:
             log.error("Nem sikerült a Common\\Files fájl írása.")
             sys.exit(1)
-        log.info("✅ Kiírva: %s", path)
-        log.info("   doboz: t1=%s p1=%.5f  →  t2=%s p2=%.5f", t1, p1, t2, p2)
-        log.info("   Tedd a TradeForgeViz indikátort egy %s M1 chartra. "
-                 "Futtasd újra a szkriptet → a doboz jobb széle nő.", symbol)
+        log.info("✅ Kiírva: %s (%d STATE cella)", path, len(cells))
+        log.info("   Tedd a TradeForgeViz indikátort egy %s M1 chartra (auto-"
+                 "felrakja a TradeForgeBands al-ablakot) → megjelenik a csík.", symbol)
     finally:
         mt5_connector.disconnect()
 

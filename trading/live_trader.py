@@ -286,44 +286,176 @@ class LivePairState:
 # MT5 chart-vizualizáció (a stratégia visual_objects-je → Common\Files fájl)
 # ---------------------------------------------------------------------------
 
-def framework_visual_objects(pair_cfg: dict, md: MarketData) -> list:
-    """KERETRENDSZER-szintű viz-objektumok (nem a stratégiáé): a no-trade órák
-    SZÜRKE dobozai a `trade_hours` alapján. A stratégia semmit nem tud a
-    kereskedési órákról — ezért ezt a keret emittálja (a szeparáció megmarad).
+# SL-mozgás napló: az MT5 NEM tárolja a pozíció SL-módosításait (breakeven/
+# trailing), ezért mi naplózzuk — így a viz lépcsős SL-vonalat tud rajzolni (eredeti
+# piros, elmozdított sárga). Soronként: position_id;szerver_epoch;sl.
+SL_MOVES_DIR = ROOT / "data" / "sl_moves"
 
-    Idő: a bar-idővel (szerver/chart idő) EGYEZŐ órákban — a live óra-kapuja is
-    ehhez igazodik, így a szürke doboz pontosan azt mutatja, mikor NEM kereskedik.
+
+def sl_journal_append(symbol: str, ticket: int, t_server: int, sl: float) -> None:
+    """Egy SL-mozgás hozzáfűzése a `data/sl_moves/<SYM>.csv`-hez. Az idő a
+    `pos.time_update` (a módosítás SZERVER-ideje) → egyezik a gyertya-idővel."""
+    try:
+        SL_MOVES_DIR.mkdir(parents=True, exist_ok=True)
+        with open(SL_MOVES_DIR / f"{symbol}.csv", "a", encoding="ascii") as fh:
+            fh.write(f"{int(ticket)};{int(t_server)};{repr(float(sl))}\n")
+    except Exception:
+        pass
+
+
+def sl_journal_read(symbol: str) -> dict:
+    """position_id → [(szerver_epoch, sl), …] idő szerint rendezve. {} ha nincs."""
+    path = SL_MOVES_DIR / f"{symbol}.csv"
+    out: dict = {}
+    if not path.exists():
+        return out
+    try:
+        for ln in path.read_text(encoding="ascii", errors="replace").splitlines():
+            parts = ln.split(";")
+            if len(parts) != 3:
+                continue
+            out.setdefault(int(parts[0]), []).append((int(parts[1]), float(parts[2])))
+    except Exception:
+        return {}
+    for pid in out:
+        out[pid].sort()
+    return out
+
+
+def apply_no_trade(objects: list, pair_cfg: dict) -> list:
+    """KERETRENDSZER-szintű no-trade MASZKOLÁS a `trade_hours` alapján. A stratégia
+    az órákról nem tud — a KÜLDŐ (keret) alkalmazza a saját szabályát:
+
+      • per-gyertya `BarState`: no-trade órában notrade=1 ÉS dir=0, window=0 →
+        a TradeForgeBands al-ablak ott CSAK a szürke sávot mutatja (trend/kék el);
+      • belépő-jelölések (`VLine` = m1sig, `Trend` = entry/TP/SL): no-trade órában
+        KIMARADNAK — ott a motor úgysem kötne, a jelölés félrevezető lenne.
+
+    A Viz „buta" marad (mindent úgy rajzol, ahogy kap); a szeparáció megmarad: a
+    stratégia NYERS jelét a keret a kereskedési-óra szabályával fedi el. Az óra a
+    SZERVER/CHART idő UTC epochból — ugyanaz, amivel a live `process_pair` kapuz.
     """
     from strategy import visual as viz
     th = pair_cfg.get("trade_hours")
     if th is None:
-        return []
+        return objects
     no_trade = set(range(24)) - {int(h) for h in th}
-    df = md.bars.get("M15")
-    if not no_trade or df is None or len(df) < 2:
+    if not no_trade:
+        return objects
+
+    def _hour(t: int) -> int:
+        return datetime.fromtimestamp(int(t), tz=timezone.utc).hour
+
+    result: list = []
+    for o in objects:
+        if isinstance(o, viz.BarState):
+            if _hour(o.t) in no_trade:
+                o.notrade = 1
+                o.dir = 0
+                o.window = 0
+            result.append(o)
+        elif isinstance(o, viz.VLine):
+            if _hour(o.t1) in no_trade:      # belépő-vonal — no-trade órában elhagyjuk
+                continue
+            result.append(o)
+        elif isinstance(o, viz.Trend):
+            mid = (int(o.t1) + int(o.t2)) // 2   # a belépőre centrált → a közepe a belépő ideje
+            if _hour(mid) in no_trade:
+                continue
+            result.append(o)
+        else:
+            result.append(o)
+    return result
+
+
+def actual_trade_objects(symbol: str, since_ts: int) -> list:
+    """A VALÓS kötések (MT5 deal-history) rétege — a replay jel-vonalaktól eltérő:
+      • belépő-NYÍL a tényleges betöltési áron (fel=BUY / le=SELL),
+      • valós SL (piros) és TP (zöld) SZAGGATOTT vonal a belépőtől a záró idejéig.
+
+    Az SL/TP forrása: NYITOTT pozíció → aktuális (breakeven/trailing utáni) szint;
+    LEZÁRT trade → a nyitó order kezdeti SL/TP-je. `since_ts`-től. A réteg NEM esik a
+    no-trade maszkolás alá (megtörtént kötés mindig látszik). `deal.time` szerver-
+    epoch (mint a gyertya-idő) → a gyertyára illik.
+    """
+    from strategy import visual as viz
+    from datetime import timedelta
+    dt_from = datetime.fromtimestamp(int(since_ts), tz=timezone.utc)
+    dt_to   = datetime.now(timezone.utc) + timedelta(days=1)
+    try:
+        with mt5_connector.MT5_LOCK:
+            deals     = mt5.history_deals_get(dt_from, dt_to, group=f"*{symbol}*")
+            orders    = mt5.history_orders_get(dt_from, dt_to, group=f"*{symbol}*")
+            positions = mt5.positions_get(symbol=symbol)
+    except Exception:
+        deals = orders = positions = None
+    if not deals:
         return []
-    start, end = df.index[0], df.index[-1]
+
+    # position_id → KEZDETI SL/TP (nyitó order, legkorábbi BUY/SELL) és → AKTUÁLIS
+    # SL/TP (nyitott pozíció). A kezdeti a lépcsős SL baseline-ja; az aktuális a TP-hez
+    # (és fallback SL-hez, ha nincs napló).
+    init_sltp: dict = {}
+    for o in sorted(orders or [], key=lambda x: x.time_setup):
+        if o.type in (mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL) and o.position_id not in init_sltp:
+            init_sltp[o.position_id] = (float(o.sl), float(o.tp))
+    cur_sltp: dict = {p.identifier: (float(p.sl), float(p.tp)) for p in (positions or [])}
+
+    # position_id → záró idő (a legutolsó OUT deal); ha nincs, a pozíció még nyitva.
+    close_t: dict = {}
+    for d in deals:
+        if d.entry == mt5.DEAL_ENTRY_OUT:
+            close_t[d.position_id] = max(int(d.time), close_t.get(d.position_id, 0))
+    now_ts   = int(datetime.now(timezone.utc).timestamp())
+    sl_moves = sl_journal_read(symbol)                 # position_id → [(idő, sl), …]
+
     objs: list = []
-    day     = pd.Timestamp(start.date(), tz="UTC")
-    end_day = pd.Timestamp(end.date(),   tz="UTC")
-    while day <= end_day:
-        h = 0
-        while h < 24:
-            if h in no_trade:
-                blk = h
-                while h < 24 and h in no_trade:
-                    h += 1
-                t1 = day + pd.Timedelta(hours=blk)
-                t2 = day + pd.Timedelta(hours=h)          # exkluzív blokk-vég
-                if t2 > start and t1 < end:               # látható tartományra vágva
-                    e1 = int(max(t1, start).timestamp())
-                    e2 = int(min(t2, end).timestamp())
-                    if e2 > e1:
-                        objs.append(viz.Rect(name=f"notrade_{e1}", t1=e1, p1=0.0,
-                                             t2=e2, p2=1.0, color="gray"))
-            else:
-                h += 1
-        day += pd.Timedelta(days=1)
+    for d in deals:
+        if d.symbol != symbol or d.entry != mt5.DEAL_ENTRY_IN:
+            continue                                   # csak a BELÉPŐ (nyitó) deal-ek
+        if d.type not in (mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL):
+            continue
+        t = int(d.time)
+        if t < int(since_ts):
+            continue
+        pid    = d.position_id
+        is_buy = (d.type == mt5.DEAL_TYPE_BUY)
+        t_end  = close_t.get(pid, now_ts)
+        if t_end <= t:
+            t_end = t + 6 * 60                          # legalább pár gyertyányit húzzunk
+
+        objs.append(viz.Arrow(
+            name=f"deal_{d.ticket}", t1=t, p1=float(d.price),
+            code=233 if is_buy else 234,               # fel = BUY, le = SELL
+            color="lime" if is_buy else "orange", width=2))
+
+        # ── Lépcsős SL: baseline (kezdeti, orderből) + a naplózott mozgások ──
+        # Az első szakasz PIROS (eredeti SL), minden elmozdított szakasz SÁRGA — a
+        # tényleges időszakában (belépő→1. mozgás, majd mozgásról mozgásra → záró/most).
+        init_sl = init_sltp.get(pid, (0.0, 0.0))[0]
+        pts: list = []
+        if init_sl and init_sl > 0:
+            pts.append((t, init_sl))
+        for mt_, msl in sl_moves.get(pid, []):
+            if msl and msl > 0 and t <= mt_ <= t_end:
+                pts.append((int(mt_), float(msl)))
+        if not pts:                                    # se order-SL, se napló → aktuális szint
+            cur_sl = cur_sltp.get(pid, (0.0, 0.0))[0]
+            if cur_sl and cur_sl > 0:
+                pts.append((t, cur_sl))
+        for i, (st_, sl_) in enumerate(pts):
+            en_ = pts[i + 1][0] if i + 1 < len(pts) else t_end
+            if en_ <= st_:
+                en_ = st_ + 6 * 60
+            objs.append(viz.Trend(
+                name=f"dealsl_{d.ticket}_{i}", t1=st_, p1=sl_, t2=en_, p2=sl_,
+                color="red" if i == 0 else "yellow", width=1, style=1))
+
+        # ── TP (nem lépcsős): aktuális, ha nyitva, különben a kezdeti ──
+        tp = cur_sltp.get(pid, init_sltp.get(pid, (0.0, 0.0)))[1]
+        if tp and tp > 0:
+            objs.append(viz.Trend(name=f"dealtp_{d.ticket}", t1=t, p1=tp, t2=t_end, p2=tp,
+                                  color="green", width=1, style=1))
     return objs
 
 
@@ -345,10 +477,15 @@ def write_pair_visuals(symbol: str, params: dict, strategy, pip_size: float,
         return
     # pip_size a jövőbeli TP/SL-rajzoláshoz (feltétel 3) — a params nem tartalmazza.
     md = MarketData(symbol=symbol, params={**params, "pip_size": pip_size}, bars=bars)
-    # A no-trade szürke dobozok ELŐRE kerülnek (a fájlban előbb) → az al-ablakban
-    # a szalag/doboz FÖLÖTTE rajzolódik (a szürke a háttér-időoszlop).
-    framework = framework_visual_objects(pair_cfg or {}, md)
-    mt5_visual.write(symbol, framework + strategy.visual_objects(md))
+    # A stratégia per-gyertya BarState-jeire a keret RÁMASZKOLJA a no-trade órákat
+    # (a szürke sáv + a trend/kék eltüntetése ott) — a Viz csak megjeleníti.
+    objects = apply_no_trade(strategy.visual_objects(md), pair_cfg or {})
+    # + a VALÓS kötések nyilai ugyanarra az M1-ablakra (a replay-jelek mellé, hogy
+    # látszódjon, melyik jelből lett tényleges trade). A maszkolás UTÁN fűzzük hozzá.
+    m1 = bars.get("M1")
+    if m1 is not None and len(m1):
+        objects = objects + actual_trade_objects(symbol, int(m1.index[0].timestamp()))
+    mt5_visual.write(symbol, objects)
 
 
 # ---------------------------------------------------------------------------
@@ -519,6 +656,18 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         pstate = position_state.setdefault(ticket, {
             "original_sl": pos.sl, "trailing_enabled": True, "be_done": is_rf,
             "trail_points": None, "trail_moved": False})
+
+        # SL-mozgás naplózása a viz lépcsős SL-vonalához: ha a pos.sl változott az
+        # utóbb látott értékhez képest, feljegyezzük (idő = pos.time_update = a
+        # módosítás SZERVER-ideje). Forrás-független (breakeven/trailing/kézi). Első
+        # észleléskor csak rögzítjük a kiindulást (nem naplózunk → nincs restart-
+        # duplikáció; a baseline-t a rajzoló a nyitó orderből veszi).
+        _prev_sl = pstate.get("last_sl")
+        if _prev_sl is None:
+            pstate["last_sl"] = pos.sl
+        elif abs(pos.sl - _prev_sl) > 1e-9:
+            pstate["last_sl"] = pos.sl
+            sl_journal_append(symbol, ticket, int(pos.time_update), pos.sl)
         # Kézi BE (a Pozíciók fülről): ha be_done jelölt, de a slot-kezelő még
         # nem tudja, szinkronizáljuk (slot felszabadul, trailing indulhat).
         if pstate.get("be_done") and not is_rf:

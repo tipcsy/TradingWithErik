@@ -89,11 +89,20 @@ void RefreshFromFile()
 
    string inds[];
    int nind = 0;
+   string seen[];        // a MOSTANI fájlban szereplő objektum-nevek (mark)
+   int nseen = 0;
+   bool cleared = false;
    while(!FileIsEnding(h))
    {
       string ln = FileReadString(h);
       if(StringLen(ln) == 0)
          continue;
+      if(StringFind(ln, "CLEAR") == 0)   // V-off: a saját objektumok törlése
+      {
+         ObjectsDeleteAll(0, FilePrefix);
+         cleared = true;
+         continue;
+      }
       if(StringFind(ln, "IND;") == 0)   // indikátor-leírás — külön kezeljük
       {
          ArrayResize(inds, nind + 1);
@@ -101,9 +110,23 @@ void RefreshFromFile()
          nind++;
          continue;
       }
-      ApplyLine(ln);
+      string nm = ApplyLine(ln);
+      if(nm != "")
+      {
+         ArrayResize(seen, nseen + 1);
+         seen[nseen] = nm;
+         nseen++;
+      }
    }
    FileClose(h);
+
+   // MARK-AND-SWEEP: a fájl a kívánt állapot TELJES pillanatképe → a SAJÁT (TFV_)
+   // objektumokból leszedjük azokat, amik NEM voltak a mostani fájlban (árvák: pl.
+   // már érvénytelen belépő-vonal, elmozdult ablakhoz tartozó régi jelölés). Az
+   // upsert így NŐ/mozgat, a söprés pedig eltakarít — nincs halmozódás.
+   // A CLEAR ág külön van (már mindent törölt), ott nem söprünk.
+   if(!cleared)
+      SweepOrphans(FilePrefix, seen, nseen);
 
    // Az indikátorokat CSAK EGYSZER rakjuk fel (amint először látjuk az IND sorokat).
    if(!g_ind_done && nind > 0)
@@ -116,29 +139,53 @@ void RefreshFromFile()
 
 //+------------------------------------------------------------------+
 //| Egy sor feldolgozása: TYPE;NAME;...                              |
+//| Visszaad: a felrakott objektum neve (a söpréshez), vagy "" ha a  |
+//| sor nem rajz-objektum (ismeretlen/hibás típus).                 |
 //+------------------------------------------------------------------+
-void ApplyLine(string ln)
+string ApplyLine(string ln)
 {
-   // Törlés-direktíva: a Python a V (viz) gomb KI-kapcsolásakor írja ki.
-   if(StringFind(ln, "CLEAR") == 0)
-   {
-      ObjectsDeleteAll(0, FilePrefix);
-      return;
-   }
-
    string f[];
    int n = StringSplit(ln, ';', f);
    if(n < 2)
-      return;
+      return "";
 
    string type = f[0];
    string name = f[1];
 
    // RECT (SMA-szalag + M15 doboz) → a TradeForgeBands al-ablak rajzolja, itt kihagyjuk.
-   if(type == "VLINE" && n >= 5) UpsertVLine(name, f);
-   else if(type == "TREND" && n >= 8) UpsertTrend(name, f);
-   else if(type == "TEXT"  && n >= 7) UpsertText(name, f);
-   else if(type == "LABEL" && n >= 8) UpsertLabel(name, f);
+   if(type == "VLINE" && n >= 5) { UpsertVLine(name, f); return name; }
+   else if(type == "TREND" && n >= 8) { UpsertTrend(name, f); return name; }
+   else if(type == "ARROW" && n >= 7) { UpsertArrow(name, f); return name; }
+   else if(type == "TEXT"  && n >= 7) { UpsertText(name, f); return name; }
+   else if(type == "LABEL" && n >= 8) { UpsertLabel(name, f); return name; }
+   return "";
+}
+
+//+------------------------------------------------------------------+
+//| Árva-takarítás: a `prefix`-szel kezdődő objektumok közül azokat, |
+//| amik NINCSENEK a `seen` (mostani fájl) listában, leszedi. Minden |
+//| al-ablakon átmegy (a VLINE a 0-s ablakhoz van horgonyozva); a    |
+//| TradeForgeBands TFB_ objektumaihoz nem nyúl (más prefix).        |
+//+------------------------------------------------------------------+
+void SweepOrphans(string prefix, string &seen[], int nseen)
+{
+   for(int i = ObjectsTotal(0, -1, -1) - 1; i >= 0; i--)
+   {
+      string nm = ObjectName(0, i, -1, -1);
+      if(StringFind(nm, prefix) != 0)     // nem a miénk
+         continue;
+      if(!InArray(nm, seen, nseen))
+         ObjectDelete(0, nm);
+   }
+}
+
+//+------------------------------------------------------------------+
+bool InArray(string s, string &arr[], int cnt)
+{
+   for(int i = 0; i < cnt; i++)
+      if(arr[i] == s)
+         return true;
+   return false;
 }
 
 //+------------------------------------------------------------------+
@@ -175,6 +222,7 @@ void UpsertTrend(string name, string &f[])
    double   p2 = StringToDouble(f[5]);
    color    c  = StringToColor(f[6]);
    int      w  = (int)StringToInteger(f[7]);
+   int      st = (ArraySize(f) >= 9) ? (int)StringToInteger(f[8]) : 0;   // vonalstílus (opcionális)
 
    if(ObjectFind(0, name) < 0)
    {
@@ -188,6 +236,36 @@ void UpsertTrend(string name, string &f[])
       ObjectMove(0, name, 0, t1, p1);
       ObjectMove(0, name, 1, t2, p2);
    }
+   ObjectSetInteger(0, name, OBJPROP_COLOR, c);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, w);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, st);
+}
+
+//+------------------------------------------------------------------+
+//| ARROW;name;t1;p1;code;r,g,b;width  (valós kötés nyíl-jelölése)   |
+//| code: Wingdings nyíl-kód (233 fel = BUY, 234 le = SELL). A nyíl a |
+//| gyertyához horgonyozva: BUY alul (ANCHOR_TOP), SELL felül.       |
+//+------------------------------------------------------------------+
+void UpsertArrow(string name, string &f[])
+{
+   datetime t1   = (datetime)StringToInteger(f[2]);
+   double   p1   = StringToDouble(f[3]);
+   int      code = (int)StringToInteger(f[4]);
+   color    c    = StringToColor(f[5]);
+   int      w    = (int)StringToInteger(f[6]);
+
+   if(ObjectFind(0, name) < 0)
+   {
+      ObjectCreate(0, name, OBJ_ARROW, 0, t1, p1);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   }
+   else
+   {
+      ObjectMove(0, name, 0, t1, p1);
+   }
+   ObjectSetInteger(0, name, OBJPROP_ARROWCODE, code);
+   ObjectSetInteger(0, name, OBJPROP_ANCHOR, (code == 234) ? ANCHOR_BOTTOM : ANCHOR_TOP);
    ObjectSetInteger(0, name, OBJPROP_COLOR, c);
    ObjectSetInteger(0, name, OBJPROP_WIDTH, w);
 }

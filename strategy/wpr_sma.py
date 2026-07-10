@@ -316,23 +316,24 @@ class WprSmaStrategy(Strategy):
         """Mélyebb ablak, mint a jelzés-warmup — hogy a szalag több napra
         visszamenjen (az SMA miatt a warmupból csak pár érvényes sor lenne)."""
         if timeframe_label == "M15":
-            return params.get("sma_period", 200) + 300
+            # A warmup (sma_period) FELETT ~2880 látható M15 gyertya ≈ ~1 hónap —
+            # ennyire lehet visszagörgetni a sáv-csíkon (a warmup mindig fedve van).
+            return params.get("sma_period", 200) + 2880
         if timeframe_label == "M1":
-            # ~1 nap M1 az utóbbi belépő-jelzésekhez (feltétel 3); a TP/SL a
-            # 6-gyertyás szélessége miatt M1 charton nézve látszik igazán.
-            return params.get("wpr_m1_period", 8) + 1440
+            # ~3 nap M1 a belépő-jelzésekhez (feltétel 3) ÉS a valós kötés-nyilak
+            # ablakához (live_trader.actual_trade_objects ezt a tartományt olvassa).
+            # A TP/SL a 6-gyertyás szélessége miatt M1 charton nézve látszik igazán.
+            return params.get("wpr_m1_period", 8) + 4320
         return 0
 
     def visual_objects(self, md: MarketData) -> list:
         """A wpr_sma teljes chart-vizualizációja:
 
-          • Feltétel 1 — SMA-irány SZALAG a chart alján: az M15 zárt gyertyák
-            iránya (close vs SMA) azonos irányú szegmensekbe csoportosítva; zöld
-            (BUY: ár az SMA felett), piros (SELL: ár alatt). Stabil név (szegmens
-            kezdő-ideje) → a futó szegmens NŐ (upsert), nincs duplikátum.
-          • Feltétel 2 — az M15 jelzési ablak HOSSZÁT KÉK téglalap mutatja,
-            közvetlenül az SMA-szalag FELETT (nyitástól zárásig → látszik, meddig
-            tart a jelzés).
+          • Feltétel 1+2 — per-gyertya SÁV-ÁLLAPOT (`viz.BarState`, STATE sorok):
+            gyertyánként az SMA-irány (zöld BUY / piros SELL) és az M15 jelzési
+            ablak (kék, ha nyitva). A TradeForgeBands al-ablak színbufferbe tölti,
+            fix magasságú sávokban → per-gyertya színes csík, mindig teljes
+            szélességben. A szürke no-trade sávot a küldő (live_trader) maszkolja rá.
           • Feltétel 3 — minden M1 BELÉPŐnél HÁROM vízszintes trendvonal a
             belépőre CENTRÁLVA (−3…+3 gyertya, 6 hosszú): NARANCS a belépő
             árszintjén, zöld TP, piros SL (ATR-ből, a motor `calc_sl_tp_pips`-ével)
@@ -354,8 +355,6 @@ class WprSmaStrategy(Strategy):
 
         closes = m15["close"].values
         smas   = m15["sma"].values
-        highs  = m15["high"].values
-        lows   = m15["low"].values
         wprs15 = m15["wpr"].values
         atr15  = m15["atr"].values
         # NYERS bar-idő integer (a copy_rates ugyanezt adja) → pontosan a
@@ -371,63 +370,18 @@ class WprSmaStrategy(Strategy):
 
         objects: list = []
 
-        # ── Feltétel 1+2 sávok: két egymásra rakott szalag a candle-ök alatt ──
-        # Fentről lefelé: KÉK (M15 jelzés) közvetlenül az SMA-szalag felett.
-        lo = float(np.nanmin(lows[valid]))
-        hi = float(np.nanmax(highs[valid]))
-        rng = (hi - lo) or (lo * 0.001)
-        gap = rng * 0.02                       # rés a candle-ök alatt
-        th  = rng * 0.05                       # egy sáv vastagsága
-        blue_top = lo - gap                    # kék (M15 jelzés) sáv
-        blue_bot = lo - gap - th
-        sma_top  = blue_bot                    # SMA-szalag közvetlenül alatta
-        sma_bot  = blue_bot - th
-
-        def _dir(i: int) -> str:
-            s, c = smas[i], closes[i]
-            if math.isnan(s):
-                return "NONE"
-            return "BUY" if c > s else "SELL" if c < s else "NONE"
-
-        seg_start_i, seg_dir = None, "NONE"
-
-        def _emit_band(start_i: int, end_time: int, direction: str):
-            objects.append(viz.Rect(
-                name=f"smaband_{times[start_i]}",
-                t1=times[start_i], p1=sma_top,
-                t2=end_time,       p2=sma_bot,
-                color="green" if direction == "BUY" else "red", fill=True))
-
-        for i in range(len(m15)):          # az utolsó sor a FORMÁLÓDÓ gyertya
-            d = _dir(i)
-            if d != seg_dir:
-                if seg_dir in ("BUY", "SELL") and seg_start_i is not None:
-                    _emit_band(seg_start_i, times[i], seg_dir)
-                seg_dir = d
-                seg_start_i = i if d in ("BUY", "SELL") else None
-        if seg_dir in ("BUY", "SELL") and seg_start_i is not None:
-            _emit_band(seg_start_i, times[-1], seg_dir)   # futó szegmens → NŐ
-
-        # ── M15 jelzés-visszajátszás: feltétel 2 KÉK sávok + állapot-idővonal ──
-        # Az idővonal (irány + ablak + ATR M15 zárásonként) kell a feltétel 3
-        # M1 belépőihez: melyik M15 állapot volt aktív az adott M1 gyertyánál.
-        # Az M15 jelzési ablak minden NYITOTT szakaszára egy kék téglalap (az
-        # SMA-szalag felett) — így látszik, meddig tart az adott jelzés.
+        # ── Feltétel 1+2: per-gyertya SÁV-ÁLLAPOT (dedikált al-ablak) ──────────
+        # A stratégia gyertyánként EGY STATE-et ad (SMA-irány + M15 jelzési ablak);
+        # a TradeForgeBands al-ablak ezt színbufferbe tölti, három fix magasságú
+        # sávban: zöld/piros trend és kék M15-ablak. A szürke no-trade sávot a
+        # KÜLDŐ (live_trader) maszkolja rá — a stratégia az órákról nem tud —, ezért
+        # itt nincs ár-koordináta és nincs no-trade (a geometria az indikátoré).
+        #
+        # A jelzés-visszajátszás UGYANAZ a `check_m15_signal`, amivel a motor
+        # kereskedik. Az idővonal (tl_*) az M1 belépőkhöz is kell (feltétel 3):
+        # melyik M15 állapot volt aktív az adott M1 gyertyánál.
         state = PairState(md.symbol)
-        prev_open = False
-        win_open_i = None
         tl_t, tl_dir, tl_win, tl_atr = [], [], [], []
-
-        # A jelzés a M15 gyertya ZÁRÁSA UTÁN él (a motor az utolsó ZÁRT gyertyát
-        # használja) → a dobozt +1 gyertyányival eltoljuk, hogy az M1 belépők a
-        # doboz IDEJE ALÁ essenek (különben a belépő a doboz után „lógna").
-        def _emit_win(open_i: int, end_i_time: int):
-            objects.append(viz.Rect(
-                name=f"m15win_{times[open_i]}",
-                t1=times[open_i] + m15_sec, p1=blue_top,
-                t2=end_i_time + m15_sec,    p2=blue_bot,
-                color="blue", fill=True))
-
         for i in range(len(m15) - 1):      # csak ZÁRT M15 gyertyák
             s, w, c = smas[i], wprs15[i], closes[i]
             if math.isnan(s) or math.isnan(w):
@@ -436,14 +390,17 @@ class WprSmaStrategy(Strategy):
                                      wpr_m15=float(w), params=md.params)
             tl_t.append(times[i]); tl_dir.append(state.direction)
             tl_win.append(state.m15_window_open); tl_atr.append(atr15[i])
-            if state.m15_window_open and not prev_open:
-                win_open_i = i                                  # ablak nyílt
-            elif prev_open and not state.m15_window_open and win_open_i is not None:
-                _emit_win(win_open_i, times[i])                 # ablak zárult
-                win_open_i = None
-            prev_open = state.m15_window_open
-        if prev_open and win_open_i is not None:
-            _emit_win(win_open_i, times[-1])                    # még nyitva → NŐ
+
+        # A jelzés a M15 gyertya ZÁRÁSA UTÁN él (a motor az utolsó ZÁRT gyertyát
+        # használja) → a cellát +1 gyertyányival eltoljuk, hogy a sáv-csík a KÖVETKEZŐ
+        # gyertya alá essen: pont oda, ahol az M1 belépők is (azok szintén +m15_sec-hez
+        # igazodnak). Így a kék ablak-sáv és a belépő-vonalak egy oszlopba esnek.
+        for k in range(len(tl_t)):
+            d = tl_dir[k]
+            objects.append(viz.BarState(
+                t=tl_t[k] + m15_sec, notrade=0,
+                dir=1 if d == "BUY" else -1 if d == "SELL" else 0,
+                window=1 if tl_win[k] else 0))
 
         # ── Feltétel 3: M1 belépők + 6-gyertyás TP/SL ──────────────────────
         pip = md.params.get("pip_size", 0.0001)
