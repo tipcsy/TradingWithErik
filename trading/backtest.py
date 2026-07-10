@@ -301,6 +301,8 @@ def run_pair(
     allowed_hours: Optional[set] = None,
     risky: bool = False,
     rr: "dict | None" = None,
+    test_end: Optional[str] = None,
+    progress_callback=None,
 ) -> BacktestResult:
     # A jelzést/indikátorokat a STRATÉGIA adja (seam); a végrehajtás (SL/TP/
     # breakeven/trailing, slot, lot) a motoré. strategy=None → config szerinti.
@@ -340,6 +342,14 @@ def run_pair(
         m15 = m15[m15.index >= ts]
         m1  = m1[m1.index >= ts]
 
+    # Záró dátum (a B3 Backtest-ablak állítható időszakához; None → a hist. vége)
+    if test_end:
+        te = pd.Timestamp(test_end)
+        if m15.index.tzinfo is not None:
+            te = te.tz_localize("UTC")
+        m15 = m15[m15.index <= te]
+        m1  = m1[m1.index <= te]
+
     # Óra-szűrő: alapból MINDEN órát kereskedünk (az optimalizáló így teljes
     # óránkénti bontást ad, amiből a trade_hours kézzel dönthető el). Az
     # allowed_hours (ha adott) csak a preview-hoz szűr — a live óra-kapuja külön.
@@ -362,7 +372,29 @@ def run_pair(
 
     prev_m1_row = None
 
-    for m1_time, m1_row in m1.iterrows():
+    # ── Progressz-visszajelzés (B3 Backtest-ablak) ──────────────────────────
+    # Best-effort: időnként jelenti a haladást (%), az aktuális egyenleget, a
+    # nyitott/lezárt kötések számát és a ténylegesen alkalmazott rr-technikákat.
+    # progress_callback=None → nincs overhead (a meglévő hívók változatlanok).
+    total_m1 = len(m1)
+    _PROG_EVERY = 4096
+
+    def _report(i: int, m1_time):
+        if progress_callback is None:
+            return
+        from collections import Counter as _Counter
+        tech = dict(_Counter(getattr(t, "rr_technique", "") for t in result.trades
+                             if getattr(t, "rr_technique", "")))
+        try:
+            progress_callback((i + 1) / total_m1 if total_m1 else 1.0,
+                              m1_time, balance, len(open_trades),
+                              len(result.trades), tech)
+        except Exception:
+            pass
+
+    for i, (m1_time, m1_row) in enumerate(m1.iterrows()):
+        if progress_callback is not None and i % _PROG_EVERY == 0:
+            _report(i, m1_time)
         # Óra-szűrő (csak ha allowed_hours adott — preview; egyébként minden óra)
         hour = m1_time.hour
         if allowed_hours is not None and hour not in allowed_hours:
@@ -497,6 +529,10 @@ def run_pair(
     # Nyitva maradt pozíciók hozzáadása (nincs zárva)
     for trade in open_trades:
         result.trades.append(trade)
+
+    # Záró progressz (100%)
+    if progress_callback is not None and total_m1:
+        _report(total_m1 - 1, m1.index[-1])
 
     return result
 

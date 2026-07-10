@@ -302,7 +302,8 @@ class InstrumentParamsDialog:
                                    command=self._save)
         self._btn_save.pack(side="left", padx=6)
         self._btn_bt = tk.Button(btns, text="Backtest", bg=BTN_BT_BG, fg=BTN_BT_FG,
-                                 relief="flat", font=self._sf, command=self._run_backtest)
+                                 relief="flat", font=self._sf,
+                                 command=self._open_backtest_window)
         self._btn_bt.pack(side="left", padx=6)
         tk.Button(btns, text="Trials CSV", bg=BTN_BT_BG, fg=BTN_BT_FG, relief="flat",
                   font=self._sf, command=self._open_trials).pack(side="left", padx=6)
@@ -766,7 +767,32 @@ class InstrumentParamsDialog:
                 "runner_stop": self._runner_from_name(self._runner_name.get()),
                 "cautious": bool(self._cautious_var.get())}
 
-    # ── Backtest a jelenlegi paraméterekkel (Win/MaxDD/P&L + minősítés) ──────
+    # ── Backtest önálló ablak (progress + időszak + élő egyenleg) ────────────
+    def _open_backtest_window(self):
+        """A „Backtest" gomb a szabványos B3 ablakot nyitja (állítható időszak,
+        progress bar, élő egyenleg/kötések/technika). Az eredményt visszaadja ide
+        (metrika-sáv + a Mentés is látja)."""
+        params = self._collect_params()
+        if params is None:
+            return
+        pair_cfg = self.cfg.get("pairs", {}).get(self.symbol)
+        if not isinstance(pair_cfg, dict):
+            self.lbl_bt.config(text="Nincs pár-config ehhez az instrumentumhoz.",
+                               fg=FG_RED)
+            return
+        from dashboard.backtest_dialog import BacktestDialog
+        BacktestDialog(
+            self.popup, self.symbol, self.cfg, self.strategy, params, pair_cfg,
+            self._rr_spec_from_ui(), self._hf, self._sf,
+            on_result=self._on_bt_window_result,
+            preset_name=self._rr_name.get())
+
+    def _on_bt_window_result(self, summary):
+        """A Backtest-ablak végeredménye → a közös metrika-sávba + a Mentés forrása."""
+        self._bt_summary = summary
+        self._render_metrics(summary, "friss backtest")
+
+    # ── Backtest inline (a Mentés auto-útja: gyors, ablak nélkül) ────────────
     def _run_backtest(self):
         if self._bt_running:
             return
