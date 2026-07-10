@@ -480,6 +480,15 @@ class InstrumentParamsDialog:
             sel = [h for h in range(24) if hour_on[h]]
             pcfg = self.cfg.setdefault("pairs", {}).setdefault(self.symbol, {})
             pcfg["trade_hours"] = sel
+            # A live loop a KÖZÖS cfg dict-et nézi (state.pair_cfg ugyanez az objektum)
+            # → a fenti helyben-módosítás azonnal él. A chart-viz csak a következő
+            # ciklusban venné át; nullázzuk a viz-időzítőt, hogy AZONNAL újrarajzoljon
+            # az új órákkal (paritás a paraméter-mentéssel). Csak ha fut a live loop.
+            try:
+                from trading import live_trader as _lt
+                _lt._viz_last_write.pop(self.symbol, None)
+            except Exception:
+                pass
             try:
                 self._save_main_config()
                 hlbl.config(text=f"Mentve: {len(sel)} óra a config.json-ba.", fg=FG_GREEN)
