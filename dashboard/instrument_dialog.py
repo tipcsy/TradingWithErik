@@ -29,7 +29,7 @@ from datetime import datetime
 from dashboard.theme import (
     BG, BG_HEADER,
     FG_WHITE, FG_GREEN, FG_RED, FG_YELLOW, FG_GRAY, FG_GRAY_DIM,
-    BTN_PLAY_BG, BTN_PLAY_FG, BTN_OPT_BG, BTN_BT_BG, BTN_BT_FG,
+    BTN_PLAY_BG, BTN_PLAY_FG, BTN_BT_BG, BTN_BT_FG,
     BTN_DIS_BG, BTN_DIS_FG,
     color as sem_color,
 )
@@ -129,6 +129,9 @@ class InstrumentParamsDialog:
         # így a minősítés megjelenik a soron). None = még nem futott backtest.
         self._bt_summary = None
         self._bt_running = False
+        # Az egyetlen Mentés gomb új kombónál auto-backtestet futtat; ez a flag
+        # jelzi a _bt_done-nak, hogy a backtest UTÁN folytassa a mentést.
+        self._save_after_bt = False
 
         self._build()
 
@@ -184,38 +187,24 @@ class InstrumentParamsDialog:
 
         ts = (self.data or {}).get("test_summary", {})
 
-        # ── Fejléc: minősítés + metrikák, vagy „kézi" jelzés ────────────────
+        # ── EGYETLEN metrika-sáv ────────────────────────────────────────────
+        # Korábban UGYANAZ a metrika 3 helyen jelent meg (fejléc + sorszám-sor +
+        # backtest-sor), más-más sorrendben. Most EGY sáv, ami a PILLANATNYILAG
+        # betöltött paraméterkészletet tükrözi (mentett eredmény / #N trials-sor /
+        # friss backtest), egységes sorrendben: Trade · Win · MaxDD · P&L · PF.
+        self._grade_lbl = tk.Label(popup, bg=BG, font=self._hf, anchor="w")
+        self._grade_lbl.pack(anchor="w", padx=10, pady=(10, 0))
+        self._metrics_frame = tk.Frame(popup, bg=BG)
+        self._metrics_frame.pack(anchor="w", padx=10, pady=(0, 1))
+        self._src_lbl = tk.Label(popup, bg=BG, fg=FG_GRAY_DIM, font=self._sf,
+                                 anchor="w")
+        self._src_lbl.pack(anchor="w", padx=10, pady=(0, 4))
         if ts:
-            gtxt, gcol, greason = self.strategy.grade(ts, self.cfg)
-            mc = metric_colors(ts, self.cfg)
-            hdr = tk.Frame(popup, bg=BG)
-            hdr.pack(anchor="w", padx=10, pady=(10, 2))
-            tk.Label(hdr, text=f"Minősítés: {gtxt}", bg=BG, fg=sem_color(gcol),
-                     font=self._hf).pack(side="left")
-            if greason:
-                tk.Label(hdr, text=f"  ({greason})", bg=BG, fg=FG_GRAY,
-                         font=self._sf).pack(side="left")
-
-            metrics = tk.Frame(popup, bg=BG)
-            metrics.pack(anchor="w", padx=10, pady=(0, 4))
-
-            def _metric(label, value, color):
-                cell = tk.Frame(metrics, bg=BG)
-                cell.pack(side="left", padx=(0, 12))
-                tk.Label(cell, text=label, bg=BG, fg=FG_GRAY,
-                         font=self._sf).pack(side="left")
-                tk.Label(cell, text=value, bg=BG, fg=sem_color(color),
-                         font=self._sf).pack(side="left")
-            _metric("Trade ", str(ts.get("trades", 0)), "white")
-            _metric("P&L ", f"{ts.get('total_pnl',0):+.0f}$", mc.get("total_pnl", "white"))
-            _metric("Win ", f"{ts.get('win_rate',0)*100:.0f}%", mc.get("win_rate", "white"))
-            _metric("PF ", f"{ts.get('profit_factor',0):.2f}", mc.get("profit_factor", "white"))
-            _metric("MaxDD ", f"{ts.get('max_drawdown',0)*100:.1f}%", mc.get("max_drawdown", "white"))
+            self._render_metrics(ts, "mentett eredmény")
         else:
-            tk.Label(popup, text=("Nincs optimalizált eredmény — kézi/alap paraméterek. "
-                                  "A Mentés létrehozza a {}.json-t.".format(self.symbol)),
-                     bg=BG, fg=FG_GRAY, font=self._sf, justify="left",
-                     wraplength=560).pack(anchor="w", padx=10, pady=(10, 4))
+            self._render_metrics(
+                None, "nincs mentett eredmény — állíts be paramétert, a Mentés "
+                      "lefuttatja a backtestet és eltárolja")
 
         # ── Óra-rács (trade_hours) — a config.json-ba ment ──────────────────
         self._build_hours(popup, ts)
@@ -239,6 +228,9 @@ class InstrumentParamsDialog:
                          font=self._sf, insertbackground=FG_WHITE)
             e.insert(0, str(self._src[k]))
             e.grid(row=i, column=1, padx=6, pady=1)
+            # Kézi átírásnál a korábbi backtest-eredmény már nem érvényes → a Mentés
+            # (auto-backtest) újraszámol. A programozott betöltés (rank) nem KeyRelease.
+            e.bind("<KeyRelease>", lambda ev: self._invalidate_bt())
             self.entries[k] = e
 
         self.lbl_err = tk.Label(popup, text="", bg=BG, fg=FG_RED, font=self._sf)
@@ -298,21 +290,86 @@ class InstrumentParamsDialog:
         self.lbl_bt.pack(anchor="w", padx=10, pady=(0, 2))
 
         # ── Gombsor ─────────────────────────────────────────────────────────
+        # EGYETLEN Mentés: elmenti az órákat + a paramétereket (aktív készlet),
+        # és ha ez a paraméter-kombináció még nincs a trials CSV-ben, ODA IS
+        # beírja — kötelezően backtest-eredménnyel (ha nincs friss eredmény, a
+        # Mentés magától lefuttatja a backtestet, majd ment). A régi „Ment új
+        # sorszámként" így feleslegessé vált (a CSV-be írás automatikus).
         btns = tk.Frame(popup, bg=BG)
         btns.pack(pady=10)
-        tk.Button(btns, text="Mentés", bg=BTN_PLAY_BG, fg=BTN_PLAY_FG, relief="flat",
-                  font=self._sf, command=self._save).pack(side="left", padx=6)
+        self._btn_save = tk.Button(btns, text="Mentés", bg=BTN_PLAY_BG,
+                                   fg=BTN_PLAY_FG, relief="flat", font=self._sf,
+                                   command=self._save)
+        self._btn_save.pack(side="left", padx=6)
         self._btn_bt = tk.Button(btns, text="Backtest", bg=BTN_BT_BG, fg=BTN_BT_FG,
                                  relief="flat", font=self._sf, command=self._run_backtest)
         self._btn_bt.pack(side="left", padx=6)
-        if self._ranks:
-            tk.Button(btns, text="Ment új sorszámként", bg=BTN_OPT_BG, fg="#ffffff",
-                      relief="flat", font=self._sf,
-                      command=self._save_as_new_rank).pack(side="left", padx=6)
         tk.Button(btns, text="Trials CSV", bg=BTN_BT_BG, fg=BTN_BT_FG, relief="flat",
                   font=self._sf, command=self._open_trials).pack(side="left", padx=6)
         tk.Button(btns, text="Mégse", bg=BTN_DIS_BG, fg=BTN_DIS_FG, relief="flat",
                   font=self._sf, command=popup.destroy).pack(side="left", padx=6)
+
+    # ── EGYETLEN metrika-sáv renderelése ────────────────────────────────────
+    # (label, érték-formázó, metrika-kulcs vagy None). A None kulcs = fehér
+    # (semleges) szín; egyébként a metric_colors szemantikus színe.
+    _METRIC_ORDER = [
+        ("Trade ", lambda s: str(int(s.get("trades", 0))), None),
+        ("Win ",   lambda s: f"{s.get('win_rate', 0) * 100:.0f}%", "win_rate"),
+        ("MaxDD ", lambda s: f"{s.get('max_drawdown', 0) * 100:.1f}%", "max_drawdown"),
+        ("P&L ",   lambda s: f"{s.get('total_pnl', 0):+.0f}$", "total_pnl"),
+        ("PF ",    lambda s: (f"{s.get('profit_factor', 0):.2f}"
+                              if s.get('profit_factor', 0) != float('inf') else "∞"),
+         "profit_factor"),
+    ]
+
+    def _render_metrics(self, summary, source: str):
+        """A metrika-sáv frissítése a betöltött paraméterkészlet eredményével.
+
+        summary=None → nincs eredmény; trades==0 → 0-trade jelzés. `source` a
+        forrás rövid megnevezése (mentett / #N sor / friss backtest)."""
+        for w in self._metrics_frame.winfo_children():
+            w.destroy()
+        self._src_lbl.config(text=(f"forrás: {source}" if source else ""))
+        if not summary or summary.get("trades", 0) == 0:
+            self._grade_lbl.config(text="Minősítés: —", fg=FG_GRAY)
+            if summary is not None and summary.get("trades", 0) == 0:
+                tk.Label(self._metrics_frame, text="0 trade ezen a paraméterezésen",
+                         bg=BG, fg=FG_YELLOW, font=self._sf).pack(side="left")
+            return
+        gtxt, gcol, greason = self.strategy.grade(summary, self.cfg)
+        self._grade_lbl.config(
+            text=f"Minősítés: {gtxt}" + (f"   ({greason})" if greason else ""),
+            fg=sem_color(gcol))
+        mc = metric_colors(summary, self.cfg)
+        for label, fn, key in self._METRIC_ORDER:
+            color = "white" if key is None else mc.get(key, "white")
+            cell = tk.Frame(self._metrics_frame, bg=BG)
+            cell.pack(side="left", padx=(0, 12))
+            tk.Label(cell, text=label, bg=BG, fg=FG_GRAY,
+                     font=self._sf).pack(side="left")
+            tk.Label(cell, text=fn(summary), bg=BG, fg=sem_color(color),
+                     font=self._sf).pack(side="left")
+
+    def _summary_from_row(self, row: dict):
+        """Egy trials-CSV sorból metrika-összegzés a minősítéshez/megjelenítéshez.
+        None, ha a sorban nincs értelmezhető backtest-eredmény."""
+        summ = {
+            "trades":        int(_num(row.get("trades")) or 0),
+            "total_pnl":     _num(row.get("total_pnl")) or 0.0,
+            "win_rate":      _num(row.get("win_rate")) or 0.0,
+            "profit_factor": _num(row.get("profit_factor")) or 0.0,
+            "max_drawdown":  _num(row.get("max_drawdown")) or 0.0,
+        }
+        if summ["trades"] == 0 and not any(row.get(c) for c in ("win_rate", "total_pnl")):
+            return None
+        return summ
+
+    def _invalidate_bt(self):
+        """Kézi paraméter-átírásnál a friss backtest-eredmény elavul."""
+        if self._bt_summary is not None:
+            self._bt_summary = None
+            self._render_metrics(
+                None, "paraméter módosítva — a Mentés lefuttatja a backtestet")
 
     # ── Sorszám-választó (minőségi rangsor) ─────────────────────────────────
     def _build_rank_selector(self, popup):
@@ -385,37 +442,26 @@ class InstrumentParamsDialog:
             if k in row:
                 e.delete(0, "end")
                 e.insert(0, self._fmt_param(k, row[k]))
-        self._show_rank_metrics(rank, row)
-
-    def _show_rank_metrics(self, rank: int, row: dict):
-        summ = {
-            "trades":        _num(row.get("trades")) or 0,
-            "total_pnl":     _num(row.get("total_pnl")) or 0.0,
-            "win_rate":      _num(row.get("win_rate")) or 0.0,
-            "profit_factor": _num(row.get("profit_factor")) or 0.0,
-            "max_drawdown":  _num(row.get("max_drawdown")) or 0.0,
-        }
+        # Betöltéskor a korábbi friss backtest már nem erre a készletre vonatkozik.
+        self._bt_summary = None
         note = (row.get("note") or "").strip()
-        if summ["trades"] == 0 and not any(row.get(c) for c in
-                                           ("win_rate", "total_pnl")):
-            txt = f"#{rank}: nincs backtest-metrika" + (f" — {note}" if note else "")
-            self.lbl_rank.config(text=txt, fg=FG_GRAY)
-            return
-        txt = (f"#{rank}  Win {summ['win_rate']*100:.0f}%   "
-               f"MaxDD {summ['max_drawdown']*100:.1f}%   "
-               f"P&L {summ['total_pnl']:+.0f}$   "
-               f"Trade {int(summ['trades'])}   "
-               f"PF {summ['profit_factor']:.2f}")
-        if note:
-            txt += f"   ({note})"
-        self.lbl_rank.config(text=txt, fg=FG_WHITE)
+        summ = self._summary_from_row(row)
+        if summ is None:
+            self._render_metrics(None, f"#{rank} sor — nincs mentett metrika")
+            self.lbl_rank.config(
+                text=f"#{rank} betöltve" + (f" ({note})" if note else "")
+                     + " — nincs mentett metrika.", fg=FG_GRAY)
+        else:
+            src = f"#{rank} sor (trials CSV)" + (f", {note}" if note else "")
+            self._render_metrics(summ, src)
+            self.lbl_rank.config(text=f"#{rank} betöltve.", fg=FG_GRAY)
 
     # ── Óra-rács (trade_hours) ──────────────────────────────────────────────
     def _build_hours(self, popup, ts):
         """A live óra-kapuja a config.json pairs.<SYM>.trade_hours listáját nézi.
         Az óránkénti P&L (az optimalizált test_summary-ből) segít eldönteni, mely
-        órákat vegyük ki. Auto-javasol = a mínuszos órákat kiveszi. A config.json-
-        ba ment (NEM az optimalizált JSON-ba)."""
+        órákat vegyük ki (a mínuszosakat kézzel kikattintva). A bepipált órákat az
+        EGYETLEN Mentés gomb menti a config.json-ba (NEM az optimalizált JSON-ba)."""
         params = self._src
         hp_raw = (ts or {}).get("hourly_pnl", {})
         hourly = {}
@@ -478,43 +524,10 @@ class InstrumentParamsDialog:
                          font=("Courier New", 7)).pack()
                 tk.Label(colf, text="", bg=BG, font=("Courier New", 7)).pack()
 
-        hbtns = tk.Frame(popup, bg=BG)
-        hbtns.pack(anchor="w", padx=10, pady=(0, 6))
-        hlbl = tk.Label(hbtns, text="", bg=BG, fg=FG_GREEN, font=self._sf)
-
-        def auto_suggest():
-            for _h in range(24):
-                _bb = hourly.get(_h)
-                if _bb is not None:
-                    hour_on[_h] = (_bb.get("pnl", 0.0) >= 0)
-                    _paint(_h)
-            hlbl.config(text="Javaslat betöltve — felülbírálható, majd Órák mentése.",
-                        fg=FG_GRAY)
-
-        def save_hours():
-            sel = [h for h in range(24) if hour_on[h]]
-            pcfg = self.cfg.setdefault("pairs", {}).setdefault(self.symbol, {})
-            pcfg["trade_hours"] = sel
-            # A live loop a KÖZÖS cfg dict-et nézi (state.pair_cfg ugyanez az objektum)
-            # → a fenti helyben-módosítás azonnal él. A chart-viz csak a következő
-            # ciklusban venné át; nullázzuk a viz-időzítőt, hogy AZONNAL újrarajzoljon
-            # az új órákkal (paritás a paraméter-mentéssel). Csak ha fut a live loop.
-            try:
-                from trading import live_trader as _lt
-                _lt._viz_last_write.pop(self.symbol, None)
-            except Exception:
-                pass
-            try:
-                self._save_main_config()
-                hlbl.config(text=f"Mentve: {len(sel)} óra a config.json-ba.", fg=FG_GREEN)
-            except Exception as ex:
-                hlbl.config(text=f"Mentési hiba: {ex}", fg=FG_RED)
-
-        tk.Button(hbtns, text="Auto-javasol", font=self._sf, bg=BTN_OPT_BG,
-                  fg="#ffffff", relief="flat", command=auto_suggest).pack(side="left", padx=(0, 6))
-        tk.Button(hbtns, text="Órák mentése", font=self._sf, bg=BTN_PLAY_BG,
-                  fg="#1e1e2e", relief="flat", command=save_hours).pack(side="left", padx=(0, 6))
-        hlbl.pack(side="left", padx=6)
+        # Az óraállapotot az EGYETLEN Mentés gomb olvassa ki és menti (nincs külön
+        # „Órák mentése" gomb). Az „Auto-javasol" is elmaradt: az óránkénti P&L jól
+        # látható a rácsban, így a mínuszos órák kézzel kikattinthatók.
+        self._hour_on = hour_on
 
     # ── Mentés ──────────────────────────────────────────────────────────────
     def _collect_params(self):
@@ -573,51 +586,81 @@ class InstrumentParamsDialog:
             pass
         return True
 
-    def _save(self):
-        new_params = self._collect_params()
-        if new_params is None:
-            return
-        if self._write_json(new_params):
-            self.popup.destroy()
-
-    def _save_as_new_rank(self):
-        """A jelenlegi (kézzel átírt) paraméter-készlet mentése ÚJ sorszámként a
-        trials CSV-be (501…) + a JSON-ba, hogy később visszatölthető legyen."""
-        new_params = self._collect_params()
-        if new_params is None:
-            return
-        # Duplikátum-ellenőrzés: ne mentsük ugyanazt a kombinációt új sorszámra.
-        dup = self._find_matching_rank(new_params)
-        if dup is not None:
-            self.lbl_err.config(
-                text=f"Ez a paraméter-kombináció már a #{dup} sorszámon mentve van "
-                     f"— nem mentem újra.", fg=FG_YELLOW)
-            self.rank_var.set(str(dup))
-            self._load_rank(dup)
-            return
-        new_rank = _MANUAL_RANK_BASE
-        while new_rank in self._rank_rows:
-            new_rank += 1
+    def _save_hours(self) -> int:
+        """A bepipált órák mentése a config.json pairs.<SYM>.trade_hours-ba.
+        (A `trade_hours` stratégia-fájlba emelése külön lépés — B0.) Visszaadja a
+        kiválasztott órák számát."""
+        sel = [h for h in range(24) if self._hour_on.get(h)]
+        pcfg = self.cfg.setdefault("pairs", {}).setdefault(self.symbol, {})
+        pcfg["trade_hours"] = sel
+        # A live loop a KÖZÖS cfg dict-et nézi → a helyben-módosítás azonnal él. A
+        # chart-viz csak a következő ciklusban venné át; nullázzuk a viz-időzítőt,
+        # hogy AZONNAL az új órákkal rajzoljon. Csak ha fut a live loop.
         try:
-            self._append_manual_trial(new_rank, new_params)
-        except Exception as ex:
-            self.lbl_err.config(text=f"CSV-mentési hiba: {ex}")
-            return
-        if not self._write_json(new_params, extra={"manual_rank": new_rank}):
-            return
-        # In-memory frissítés → azonnal visszatölthető, a nyilak elérik.
-        rec = {k: str(v) for k, v in new_params.items()}
-        rec.update({"rank": str(new_rank), "note": "manual"})
-        self._rank_rows[new_rank] = rec
-        self._ranks = sorted(self._rank_rows)
-        self.rank_var.set(str(new_rank))
-        if self.lbl_rank is not None:
-            self.lbl_rank.config(
-                text=f"Elmentve új sorszámként: #{new_rank} (kézi).", fg=FG_GREEN)
-        self.lbl_err.config(text="")
+            from trading import live_trader as _lt
+            _lt._viz_last_write.pop(self.symbol, None)
+        except Exception:
+            pass
+        self._save_main_config()
+        return len(sel)
 
-    def _append_manual_trial(self, rank: int, params: dict):
-        """Egy kézi paraméter-sor hozzáfűzése a trials CSV-hez, `rank` oszloppal.
+    def _save(self):
+        """EGYETLEN Mentés: órák + paraméterek (aktív készlet) + trials CSV (ha a
+        kombó még nincs benne), KÖTELEZŐEN backtest-eredménnyel. Ha új a kombó és
+        nincs friss eredmény → előbb lefuttatja a backtestet (a _bt_done folytatja
+        a mentést); egyébként azonnal ír."""
+        params = self._collect_params()
+        if params is None:
+            return
+        dup = self._find_matching_rank(params) if self._rank_rows else None
+        if dup is None and self._bt_summary is None:
+            # Új kombó, nincs eredmény → kötelező backtest, utána _persist.
+            self._save_after_bt = True
+            self.lbl_err.config(text="")
+            self._run_backtest()
+            return
+        self._persist(params, dup)
+
+    def _persist(self, params: dict, dup):
+        """A tényleges kiírás: órák + JSON (aktív készlet) + trials CSV (ha új kombó
+        és van érdemi eredmény). `dup` = a megegyező sorszám vagy None."""
+        try:
+            self._save_hours()
+        except Exception as ex:
+            self.lbl_err.config(text=f"Óra-mentési hiba: {ex}", fg=FG_RED)
+            return
+        # A JSON test_summary: friss backtest, vagy a megegyező sor mentett metrikái.
+        if self._bt_summary is None and dup is not None:
+            self._bt_summary = self._summary_from_row(self._rank_rows.get(dup, {}))
+        extra = None
+        has_result = bool(self._bt_summary) and self._bt_summary.get("trades", 0) > 0
+        if dup is None and has_result:
+            # Új kombó → felvesszük a trials CSV-be (eredménnyel), hogy visszatölthető.
+            new_rank = _MANUAL_RANK_BASE
+            while new_rank in self._rank_rows:
+                new_rank += 1
+            try:
+                self._append_manual_trial(new_rank, params, self._bt_summary)
+            except Exception as ex:
+                self.lbl_err.config(text=f"CSV-mentési hiba: {ex}", fg=FG_RED)
+                return
+            rec = {k: str(v) for k, v in params.items()}
+            rec.update({"rank": str(new_rank), "note": "manual"})
+            for mk in ("trades", "win_rate", "total_pnl", "profit_factor", "max_drawdown"):
+                rec[mk] = str(self._bt_summary.get(mk, ""))
+            self._rank_rows[new_rank] = rec
+            self._ranks = sorted(self._rank_rows)
+            extra = {"manual_rank": new_rank}
+        if not self._write_json(params, extra=extra):
+            return
+        self.popup.destroy()
+
+    _METRIC_SAVE_COLS = ("trades", "win_rate", "total_pnl", "profit_factor",
+                         "max_drawdown")
+
+    def _append_manual_trial(self, rank: int, params: dict, summary: dict | None = None):
+        """Egy kézi paraméter-sor hozzáfűzése a trials CSV-hez, `rank` oszloppal +
+        (ha van) a backtest-eredmény metrika-oszlopaival.
 
         pandas-szal olvassuk/írjuk vissza (magyar ';'+','), így ha a régi CSV-ben
         még nincs `rank` oszlop, most bekerül (a sor pozíciója szerint 1…N)."""
@@ -627,6 +670,11 @@ class InstrumentParamsDialog:
                              encoding="utf-8-sig")
         else:
             df = pd.DataFrame()
+        if df.empty:
+            # Nincs még CSV → fejléc a paraméterekből + metrikákból, hogy az érték
+            # tényleg elmentődjön (üres df-nél nem lenne oszlop, amibe írjunk).
+            cols = ["rank"] + list(params.keys()) + list(self._METRIC_SAVE_COLS) + ["note"]
+            df = pd.DataFrame(columns=cols)
         if "rank" not in df.columns:
             df.insert(0, "rank", range(1, len(df) + 1))
         row = {c: "" for c in df.columns}
@@ -638,7 +686,12 @@ class InstrumentParamsDialog:
                 row[k] = v
             # Ha a paraméter-oszlop hiányzik a CSV-ből, kihagyjuk (ne torzítsuk
             # a fejlécet — a betöltés úgyis csak a meglévő oszlopokat használja).
-        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        if summary:
+            for mk in self._METRIC_SAVE_COLS:
+                if mk in df.columns:
+                    row[mk] = summary.get(mk, "")
+        new_df = pd.DataFrame([row], columns=list(df.columns))
+        df = new_df if len(df) == 0 else pd.concat([df, new_df], ignore_index=True)
         df.to_csv(self.trials_csv, sep=";", decimal=",", index=False,
                   encoding="utf-8-sig")
 
@@ -727,8 +780,14 @@ class InstrumentParamsDialog:
         self._bt_running = True
         rr_spec = self._rr_spec_from_ui()          # a választott preset (vagy None)
         self._btn_bt.config(text="Backtest fut…", state="disabled")
+        # Futás alatt a Mentés is tiltva (az auto-mentés amúgy is a végén folytatódik).
+        try:
+            self._btn_save.config(state="disabled")
+        except Exception:
+            pass
         _pname = self._rr_name.get()
-        self.lbl_bt.config(text=f"Backtest fut (teljes hist., {_pname}) — kis türelmet…",
+        _saving = " — mentés a végén" if self._save_after_bt else ""
+        self.lbl_bt.config(text=f"Backtest fut (teljes hist., {_pname}){_saving} — kis türelmet…",
                            fg=FG_GRAY)
 
         def work():
@@ -763,32 +822,29 @@ class InstrumentParamsDialog:
         self._bt_running = False
         try:
             self._btn_bt.config(text="Backtest", state="normal")
+            self._btn_save.config(state="normal")
         except Exception:
             return   # a popup közben bezárult
+        # Volt-e függő (auto-)mentés? Elfogyasztjuk, majd a végén folytatjuk.
+        pending = self._save_after_bt
+        self._save_after_bt = False
         if err:
             self.lbl_bt.config(text=f"Backtest hiba: {err}", fg=FG_RED)
+            self._render_metrics(None, "backtest hiba")
             return
-        if not summary or summary.get("trades", 0) == 0:
-            self._bt_summary = summary or {"trades": 0}
-            self.lbl_bt.config(text="Backtest: 0 trade ezen a paraméterezésen.",
-                               fg=FG_YELLOW)
-            return
-        self._bt_summary = summary
-        gtxt, gcol, greason = self.strategy.grade(summary, self.cfg)
-        pf = summary.get("profit_factor", 0.0)
-        pf_s = f"{pf:.2f}" if pf != float("inf") else "∞"
-        # Ténylegesen alkalmazott technikák (a lot-létra degradálása látszik).
-        # pop → ne kerüljön a mentett test_summary-be.
-        tech = summary.pop("_rr_tech", None) or {}
+        # A metrikák a KÖZÖS sávba kerülnek (nincs külön backtest-metrikasor). Az
+        # lbl_bt már csak a ténylegesen alkalmazott kockázati technikát mutatja.
+        tech = (summary or {}).pop("_rr_tech", None) or {}
         _names = {"shield": "Pajzs", "halving": "Felező", "risky": "Risky"}
-        tech_s = ("   |   technika: " +
-                  ", ".join(f"{_names.get(k, k)}×{v}" for k, v in tech.items())) if tech else ""
+        tech_s = (", ".join(f"{_names.get(k, k)}×{v}" for k, v in tech.items())) if tech else ""
+        self._bt_summary = summary or {"trades": 0}
+        self._render_metrics(self._bt_summary, "friss backtest")
         self.lbl_bt.config(
-            text=(f"Backtest (teljes hist.) — Minősítés: {gtxt}"
-                  + (f" ({greason})" if greason else "")
-                  + f"   |   Trade {summary.get('trades',0)}"
-                    f"   Win {summary.get('win_rate',0)*100:.0f}%"
-                    f"   MaxDD {summary.get('max_drawdown',0)*100:.1f}%"
-                    f"   P&L {summary.get('total_pnl',0):+.0f}$"
-                    f"   PF {pf_s}" + tech_s),
-            fg=sem_color(gcol))
+            text=(f"Ténylegesen alkalmazott technika: {tech_s}" if tech_s else ""),
+            fg=FG_GRAY_DIM)
+        if pending:
+            # Auto-mentés folytatása: a friss eredménnyel most már perzisztálunk.
+            params = self._collect_params()
+            if params is not None:
+                dup = self._find_matching_rank(params) if self._rank_rows else None
+                self._persist(params, dup)
