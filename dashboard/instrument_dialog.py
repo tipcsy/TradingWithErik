@@ -100,8 +100,23 @@ class InstrumentParamsDialog:
         self.is_new = self.data is None
         params = (self.data or {}).get("params", {})
 
-        # A megjelenített/menthető paraméter-forrás: optimalizált, vagy alap.
-        self._src   = dict(params) if params else default_params(cfg, strategy)
+        # A megjelenített/menthető paraméter-forrás: optimalizált JSON, vagy alap.
+        # A (esetleg RÉGI sémájú) JSON-t a JELENLEGI sémához igazítjuk: a hiányzó ÚJ
+        # kulcsokat kiegészítjük (alapérték), a meglévőket megtartjuk — így az új
+        # paraméterek akkor is megjelennek/menthetők, ha a pár még nincs újraoptimali-
+        # zálva. Migráció: a régi közös wpr_m15_trigger értékét átvisszük a külön
+        # BUY/SELL triggerbe (a stratégiánál külön paraméter lett).
+        if params:
+            src = dict(params)
+            if "wpr_m15_trigger" in src:
+                _old = src.pop("wpr_m15_trigger")
+                src.setdefault("wpr_m15_sell_trigger", _old)
+                src.setdefault("wpr_m15_buy_trigger",  _old)
+            for _k, _v in default_params(cfg, strategy).items():
+                src.setdefault(_k, _v)
+            self._src = src
+        else:
+            self._src = default_params(cfg, strategy)
         self._keys  = sorted(k for k in self._src if not k.startswith("_"))
         # Típus-minta a mentéskori konverzióhoz (int/float/bool/str)
         self._types = {k: self._src[k] for k in self._keys}
