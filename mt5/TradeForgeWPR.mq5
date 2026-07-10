@@ -38,8 +38,10 @@ int OnInit()
 
    // Jelentős szintek — az indikátor SAJÁT szint-vonalai (állítható). Csak a valós
    // (negatív) szintek számítanak; a 0/pozitív érték „nincs" (pl. M1-nél a 4.).
-   // A SORREND: extrém, trigger(ek), extrém → a SZÉLSŐ kettő (extrém) szürke, a
-   // BELSŐK (trigger) narancsak.
+   // A SORREND (Python): extrém, trigger(ek), extrém. A SZÉLSŐ kettő (extrém)
+   // szürke PONTOZOTT; a belső trigger(ek) SZAGGATOTTak:
+   //   • 4 szint (M15): [_, SELL trigger (PIROS), BUY trigger (ZÖLD), _]
+   //   • 3 szint (M1): egyetlen trigger (NARANCS)
    double lv[4] = {InpLvl1, InpLvl2, InpLvl3, InpLvl4};
    int cnt = 0;
    for(int i = 0; i < 4; i++)
@@ -50,8 +52,19 @@ int OnInit()
    {
       if(lv[i] >= 0.0) continue;
       IndicatorSetDouble(INDICATOR_LEVELVALUE, j, lv[i]);
-      IndicatorSetInteger(INDICATOR_LEVELSTYLE, j, STYLE_DOT);
-      IndicatorSetInteger(INDICATOR_LEVELCOLOR, j, (j == 0 || j == cnt - 1) ? clrGray : clrOrange);
+      bool  is_extreme = (j == 0 || j == cnt - 1);
+      color lc = clrGray;
+      int   ls = STYLE_DOT;
+      if(!is_extreme)
+      {
+         ls = STYLE_DASH;                                   // trigger → szaggatott
+         if(cnt == 4)
+            lc = (j == 1) ? clrRed : clrGreen;             // SELL trigger piros / BUY trigger zöld
+         else
+            lc = clrOrange;                                 // M1: egyetlen trigger
+      }
+      IndicatorSetInteger(INDICATOR_LEVELSTYLE, j, ls);
+      IndicatorSetInteger(INDICATOR_LEVELCOLOR, j, lc);
       j++;
    }
    return(INIT_SUCCEEDED);
