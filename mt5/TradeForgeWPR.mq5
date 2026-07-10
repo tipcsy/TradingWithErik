@@ -17,9 +17,10 @@
 
 input int    InpPeriod = 14;         // WPR periódus
 input color  InpColor  = clrBlack;   // vonalszín
-input double InpLvl1   = -20;        // szint 1 (sell extrém)
+input double InpLvl1   = -20;        // szint 1 (felső extrém)
 input double InpLvl2   = -50;        // szint 2 (trigger)
-input double InpLvl3   = -80;        // szint 3 (buy extrém)
+input double InpLvl3   = -80;        // szint 3 (alsó extrém / M1)
+input double InpLvl4   = 0;          // szint 4 (opcionális; 0/pozitív = nincs)
 
 double WprBuf[];
 
@@ -35,14 +36,23 @@ int OnInit()
    PlotIndexSetInteger(0, PLOT_LINE_WIDTH, 1);
    PlotIndexSetString(0, PLOT_LABEL, "%R(" + (string)InpPeriod + ")");
 
-   // Jelentős szintek — az indikátor SAJÁT szint-vonalai (állítható).
-   IndicatorSetInteger(INDICATOR_LEVELS, 3);
-   double lv[3] = {InpLvl1, InpLvl2, InpLvl3};
-   for(int i = 0; i < 3; i++)
+   // Jelentős szintek — az indikátor SAJÁT szint-vonalai (állítható). Csak a valós
+   // (negatív) szintek számítanak; a 0/pozitív érték „nincs" (pl. M1-nél a 4.).
+   // A SORREND: extrém, trigger(ek), extrém → a SZÉLSŐ kettő (extrém) szürke, a
+   // BELSŐK (trigger) narancsak.
+   double lv[4] = {InpLvl1, InpLvl2, InpLvl3, InpLvl4};
+   int cnt = 0;
+   for(int i = 0; i < 4; i++)
+      if(lv[i] < 0.0) cnt++;
+   IndicatorSetInteger(INDICATOR_LEVELS, cnt);
+   int j = 0;
+   for(int i = 0; i < 4; i++)
    {
-      IndicatorSetDouble(INDICATOR_LEVELVALUE, i, lv[i]);
-      IndicatorSetInteger(INDICATOR_LEVELSTYLE, i, STYLE_DOT);
-      IndicatorSetInteger(INDICATOR_LEVELCOLOR, i, (i == 1) ? clrOrange : clrGray);
+      if(lv[i] >= 0.0) continue;
+      IndicatorSetDouble(INDICATOR_LEVELVALUE, j, lv[i]);
+      IndicatorSetInteger(INDICATOR_LEVELSTYLE, j, STYLE_DOT);
+      IndicatorSetInteger(INDICATOR_LEVELCOLOR, j, (j == 0 || j == cnt - 1) ? clrGray : clrOrange);
+      j++;
    }
    return(INIT_SUCCEEDED);
 }

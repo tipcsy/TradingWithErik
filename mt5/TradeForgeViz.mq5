@@ -372,7 +372,8 @@ void SetupIndicators(string &inds[], int cnt)
          double l1  = (n > 5) ? StringToDouble(f[5]) : -20.0;
          double l2  = (n > 6) ? StringToDouble(f[6]) : -50.0;
          double l3  = (n > 7) ? StringToDouble(f[7]) : -80.0;
-         int hnd = iCustom(_Symbol, tf, "TradeForgeWPR", period, clr, l1, l2, l3);
+         double l4  = (n > 8) ? StringToDouble(f[8]) : 0.0;   // opcionális 4. szint (M15: 2 trigger)
+         int hnd = iCustom(_Symbol, tf, "TradeForgeWPR", period, clr, l1, l2, l3, l4);
          if(hnd == INVALID_HANDLE)
             continue;
          int win = (int)ChartGetInteger(0, CHART_WINDOWS_TOTAL);   // új al-ablak

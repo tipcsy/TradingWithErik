@@ -1,15 +1,28 @@
 """
-Jelzés detektálás logika:
+Jelzés detektálás logika.
 
-SELL:
-  1. M15: close < SMA  (árfolyam SMA alatt)
-  2. M15: WPR indult <= sell_extreme, majd átütötte a trigger szintet lefelé
-     → jelzési ablak nyílik
-  3. M1: WPR volt >= m1_sell_extreme, majd zárt <= m1_trigger
-     → SELL belépési jel
-  4. Jelzési ablak zárul, ha M15 WPR visszamegy >= trigger fölé
+M15 „jó zóna" (jelzési ablak) — a WPR_SMA Stratégia jegyzet szerint:
 
-BUY: tükörképe a SELL-nek.
+SELL (close < SMA):
+  • NYÍLIK: a WPR a felső extrémből (>= sell_extreme, pl. -20) indul és LEFELÉ
+    átüti a SELL triggert (<= sell_trigger, pl. -50) → jó zóna ON.
+  • ZÁRUL két módon:
+      1. érvénytelenítés — a WPR VISSZAMEGY a kiinduló (felső) extrémbe
+         (>= sell_extreme);
+      2. kifutás — a WPR eléri a MÁSIK (alsó) extrémet (<= buy_extreme), majd
+         visszajön és FELFELÉ átüti a triggert (>= sell_trigger).
+    FONTOS: a trigger puszta visszaütése önmagában NEM zár (a régi logikával
+    ellentétben) — csak ha előbb elértük az alsó extrémet, vagy visszaértünk a
+    felső extrémbe.
+
+BUY (close > SMA): tükörkép — alsó extrémből (<= buy_extreme) FELFELÉ átüti a BUY
+  triggert (>= buy_trigger); zárul, ha vissza az alsó extrémbe, vagy a felső
+  extrém után lefelé átüti a triggert.
+
+A BUY és SELL trigger KÜLÖN paraméter (wpr_m15_buy_trigger / wpr_m15_sell_trigger;
+visszafelé kompatibilis fallback a régi közös wpr_m15_trigger-re).
+
+M1 belépő (VÁLTOZATLAN): ha a jó zóna nyitva, a WPR az M1 extrémből a triggerbe zár.
 """
 
 from dataclasses import dataclass, field
@@ -21,9 +34,10 @@ Direction = Literal["BUY", "SELL", "NONE"]
 @dataclass
 class PairState:
     symbol: str
-    direction: Direction = "NONE"   # SMA alapú trend irány
-    m15_window_open: bool = False   # Aktív M15 jelzési ablak
-    m15_extreme_seen: bool = False  # Volt-e már extrém zónában az M15 WPR
+    direction: Direction = "NONE"    # SMA alapú trend irány
+    m15_window_open: bool = False    # Aktív M15 jelzési ablak (jó zóna)
+    m15_extreme_seen: bool = False   # A KIINDULÓ extrémben volt-e (felfegyverzés)
+    m15_opposite_seen: bool = False  # A jó zónában elérte-e a MÁSIK extrémet (kifutás)
 
 
 def check_m15_signal(
@@ -34,51 +48,73 @@ def check_m15_signal(
     params: dict,
 ) -> PairState:
     """
-    M15 gyertya zárásakor hívandó.
-    Frissíti a trend irányt és a jelzési ablakot.
+    M15 gyertya zárásakor hívandó. Frissíti a trend irányt és a „jó zóna" (jelzési
+    ablak) állapotgépét a modul-docstringben leírt szabályok szerint.
     """
-    sell_extreme = params["wpr_m15_sell_extreme"]   # pl. -20
-    buy_extreme  = params["wpr_m15_buy_extreme"]    # pl. -80
-    trigger      = params["wpr_m15_trigger"]        # pl. -50
+    sell_extreme = params["wpr_m15_sell_extreme"]          # felső extrém (pl. -20)
+    buy_extreme  = params["wpr_m15_buy_extreme"]           # alsó extrém (pl. -80)
+    _trig        = params.get("wpr_m15_trigger", -50)      # régi közös (fallback)
+    sell_trigger = params.get("wpr_m15_sell_trigger", _trig)
+    buy_trigger  = params.get("wpr_m15_buy_trigger",  _trig)
 
     # Trend irány az SMA alapján
     if close < sma:
-        state.direction = "SELL"
+        new_dir = "SELL"
     elif close > sma:
-        state.direction = "BUY"
+        new_dir = "BUY"
     else:
-        state.direction = "NONE"
+        new_dir = "NONE"
 
-    if state.direction == "SELL":
-        # Extrém zóna elérése (WPR >= sell_extreme, pl. -20)
+    # Irányváltáskor a jó zóna nullázódik (egy zóna egy irányhoz tartozik).
+    if new_dir != state.direction:
+        state.m15_window_open = False
+        state.m15_extreme_seen = False
+        state.m15_opposite_seen = False
+    state.direction = new_dir
+
+    if new_dir == "SELL":
+        # (a) kiinduló (felső) extrém: felfegyverez; nyitott zónát ÉRVÉNYTELENÍT (1.)
         if wpr_m15 >= sell_extreme:
             state.m15_extreme_seen = True
-
-        if state.m15_extreme_seen:
-            if wpr_m15 <= trigger:
-                # WPR átütötte a triggert lefelé → ablak nyílik
-                state.m15_window_open = True
-            elif wpr_m15 >= trigger and state.m15_window_open:
-                # WPR visszament trigger fölé → ablak zárul
+            if state.m15_window_open:
                 state.m15_window_open = False
-                state.m15_extreme_seen = False
+                state.m15_opposite_seen = False
+        # (b) másik (alsó) extrém elérése a nyitott zónában
+        if state.m15_window_open and wpr_m15 <= buy_extreme:
+            state.m15_opposite_seen = True
+        # (c) KIFUTÁS (2.): alsó extrém után a trigger FELFELÉ visszaütése
+        if state.m15_window_open and state.m15_opposite_seen and wpr_m15 >= sell_trigger:
+            state.m15_window_open = False
+            state.m15_extreme_seen = False
+            state.m15_opposite_seen = False
+        # (d) NYITÁS: felfegyverzett + a trigger LEFELÉ átütése
+        if (not state.m15_window_open) and state.m15_extreme_seen and wpr_m15 <= sell_trigger:
+            state.m15_window_open = True
+            state.m15_opposite_seen = False
 
-    elif state.direction == "BUY":
-        # Extrém zóna elérése (WPR <= buy_extreme, pl. -80)
+    elif new_dir == "BUY":
+        # (a) kiinduló (alsó) extrém: felfegyverez; nyitott zónát ÉRVÉNYTELENÍT (1.)
         if wpr_m15 <= buy_extreme:
             state.m15_extreme_seen = True
-
-        if state.m15_extreme_seen:
-            if wpr_m15 >= trigger:
-                # WPR átütötte a triggert felfelé → ablak nyílik
-                state.m15_window_open = True
-            elif wpr_m15 <= trigger and state.m15_window_open:
-                # WPR visszament trigger alá → ablak zárul
+            if state.m15_window_open:
                 state.m15_window_open = False
-                state.m15_extreme_seen = False
+                state.m15_opposite_seen = False
+        # (b) másik (felső) extrém elérése a nyitott zónában
+        if state.m15_window_open and wpr_m15 >= sell_extreme:
+            state.m15_opposite_seen = True
+        # (c) KIFUTÁS (2.): felső extrém után a trigger LEFELÉ visszaütése
+        if state.m15_window_open and state.m15_opposite_seen and wpr_m15 <= buy_trigger:
+            state.m15_window_open = False
+            state.m15_extreme_seen = False
+            state.m15_opposite_seen = False
+        # (d) NYITÁS: felfegyverzett + a trigger FELFELÉ átütése
+        if (not state.m15_window_open) and state.m15_extreme_seen and wpr_m15 >= buy_trigger:
+            state.m15_window_open = True
+            state.m15_opposite_seen = False
     else:
         state.m15_window_open = False
         state.m15_extreme_seen = False
+        state.m15_opposite_seen = False
 
     return state
 

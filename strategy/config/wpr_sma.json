@@ -20,7 +20,8 @@
     "_comment_levels": "WPR szintek: extrém zónák és trigger szint",
     "wpr_m15_sell_extreme": -20,
     "wpr_m15_buy_extreme": -80,
-    "wpr_m15_trigger": -50,
+    "wpr_m15_sell_trigger": -50,
+    "wpr_m15_buy_trigger": -50,
     "wpr_m1_sell_extreme": -20,
     "wpr_m1_buy_extreme": -80,
     "wpr_m1_trigger": -50
@@ -66,7 +67,12 @@
       "max": -65,
       "step": 5
     },
-    "wpr_m15_trigger": {
+    "wpr_m15_sell_trigger": {
+      "min": -70,
+      "max": -30,
+      "step": 5
+    },
+    "wpr_m15_buy_trigger": {
       "min": -70,
       "max": -30,
       "step": 5

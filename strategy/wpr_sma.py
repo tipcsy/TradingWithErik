@@ -462,8 +462,12 @@ class WprSmaStrategy(Strategy):
 
         # ── A stratégia által HASZNÁLT indikátorok (a TradeForgeViz felrakja) ──
         p = md.params
+        # M15: 4 szint — felső extrém, SELL trigger, BUY trigger, alsó extrém (a két
+        # trigger belül → az indikátor narancsra színezi; az extrémek szürkék).
+        _m15t = p.get("wpr_m15_trigger", -50)
         m15_levels = (p.get("wpr_m15_sell_extreme", -20),
-                      p.get("wpr_m15_trigger", -50),
+                      p.get("wpr_m15_sell_trigger", _m15t),
+                      p.get("wpr_m15_buy_trigger",  _m15t),
                       p.get("wpr_m15_buy_extreme", -80))
         m1_levels  = (p.get("wpr_m1_sell_extreme", -20),
                       p.get("wpr_m1_trigger", -50),
@@ -492,11 +496,17 @@ class WprSmaStrategy(Strategy):
                                       self.constraints_ok)
 
     def constraints_ok(self, params: dict) -> bool:
-        """WPR szint-sorrend (sell_extreme > trigger > buy_extreme) + session."""
+        """WPR szint-sorrend: mindkét M15 trigger (BUY/SELL) SZIGORÚAN a felső és
+        alsó extrém között; M1 a régi közös triggerrel (változatlan)."""
         p = params
-        if p.get("wpr_m15_sell_extreme", -20) <= p.get("wpr_m15_trigger", -50):
+        se = p.get("wpr_m15_sell_extreme", -20)
+        be = p.get("wpr_m15_buy_extreme", -80)
+        _t = p.get("wpr_m15_trigger", -50)
+        st = p.get("wpr_m15_sell_trigger", _t)
+        bt = p.get("wpr_m15_buy_trigger",  _t)
+        if not (be < st < se):
             return False
-        if p.get("wpr_m15_trigger", -50) <= p.get("wpr_m15_buy_extreme", -80):
+        if not (be < bt < se):
             return False
         if p.get("wpr_m1_sell_extreme", -20) <= p.get("wpr_m1_trigger", -50):
             return False
