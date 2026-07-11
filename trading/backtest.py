@@ -547,6 +547,7 @@ def run_backtest(cfg: dict, params: Optional[dict] = None, test_mode: bool = Fal
     trading_cfg     = cfg["trading"]
     test_start      = cfg.get("optimizer", {}).get("test_start_date") if test_mode else None
     strategy        = get_strategy(cfg)
+    set_active_strategy(strategy.name)     # stratégia-hatókörű params-tárolás
 
     if params is None:
         params = strategy.base_params(cfg)
@@ -727,7 +728,9 @@ def _save_backtest_results(trades: list, summaries: list[dict],
 # Portfolio Backtest — közös tőke, közös slot rendszer, kronológiai szimuláció
 # ---------------------------------------------------------------------------
 
-PARAMS_DIR = ROOT / "data" / "optimized_params"
+from core.params_store import (
+    PARAMS_DIR, params_file, set_active_strategy, migrate_flat_layout,
+)
 
 
 def _advance_m15_state(pd_info: dict, m1_time: pd.Timestamp, strategy) -> None:
@@ -771,6 +774,8 @@ def run_portfolio_backtest(
     trading_cfg = cfg["trading"]
     spread_default = 1.5
     strategy = get_strategy(cfg)
+    set_active_strategy(strategy.name)     # stratégia-hatókörű params-tárolás
+    migrate_flat_layout(strategy.name)
     tf_hi = strategy.timeframes()[0].label
     tf_lo = strategy.timeframes()[1].label
 
@@ -794,7 +799,7 @@ def run_portfolio_backtest(
     pair_params: dict = {}
     pair_risky:  dict = {}
     for sym in symbols:
-        f = PARAMS_DIR / f"{sym}.json"
+        f = params_file(sym, strategy.name)
         if f.exists():
             with open(f, encoding="utf-8") as fh:
                 data = json.load(fh)

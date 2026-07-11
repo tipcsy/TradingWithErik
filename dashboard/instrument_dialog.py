@@ -34,7 +34,7 @@ from dashboard.theme import (
     color as sem_color,
 )
 from core.quality import metric_colors
-from ml.optimizer import PARAMS_DIR
+from core.params_store import params_file, trials_file
 
 # A trials CSV metrika-oszlopai (ezek NEM paraméterek, hanem az eredmény jellemzői)
 _METRIC_COLS = frozenset({
@@ -86,8 +86,9 @@ class InstrumentParamsDialog:
         self._sf     = small_font
         self._save_main_config = save_main_config
 
-        self.pf = PARAMS_DIR / f"{symbol}.json"
-        self.trials_csv = PARAMS_DIR / f"{symbol}_trials.csv"
+        # Stratégia-hatókörű tárolás: data/optimized_params/<strategy>/<symbol>.*
+        self.pf = params_file(symbol, self.strategy.name)
+        self.trials_csv = trials_file(symbol, self.strategy.name)
 
         # ── JSON betöltése (ha van) ─────────────────────────────────────────
         self.data = None

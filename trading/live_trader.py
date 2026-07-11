@@ -45,13 +45,18 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-PARAMS_DIR   = ROOT / "data" / "optimized_params"
+# Stratégia-hatókörű params-tárolás (közös, könnyű modul — nincs optimizer/optuna
+# függés). Az aktív stratégiát a run() állítja be a config alapján.
+from core.params_store import (
+    PARAMS_DIR, params_file, set_active_strategy, migrate_flat_layout,
+)
 TRADES_CSV   = ROOT / "trades.csv"
 
 
 def load_pair_params(symbol: str) -> Optional[dict]:
-    """Per-pár params betöltése: data/optimized_params/<SYMBOL>.json"""
-    f = PARAMS_DIR / f"{symbol}.json"
+    """Per-pár params betöltése: data/optimized_params/<strategy>/<SYMBOL>.json
+    (a stratégia az aktív; a run() beállítja)."""
+    f = params_file(symbol)
     if not f.exists():
         return None
     with open(f, encoding="utf-8") as fh:
@@ -915,6 +920,10 @@ def run(cfg: dict, slot_mgr: SlotManager):
     VIZ_INTERVAL_SEC = viz_cfg.get("interval_sec", 15.0)
     strategy    = get_strategy(cfg)
     magic       = strategy.magic(cfg)   # a stratégia magicje (alap: broker.magic)
+    # Stratégia-hatókörű params: az aktív stratégia + egyszeri migráció (a
+    # load_pair_params a helyes almappából olvas: data/optimized_params/<strat>/).
+    set_active_strategy(strategy.name)
+    migrate_flat_layout(strategy.name)
     risky_mode.load()                      # induló risky állapot
     last_risky_reload = time.time()
     risky_reload_sec  = cfg.get("trading", {}).get("risky_reload_sec", 3600)

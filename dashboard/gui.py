@@ -691,7 +691,8 @@ class PortfolioBacktestTab:
                      row=0, column=0, columnspan=4, sticky="w", pady=(0, 4))
 
         self._sym_vars: dict = {}
-        params_dir = ROOT / "data" / "optimized_params"
+        from core.params_store import strategy_dir
+        params_dir = strategy_dir()          # az aktív stratégia almappája
         optimized  = sorted([f.stem for f in params_dir.glob("*.json")]) \
                      if params_dir.exists() else []
 
@@ -1458,6 +1459,10 @@ class DashboardWindow:
         self._on_slots_change = on_slots_change
         self.strategy         = strategy or get_strategy(cfg)
         self._columns         = build_columns(self.strategy)
+        # Stratégia-hatókörű params-tárolás: aktív stratégia + egyszeri migráció.
+        from core.params_store import set_active_strategy, migrate_flat_layout
+        set_active_strategy(self.strategy.name)
+        migrate_flat_layout(self.strategy.name)
 
         # Frissítési ütemezés (config-vezérelt)
         dash_cfg = cfg.get("dashboard", {})
@@ -2055,8 +2060,8 @@ class DashboardWindow:
                  wraplength=740).pack(anchor="w", padx=10)
 
         # Trials CSV állapota + megnyitás
-        from ml.optimizer import PARAMS_DIR
-        csv = PARAMS_DIR / f"{symbol}_trials.csv"
+        from core.params_store import trials_file
+        csv = trials_file(symbol)
         row = tk.Frame(popup, bg=BG)
         row.pack(anchor="w", padx=10, pady=(6, 0))
         if csv.exists():
@@ -2301,9 +2306,9 @@ class DashboardWindow:
         """Egy szimbólum optimalizált trail-távolsága PONTBAN (a Pozíciók fül
         mezőjéhez). A paraméter pipben van tárolva → pont = pip × pip_size / point.
         Ha a 'point' még nem ismert (MT5 adat nélkül), None-t ad."""
-        from ml.optimizer import PARAMS_DIR
+        from core.params_store import params_file
         pips = None
-        pf = PARAMS_DIR / f"{symbol}.json"
+        pf = params_file(symbol)
         if pf.exists():
             try:
                 with open(pf, encoding="utf-8") as f:
@@ -2484,14 +2489,14 @@ class DashboardWindow:
             return
         import pandas as _pd
         from strategy.base import MarketData
-        from ml.optimizer import PARAMS_DIR
+        from core.params_store import params_file
 
         ds = self.dashboard_ref.get(symbol)
         if ds is None or not isinstance(self.cfg["pairs"].get(symbol), dict):
             return
 
         # Paraméterek: optimalizált, ha van; egyébként alap.
-        params_f = PARAMS_DIR / f"{symbol}.json"
+        params_f = params_file(symbol)
         if params_f.exists():
             with open(params_f, encoding="utf-8") as f:
                 data = json.load(f)
@@ -2829,7 +2834,9 @@ def _demo_dashboard(cfg: dict):
     from trading.live_trader import PairDashboardState
 
     strategy   = get_strategy(cfg)
-    params_dir = ROOT / "data" / "optimized_params"
+    from core.params_store import set_active_strategy, strategy_dir
+    set_active_strategy(strategy.name)
+    params_dir = strategy_dir(strategy.name)
     real_trained = {f.stem for f in params_dir.glob("*.json")} if params_dir.exists() else set()
     symbols = [s for s, p in cfg["pairs"].items() if isinstance(p, dict)]
 

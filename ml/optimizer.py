@@ -45,19 +45,13 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-PARAMS_DIR = ROOT / "data" / "optimized_params"
-PARAMS_DIR.mkdir(parents=True, exist_ok=True)
-
-def params_file(symbol: str) -> Path:
-    return PARAMS_DIR / f"{symbol}.json"
-
-
-def trials_file(symbol: str) -> Path:
-    return PARAMS_DIR / f"{symbol}_trials.csv"
-
-
-def study_db(symbol: str) -> Path:
-    return PARAMS_DIR / f"{symbol}_study.db"
+# Stratégia-hatókörű path-helperek a KÖZÖS, könnyű modulból (core.params_store) —
+# innen re-exportálva, hogy a régi `from ml.optimizer import PARAMS_DIR/params_file`
+# importok változatlanul működjenek. A tárolás elrendezését lásd ott.
+from core.params_store import (            # noqa: E402  (re-export)
+    PARAMS_DIR, set_active_strategy, active_strategy, strategy_dir,
+    params_file, trials_file, study_db, done_marker, migrate_flat_layout,
+)
 
 
 # A trials CSV formátuma: ';' elválasztó + ',' tizedesjel (magyar Excel),
@@ -474,8 +468,8 @@ def optimize_pair_optuna(
 
         return final_score
 
-    out_csv     = trials_file(symbol)
-    storage_url = f"sqlite:///{study_db(symbol).as_posix()}"
+    out_csv     = trials_file(symbol, strategy.name)
+    storage_url = f"sqlite:///{study_db(symbol, strategy.name).as_posix()}"
 
     def _dump_csv(study, _trial=None):
         """A trials CSV újraépítése a study-ból (a trialok user_attr sorai).
@@ -498,11 +492,11 @@ def optimize_pair_optuna(
     #     (a régi .db-t töröljük — még a kapcsolat megnyitása ELŐTT, friss
     #     processzben, így nincs Windows-fájlzár),
     #   • előző futás MEGSZAKADT (nincs marker, de van .db) → FOLYTATÁS.
-    done_marker = PARAMS_DIR / f"{symbol}_study.done"
-    if done_marker.exists():
+    done_flag = done_marker(symbol, strategy.name)
+    if done_flag.exists():
         try:
-            study_db(symbol).unlink(missing_ok=True)
-            done_marker.unlink(missing_ok=True)
+            study_db(symbol, strategy.name).unlink(missing_ok=True)
+            done_flag.unlink(missing_ok=True)
         except Exception as e:
             log.debug("%s — study reset hiba: %s", symbol, e)
 
@@ -530,7 +524,7 @@ def optimize_pair_optuna(
                        callbacks=[_incremental_cb])
     else:
         log.info("  %s — a study már kész (%d trial). Új futáshoz töröld a .db-t: %s",
-                 symbol, done, study_db(symbol).name)
+                 symbol, done, study_db(symbol, strategy.name).name)
 
     # Végső, teljes CSV a study-ból (a folytatott trialokkal együtt).
     _dump_csv(study)
@@ -540,7 +534,7 @@ def optimize_pair_optuna(
     # frissen induljon (ne folytassa a már kész study-t).
     if len(study.trials) >= n_trials:
         try:
-            done_marker.touch()
+            done_flag.touch()
         except Exception:
             pass
 
@@ -698,7 +692,7 @@ def optimize_pair(
                 symbol, i + 1, len(params_list), best_pnl,
             )
             # Inkrementális CSV: az eddigi eredmények azonnal lemezre (nem vész el).
-            _write_trials_csv(all_rows, trials_file(symbol))
+            _write_trials_csv(all_rows, trials_file(symbol, strategy.name))
 
     # Végső callback
     if progress_callback:
@@ -706,10 +700,10 @@ def optimize_pair(
         progress_callback(len(params_list), len(params_list), best_pnl)
 
     # ── Teljes eredménytáblázat mentése CSV-be (score szerint csökkenő) ──────
-    n = _write_trials_csv(all_rows, trials_file(symbol))
+    n = _write_trials_csv(all_rows, trials_file(symbol, strategy.name))
     if n:
         log.info("  %s — %d kombináció eredménye mentve: %s",
-                 symbol, n, trials_file(symbol).name)
+                 symbol, n, trials_file(symbol, strategy.name).name)
 
     return {"params": best_params, "train_summary": best_summary} if best_params else None
 
@@ -733,6 +727,11 @@ def optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance, progress=None,
     if strategy is None:
         from strategy import get_strategy
         strategy = get_strategy(cfg)
+
+    # Stratégia-hatókörű tárolás: az aktív stratégiát beállítjuk (a subprocess is
+    # ezt hívja) + egyszeri migráció a régi lapos elrendezésről.
+    set_active_strategy(strategy.name)
+    migrate_flat_layout(strategy.name)
 
     opt_cfg     = cfg["optimizer"]
     method      = opt_cfg.get("method", "random")
@@ -823,13 +822,19 @@ def run_optimizer(cfg: dict, symbols: Optional[list[str]] = None):
     max_trials  = opt_cfg.get("max_trials", 500)
     initial_balance = cfg.get("ml", {}).get("starting_balance_eur", 1000.0)
 
+    # Stratégia-hatókörű tárolás: aktív stratégia + egyszeri migráció.
+    from strategy.settings import strategy_name as _stratname
+    _sn = _stratname(cfg)
+    set_active_strategy(_sn)
+    migrate_flat_layout(_sn)
+
     # Párok kiválasztása
     all_pairs = {s: p for s, p in cfg["pairs"].items() if isinstance(p, dict) and p.get("enabled", False)}
     if symbols:
         all_pairs = {s: p for s, p in all_pairs.items() if s in symbols}
 
     # Meglévő per-pár fájlok listázása (folytatás)
-    existing = [f.stem for f in PARAMS_DIR.glob("*.json")]
+    existing = [f.stem for f in strategy_dir(_sn).glob("*.json")]
     if existing:
         log.info("Meglévő optimalizált párok: %s", ", ".join(existing))
 
@@ -898,12 +903,12 @@ def run_optimizer(cfg: dict, symbols: Optional[list[str]] = None):
             apply_optimized_rr(symbol, _rr)
 
     log.info("=" * 60)
-    log.info("Optimalizálás kész. Eredmények: %s", PARAMS_DIR)
+    log.info("Optimalizálás kész. Eredmények: %s", strategy_dir(_sn))
 
     # Összesített kimutatás
     log.info("%-10s  %6s  %6s  %8s  %8s", "Szimbólum", "Kötés", "Win%", "P&L$", "MaxDD%")
     log.info("-" * 50)
-    for f in sorted(PARAMS_DIR.glob("*.json")):
+    for f in sorted(strategy_dir(_sn).glob("*.json")):
         with open(f, encoding="utf-8") as fh:
             data = json.load(fh)
         ts = data.get("test_summary", {})
