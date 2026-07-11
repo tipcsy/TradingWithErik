@@ -53,10 +53,11 @@ from core.params_store import (
 TRADES_CSV   = ROOT / "trades.csv"
 
 
-def load_pair_params(symbol: str) -> Optional[dict]:
-    """Per-pár params betöltése: data/optimized_params/<strategy>/<SYMBOL>.json
-    (a stratégia az aktív; a run() beállítja)."""
-    f = params_file(symbol)
+def load_pair_params(symbol: str, strategy_name: str | None = None) -> Optional[dict]:
+    """Per-pár params betöltése: data/optimized_params/<strategy>/<SYMBOL>.json.
+    `strategy_name=None` → az aktív stratégia (a run() beállítja); több-stratégia
+    esetén a hívó a konkrét stratégiát adja."""
+    f = params_file(symbol, strategy_name)
     if not f.exists():
         return None
     with open(f, encoding="utf-8") as fh:
@@ -285,6 +286,11 @@ class LivePairState:
     strat_state: object = None    # a stratégia jelzésállapota (átlátszatlan)
     daily_pnl:   float  = 0.0
     daily_date:  str    = ""
+    # Több-stratégia: a stratégia-példány (a motor ezen ciklusozik páronként) és
+    # hogy EZ a stratégia írja-e a dashboard cella-kijelzését (elsődleges) — így
+    # több stratégia nem írja felül egymás jelölő-köreit ugyanazon a soron.
+    strategy:    object = None
+    is_display:  bool   = True
 
 
 # ---------------------------------------------------------------------------
@@ -601,12 +607,15 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
 
     # A tábla jelzés-celláit a MOTOR ÉLŐ állapotából töltjük (nem külön
     # rekonstrukcióból) → a kijelzés PONTOSAN azt mutatja, amivel kereskedünk.
-    try:
-        cells = strategy.live_cells(state.strat_state, md)
-        ds.strategy_cells = {k: (c.text, c.color) for k, c in cells.items()}
-        ds.cells_ts = time.time()
-    except Exception:
-        pass
+    # Több stratégia esetén CSAK az elsődleges (is_display) írja a soron a köröket,
+    # hogy ne írják felül egymást (a per-stratégia oszlopok az A4-ben jönnek).
+    if getattr(state, "is_display", True):
+        try:
+            cells = strategy.live_cells(state.strat_state, md)
+            ds.strategy_cells = {k: (c.text, c.color) for k, c in cells.items()}
+            ds.cells_ts = time.time()
+        except Exception:
+            pass
 
     # --- Pozícióterv (méretezés) a STRATÉGIÁTÓL + spread-kapu ─────────────
     # Konvenció: az első deklarált időkeret a "fő" (magasabb). Az SL/TP-méretet a
@@ -918,41 +927,67 @@ def run(cfg: dict, slot_mgr: SlotManager):
     viz_cfg     = cfg.get("visualization", {})
     VIZ_ENABLED      = viz_cfg.get("enabled", True)
     VIZ_INTERVAL_SEC = viz_cfg.get("interval_sec", 15.0)
-    strategy    = get_strategy(cfg)
-    magic       = strategy.magic(cfg)   # a stratégia magicje (alap: broker.magic)
-    # Stratégia-hatókörű params: az aktív stratégia + egyszeri migráció (a
-    # load_pair_params a helyes almappából olvas: data/optimized_params/<strat>/).
-    set_active_strategy(strategy.name)
-    migrate_flat_layout(strategy.name)
+    from strategy import strategies_for, get_strategy_by_name, default_strategy_name
+    primary_name = default_strategy_name(cfg)
+    # Stratégia-hatókörű params: az elsődleges stratégia az aktív + egyszeri migráció.
+    set_active_strategy(primary_name)
+    migrate_flat_layout(primary_name)
     risky_mode.load()                      # induló risky állapot
     last_risky_reload = time.time()
     risky_reload_sec  = cfg.get("trading", {}).get("risky_reload_sec", 3600)
 
     all_pairs = {s: p for s, p in cfg["pairs"].items() if isinstance(p, dict)}
-    pair_states: dict[str, LivePairState] = {}
+
+    # Per-instrumentum ENGEDÉLYEZETT stratégiák (az elsődleges az első). Egy
+    # stratégiával (nincs pairs.<sym>.strategies) ez a jelenlegi viselkedés.
+    strats_by_symbol = {s: strategies_for(cfg, s) for s in all_pairs}
+
+    # magic → stratégia (recovery-hez). TÖBB stratégiához EGYEDI magic kell; ha
+    # ütközés van (két stratégia azonos magic), figyelmeztetünk — broker-szinten
+    # nem különíthetők el a pozíciók.
+    magic_to_strat: dict = {}
+    for _s, _strats in strats_by_symbol.items():
+        for _st in _strats:
+            _m = _st.magic(cfg)
+            if _m in magic_to_strat and magic_to_strat[_m].name != _st.name:
+                log.warning("Magic-ütközés: %s és %s ugyanazt a magicet (%d) használja "
+                            "— több stratégiához egyedi magic kell (strategy.magic).",
+                            magic_to_strat[_m].name, _st.name, _m)
+            else:
+                magic_to_strat.setdefault(_m, _st)
+
+    # (symbol, strat_name) → LivePairState
+    pair_states: dict = {}
+
+    def _make_state(symbol, pair_cfg, strat, is_display):
+        _params = load_pair_params(symbol, strat.name)
+        if _params is None:
+            return None
+        return LivePairState(
+            symbol=symbol, pair_cfg=pair_cfg, params=_params,
+            trading_cfg=trading_cfg, magic=strat.magic(cfg),
+            strat_state=strat.new_signal_state(symbol),
+            strategy=strat, is_display=is_display)
 
     # Dashboard + instrument_state inicializálás minden párhoz
     for symbol, pair_cfg in all_pairs.items():
-        params = load_pair_params(symbol)
-        trained = params is not None
+        strats = strats_by_symbol[symbol]
+        trained = any(load_pair_params(symbol, st.name) is not None for st in strats)
         dashboard[symbol] = PairDashboardState(
             symbol=symbol,
             enabled=pair_cfg.get("enabled", False),
             trained=trained,
             viz_enabled=pair_cfg.get("viz_enabled", True),   # V mód a config.json-ból
         )
-        # Kezdeti állapot: ha enabled és trained → LIVE, egyébként STOPPED
+        # Kezdeti állapot: ha enabled és van tanított stratégia → LIVE
         if pair_cfg.get("enabled", False) and trained:
             instrument_state[symbol] = "LIVE"
-            pair_states[symbol] = LivePairState(
-                symbol=symbol,
-                pair_cfg=pair_cfg,
-                params=params,
-                trading_cfg=trading_cfg,
-                magic=magic,
-                strat_state=strategy.new_signal_state(symbol),
-            )
-            log.info("%s — LIVE (params betöltve)", symbol)
+            for _i, st in enumerate(strats):
+                ps = _make_state(symbol, pair_cfg, st, is_display=(_i == 0))
+                if ps is not None:
+                    pair_states[(symbol, st.name)] = ps
+            _n = sum(1 for st in strats if (symbol, st.name) in pair_states)
+            log.info("%s — LIVE (%d stratégia, params betöltve)", symbol, _n)
         else:
             instrument_state[symbol] = "STOPPED"
             if not trained:
@@ -965,38 +1000,41 @@ def run(cfg: dict, slot_mgr: SlotManager):
     #      (ha az SL már az entry-n túl van profit-irányban → risk-free),
     #   3) a nyitott pozíciójú párokat LIVE-ba teszi, hogy a motor tovább
     #      kezelje őket (breakeven, trailing, zárás-detektálás).
-    recovered_syms: set[str] = set()
-    for _p in get_open_positions(magic):
-        slot_mgr.add(_p.ticket)
-        if _p.sl and _p.sl != 0.0:
-            if _p.type == mt5.ORDER_TYPE_BUY and _p.sl >= _p.price_open:
-                slot_mgr.set_risk_free(_p.ticket)
-            elif _p.type == mt5.ORDER_TYPE_SELL and _p.sl <= _p.price_open:
-                slot_mgr.set_risk_free(_p.ticket)
-        recovered_syms.add(_p.symbol)
+    recovered: set = set()   # (symbol, strat_name) — magic alapján stratégiához kötve
+    for _m, _st in magic_to_strat.items():
+        for _p in get_open_positions(_m):
+            slot_mgr.add(_p.ticket)
+            if _p.sl and _p.sl != 0.0:
+                if _p.type == mt5.ORDER_TYPE_BUY and _p.sl >= _p.price_open:
+                    slot_mgr.set_risk_free(_p.ticket)
+                elif _p.type == mt5.ORDER_TYPE_SELL and _p.sl <= _p.price_open:
+                    slot_mgr.set_risk_free(_p.ticket)
+            recovered.add((_p.symbol, _st.name))
 
-    for _sym in recovered_syms:
+    for (_sym, _sname) in recovered:
         _pcfg = all_pairs.get(_sym)
-        if not isinstance(_pcfg, dict) or _sym in pair_states:
+        if not isinstance(_pcfg, dict) or (_sym, _sname) in pair_states:
             continue
-        _params = load_pair_params(_sym)
-        if _params:
-            pair_states[_sym] = LivePairState(
-                symbol=_sym, pair_cfg=_pcfg, params=_params,
-                trading_cfg=trading_cfg, magic=magic,
-                strat_state=strategy.new_signal_state(_sym))
+        _st = get_strategy_by_name(_sname)
+        _primary = strats_by_symbol.get(_sym) or []
+        _is_disp = bool(_primary) and _primary[0].name == _sname
+        ps = _make_state(_sym, _pcfg, _st, is_display=_is_disp)
+        if ps is not None:
+            pair_states[(_sym, _sname)] = ps
             instrument_state[_sym] = "LIVE"
-            log.info("%s — helyreállítva LIVE-ba (nyitott pozíció a magic alatt)", _sym)
+            log.info("%s/%s — helyreállítva LIVE-ba (nyitott pozíció a magic alatt)",
+                     _sym, _sname)
         else:
-            log.warning("%s — nyitott pozíció, de nincs params! Kézi kezelés szükséges.",
-                        _sym)
+            log.warning("%s/%s — nyitott pozíció, de nincs params! Kézi kezelés szükséges.",
+                        _sym, _sname)
 
     if slot_mgr.all_tickets():
         rf = sum(1 for t in slot_mgr.all_tickets() if slot_mgr.is_risk_free(t))
         log.info("Induláskor %d nyitott pozíció helyreállítva (%d kockázatmentes).",
                  len(slot_mgr.all_tickets()), rf)
 
-    log.info("Élő kereskedés indul | %d LIVE pár", len(pair_states))
+    log.info("Élő kereskedés indul | %d LIVE pár (%d stratégia-állapot)",
+             len({_s for (_s, _n) in pair_states}), len(pair_states))
 
     while True:
         try:
@@ -1009,32 +1047,35 @@ def run(cfg: dict, slot_mgr: SlotManager):
 
             for symbol, pair_cfg in all_pairs.items():
                 state_now = instrument_state.get(symbol, "STOPPED")
+                strats = strats_by_symbol[symbol]
 
-                # Play → LIVE: új LivePairState létrehozása friss params-szal
-                if state_now == "LIVE" and symbol not in pair_states:
-                    params = load_pair_params(symbol)
-                    if params:
-                        pair_states[symbol] = LivePairState(
-                            symbol=symbol,
-                            pair_cfg=pair_cfg,
-                            params=params,
-                            trading_cfg=trading_cfg,
-                            magic=magic,
-                            strat_state=strategy.new_signal_state(symbol),
-                        )
-                        log.info("%s — Play: LIVE indítva", symbol)
-                    else:
+                # Play → LIVE: a hiányzó (symbol, strat) állapotok létrehozása friss
+                # params-szal (minden engedélyezett, tanított stratégiához).
+                if state_now == "LIVE":
+                    for _i, st in enumerate(strats):
+                        key = (symbol, st.name)
+                        if key not in pair_states:
+                            ps = _make_state(symbol, pair_cfg, st, is_display=(_i == 0))
+                            if ps is not None:
+                                pair_states[key] = ps
+                                log.info("%s/%s — Play: LIVE indítva", symbol, st.name)
+                    if not any((symbol, st.name) in pair_states for st in strats):
                         instrument_state[symbol] = "STOPPED"
-                        log.warning("%s — Play: nincs params, visszaállítva STOPPED-ra", symbol)
+                        log.warning("%s — Play: egyik stratégiához sincs params, STOPPED", symbol)
 
-                # Stop → eltávolítás a pair_states-ből
-                elif state_now == "STOPPED" and symbol in pair_states:
-                    del pair_states[symbol]
-                    log.info("%s — Stop: LIVE leállítva", symbol)
+                # Stop → az összes (symbol, strat) állapot eltávolítása
+                elif state_now == "STOPPED":
+                    for st in strats:
+                        if (symbol, st.name) in pair_states:
+                            del pair_states[(symbol, st.name)]
+                            log.info("%s/%s — Stop: LIVE leállítva", symbol, st.name)
 
-                # LIVE: feldolgozás
-                if state_now == "LIVE" and symbol in pair_states:
-                    process_pair(pair_states[symbol], slot_mgr, balance, strategy)
+                # LIVE: feldolgozás stratégiánként (mindegyik a saját magicjével)
+                if instrument_state.get(symbol) == "LIVE":
+                    for st in strats:
+                        key = (symbol, st.name)
+                        if key in pair_states:
+                            process_pair(pair_states[key], slot_mgr, balance, st)
 
             time.sleep(10)
 
