@@ -20,7 +20,8 @@ import pandas as pd
 log = logging.getLogger(__name__)
 
 from strategy.base import (
-    Strategy, Column, StrategyColumn, CountdownColumn, MarketData, Cell, Timeframe,
+    Strategy, Column, StrategyColumn, CountdownColumn, MarkerColumn,
+    MarketData, Cell, Timeframe,
 )
 from strategy import visual as viz
 from core.indicator_engine import compute_indicators
@@ -66,6 +67,28 @@ def _signal_cell(direction: str, active: bool) -> Cell:
     return Cell(f"{direction}{arrow}", "green" if direction == "BUY" else "red")
 
 
+# ── Körös jelölő stádium-cellái (egységes, egy oszlopból álló jelölőrendszer) ──
+_CIRCLE = "●"
+
+
+def _stage_dir(direction: str) -> Cell:
+    """SMA-irány kör: zöld (BUY) / piros (SELL) / szürke (nincs)."""
+    color = "green" if direction == "BUY" else "red" if direction == "SELL" else "muted"
+    return Cell(_CIRCLE, color)
+
+
+def _stage_flag(active: bool, direction: str) -> Cell:
+    """Jelzés-kör: ha aktív, az irány színe; különben szürke."""
+    if active and direction in ("BUY", "SELL"):
+        return Cell(_CIRCLE, "green" if direction == "BUY" else "red")
+    return Cell(_CIRCLE, "muted")
+
+
+# A jelölő stádiumai (sorrendben) — a MarkerColumn és a cellák EZEKET használják.
+_STAGES = (("sma", "SMA irány"), ("m15", "M15 WPR jel"), ("m1", "M1 beszállás"))
+_MARKS_EMPTY = {k: Cell(_CIRCLE, "muted") for k, _ in _STAGES}
+
+
 class WprSmaStrategy(Strategy):
     name = "wpr_sma"
 
@@ -75,15 +98,11 @@ class WprSmaStrategy(Strategy):
         return [Timeframe("M15", 15), Timeframe("M1", 1)]
 
     def columns(self) -> list[Column]:
+        # Egységes, EGY oszlopból álló körös jelölőrendszer: stádiumonként egy kör
+        # (SMA irány · M15 WPR jel · M1 beszállás). A fejléc a stratégia neve.
         # A visszaszámlálók (gyertyazárásig hátralévő idő) a VÁZ közös felső
-        # sávjába kerülnek (minden instrumentumnál azonosak) — nem oszlopként.
-        return [
-            StrategyColumn("sma_dir",  "SMA irány",  8),
-            StrategyColumn("wpr_m15",  "M15 WPR",    7),
-            StrategyColumn("sig_m15",  "M15 jelzés", 9),
-            StrategyColumn("wpr_m1",   "M1 WPR",     7),
-            StrategyColumn("sig_m1",   "M1 jelzés",  8),
-        ]
+        # sávjában vannak (minden instrumentumnál azonosak) — nem oszlopként.
+        return [MarkerColumn("marks", self.name, stages=_STAGES)]
 
     def warmup_bars(self, params: dict, timeframe_label: str) -> int:
         if timeframe_label == "M15":
@@ -101,13 +120,7 @@ class WprSmaStrategy(Strategy):
         A JELZÉSEKET viszont a ZÁRT gyertyák során VÉGIGJÁTSZVA számoljuk —
         így az M15 jelzési ablak állapota PONTOS (egyetlen gyertyából nem lehet
         rekonstruálni). Ez ugyanazt az állapotot adja, mint az éles motor."""
-        empty = {
-            "sma_dir":  Cell("—", "muted"),
-            "wpr_m15":  Cell("—", "muted"),
-            "sig_m15":  Cell("—", "muted"),
-            "wpr_m1":   Cell("—", "muted"),
-            "sig_m1":   Cell("—", "muted"),
-        }
+        empty = dict(_MARKS_EMPTY)
         df_m15 = md.bars.get("M15")
         df_m1  = md.bars.get("M1")
         if df_m15 is None or df_m1 is None or len(df_m15) < 3 or len(df_m1) < 3:
@@ -156,25 +169,11 @@ class WprSmaStrategy(Strategy):
             if not math.isnan(prev_w) and not math.isnan(cur_w):
                 m1_signal = check_m1_entry(live_state, float(prev_w), float(cur_w), md.params)
 
-        # ── WPR a formálódó gyertyán; ha NaN, vissza a zártra (spike-szűrés) ──
-        wpr_m15_disp = _clamp_wpr(wprs15[-1])
-        if math.isnan(wpr_m15_disp):
-            wpr_m15_disp = _clamp_wpr(wprs15[-2])
-        wpr_m1_disp = _clamp_wpr(m1_wprs[-1])
-        if math.isnan(wpr_m1_disp):
-            wpr_m1_disp = _clamp_wpr(m1_wprs[-2])
-
-        sma_cell = Cell(direction, "green" if direction == "BUY"
-                        else "red" if direction == "SELL" else "muted")
-        if direction == "NONE":
-            sma_cell = Cell("—", "muted")
-
+        # ── Körök: SMA irány · M15 WPR jelzési ablak · M1 beszállás ─────────
         return {
-            "sma_dir": sma_cell,
-            "wpr_m15": _wpr_cell(wpr_m15_disp),
-            "sig_m15": _signal_cell(direction, live_state.m15_window_open),
-            "wpr_m1":  _wpr_cell(wpr_m1_disp),
-            "sig_m1":  _signal_cell(m1_signal, m1_signal in ("BUY", "SELL")),
+            "sma": _stage_dir(direction),
+            "m15": _stage_flag(live_state.m15_window_open, direction),
+            "m1":  _stage_flag(m1_signal in ("BUY", "SELL"), m1_signal),
         }
 
     # --- Élő jelzéslogika (ZÁRT gyertyán, állapottartó) -------------------
@@ -263,51 +262,17 @@ class WprSmaStrategy(Strategy):
     # --- Megjelenítés a MOTOR élő állapotából ------------------------------
 
     def live_cells(self, state: WprSmaState, md: MarketData) -> dict[str, Cell]:
-        """Cellák a MOTOR jelzésállapotából (state.signal) — a tábla PONTOSAN azt
-        mutatja, amivel a motor kereskedik. A WPR a formálódó gyertyán mozog; az
-        SMA-irány, az M15 jelzési ablak és az M1 jel a motor ÉLŐ állapotából jön
-        (nincs külön rekonstrukció → nincs eltérés)."""
-        empty = {
-            "sma_dir":  Cell("—", "muted"),
-            "wpr_m15":  Cell("—", "muted"),
-            "sig_m15":  Cell("—", "muted"),
-            "wpr_m1":   Cell("—", "muted"),
-            "sig_m1":   Cell("—", "muted"),
-        }
-        df_m15 = md.bars.get("M15")
-        df_m1  = md.bars.get("M1")
-        if df_m15 is None or df_m1 is None or len(df_m15) < 2 or len(df_m1) < 2:
-            return empty
-        try:
-            m15, m1 = compute_indicators(df_m15, df_m1, md.params)
-        except Exception:
-            return empty
-
+        """Körök a MOTOR jelzésállapotából (state.signal) — a tábla PONTOSAN azt
+        mutatja, amivel a motor kereskedik (nincs külön rekonstrukció → nincs
+        eltérés). Nem kell indikátorszámítás: a 3 stádium (SMA irány · M15 jelzési
+        ablak · M1 beszállás) a motor élő állapotából jön."""
         sig = state.signal            # a motor élő jelzésállapota (PairState)
         direction = sig.direction
-
-        # WPR a formálódó gyertyán; NaN esetén vissza a zártra (spike-szűrés)
-        wprs15 = m15["wpr"].values
-        m1_wprs = m1["wpr"].values
-        wpr_m15_disp = _clamp_wpr(wprs15[-1])
-        if math.isnan(wpr_m15_disp):
-            wpr_m15_disp = _clamp_wpr(wprs15[-2])
-        wpr_m1_disp = _clamp_wpr(m1_wprs[-1])
-        if math.isnan(wpr_m1_disp):
-            wpr_m1_disp = _clamp_wpr(m1_wprs[-2])
-
-        sma_cell = Cell(direction, "green" if direction == "BUY"
-                        else "red" if direction == "SELL" else "muted")
-        if direction == "NONE":
-            sma_cell = Cell("—", "muted")
-
         return {
-            "sma_dir": sma_cell,
-            "wpr_m15": _wpr_cell(wpr_m15_disp),
-            "sig_m15": _signal_cell(direction, sig.m15_window_open),
-            "wpr_m1":  _wpr_cell(wpr_m1_disp),
-            "sig_m1":  _signal_cell(state.last_signal,
-                                    state.last_signal in ("BUY", "SELL")),
+            "sma": _stage_dir(direction),
+            "m15": _stage_flag(sig.m15_window_open, direction),
+            "m1":  _stage_flag(state.last_signal in ("BUY", "SELL"),
+                               state.last_signal),
         }
 
     # --- MT5 chart-vizualizáció -------------------------------------------

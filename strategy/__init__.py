@@ -12,7 +12,8 @@ A `get_strategy()` adja vissza az aktívat (config-vezérelt).
 """
 
 from strategy.base import (
-    Strategy, Column, CountdownColumn, StrategyColumn, MarketData, Cell, Timeframe,
+    Strategy, Column, CountdownColumn, StrategyColumn, MarkerColumn,
+    MarketData, Cell, Timeframe,
 )
 
 
@@ -29,6 +30,6 @@ def get_strategy(cfg: dict) -> Strategy:
 
 
 __all__ = [
-    "Strategy", "Column", "CountdownColumn", "StrategyColumn",
+    "Strategy", "Column", "CountdownColumn", "StrategyColumn", "MarkerColumn",
     "MarketData", "Cell", "Timeframe", "get_strategy",
 ]

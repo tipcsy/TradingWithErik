@@ -152,7 +152,26 @@ class PairRow:
         # Nem csomagoljuk magát — _apply_filter_sort() kezeli
 
         self.labels: dict[str, tk.Label] = {}
+        # Körös jelölő-oszlopok: col.key → (frame, [(stádium_kulcs, kör-Label), …]).
+        # A fix szélességű Frame (pack_propagate ki) igazodik a fejléc-oszlophoz
+        # (width karakter × mono px + 2×padx), a körök benne elosztva.
+        self.markers: dict[str, tuple] = {}
+        _charpx = mono_font.measure("0")
+        _cellh  = mono_font.metrics("linespace") + 6
         for col in self.columns:
+            if col.kind == "marker":
+                cell = tk.Frame(self.frame, bg=self._bg,
+                                width=_charpx * col.width + 8, height=_cellh)
+                cell.pack(side="left")
+                cell.pack_propagate(False)
+                circles = []
+                for skey, _slabel in col.stages:
+                    c = tk.Label(cell, text="●", bg=self._bg, fg=FG_GRAY,
+                                 font=mono_font, padx=0)
+                    c.pack(side="left", expand=True)
+                    circles.append((skey, c))
+                self.markers[col.key] = (cell, circles)
+                continue
             lbl = tk.Label(self.frame, text="—", width=col.width, anchor=col.anchor,
                            bg=self._bg, fg=FG_GRAY, font=mono_font, padx=4, pady=3)
             lbl.pack(side="left")
@@ -201,7 +220,26 @@ class PairRow:
         for col in self.columns:
             if col.key == "symbol" or col.key in except_keys:
                 continue
+            if col.kind == "marker":
+                for _skey, c in self.markers[col.key][1]:
+                    c.config(text="●", fg=fg)
+                continue
             self.labels[col.key].config(text="—", fg=fg)
+
+    def _render_marker(self, col, ds, trained, no_trade, bg):
+        """A jelölő-oszlop köreinek frissítése: stádiumonként egy kör a
+        strategy_cells[stádium_kulcs] cellából (glifa+szín). Az ELSŐ kör a
+        no-trade órában ⏸ (időszakon kívüli) jelet kap."""
+        _frame, circles = self.markers[col.key]
+        for idx, (skey, c) in enumerate(circles):
+            if no_trade and idx == 0:
+                c.config(text="⏸", fg=FG_GRAY, bg=bg)
+                continue
+            cell = ds.strategy_cells.get(skey) if trained else None
+            if cell:
+                c.config(text=cell[0], fg=sem_color(cell[1]), bg=bg)
+            else:
+                c.config(text="●", fg=FG_GRAY, bg=bg)
 
     def update(self, ds, inst_state: str, opt_status: str, connected: bool = True,
                no_trade: bool = False):
@@ -221,6 +259,10 @@ class PairRow:
         self.frame.config(bg=bg)
         for lbl in self.labels.values():
             lbl.config(bg=bg)
+        for frame, circles in self.markers.values():
+            frame.config(bg=bg)
+            for _skey, c in circles:
+                c.config(bg=bg)
 
         sym_lbl = self.labels["symbol"]
 
@@ -294,6 +336,8 @@ class PairRow:
                     self.labels[key].config(text="—", fg=FG_GRAY)
                 else:
                     self.labels[key].config(text=f"{rem//60}:{rem%60:02d}", fg=FG_GRAY)
+            elif col.kind == "marker":
+                self._render_marker(col, ds, trained, no_trade, bg)
             else:  # strategy
                 cell = ds.strategy_cells.get(key) if trained else None
                 if cell:
@@ -2794,6 +2838,9 @@ def _demo_dashboard(cfg: dict):
 
     db, inst_state, opt_status = {}, {}, {}
     strat_keys = [c.key for c in strategy.columns() if c.kind == "strategy"]
+    # Körös jelölő stádium-kulcsai (a demó ezeket tölti random körökkel)
+    stage_keys = [sk for c in strategy.columns() if c.kind == "marker"
+                  for sk, _ in c.stages]
 
     for i, symbol in enumerate(symbols):
         trained = symbol in real_trained
@@ -2830,9 +2877,13 @@ def _demo_dashboard(cfg: dict):
                 elif "sig" in k:
                     sig = random.choice([("BUY▲", "green"), ("SELL▼", "red"), ("—", "muted")])
                     ds.strategy_cells[k] = sig
-                else:  # sma_dir
+                else:  # irány-oszlop
                     d = random.choice([("BUY", "green"), ("SELL", "red"), ("—", "muted")])
                     ds.strategy_cells[k] = d
+            # Körös jelölő stádiumai: random színes kör
+            for sk in stage_keys:
+                ds.strategy_cells[sk] = ("●", random.choice(
+                    ["green", "red", "muted", "muted"]))
         for tf in strategy.timeframes():
             ds.timeframe_remaining[tf.minutes] = random.randint(0, tf.minutes * 60 - 1)
         db[symbol] = ds
