@@ -65,9 +65,24 @@ TRAILING_COLUMNS = [
 ]
 
 
-def build_columns(strategy) -> list[Column]:
-    """A teljes oszloplista: fix elöl + stratégia középen + fix hátul."""
-    return LEADING_COLUMNS + list(strategy.columns()) + TRAILING_COLUMNS
+def build_columns(strategies) -> list[Column]:
+    """A teljes oszloplista: fix elöl + stratégiánként a középső oszlopok + fix hátul.
+
+    `strategies`: egy Strategy VAGY Strategy-lista (több-stratégia). Minden stratégia
+    jelölő-oszlopa a stratégia nevét kapja fejlécnek + egyedi kulcsot + strategy_name-t
+    (így a per-instrumentum be/ki és a per-stratégia cellák szétválaszthatók)."""
+    from dataclasses import replace as _replace
+    if not isinstance(strategies, (list, tuple)):
+        strategies = [strategies]
+    mid: list[Column] = []
+    for st in strategies:
+        for col in st.columns():
+            if col.kind == "marker":
+                mid.append(_replace(col, key=f"{col.key}_{st.name}",
+                                    header=st.name, strategy_name=st.name))
+            else:
+                mid.append(col)
+    return LEADING_COLUMNS + mid + TRAILING_COLUMNS
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +157,7 @@ def _fixed_cell(key: str, ds, opt_status: str, inst_state: str) -> tuple[str, st
 class PairRow:
     def __init__(self, parent: tk.Frame, symbol: str, row_idx: int, columns: list,
                  on_run, on_opt, on_delete, on_risky, on_name_click, mono_font, small_font,
-                 on_status_click=None, on_viz=None):
+                 on_status_click=None, on_viz=None, on_marker_click=None):
         self.symbol  = symbol
         self.columns = columns
         self._bg     = BG_ROW_ODD if row_idx % 2 == 0 else BG_ROW_EVEN
@@ -164,10 +179,20 @@ class PairRow:
                                 width=_charpx * col.width + 8, height=_cellh)
                 cell.pack(side="left")
                 cell.pack_propagate(False)
+                # A körökre kattintva → az adott STRATÉGIA paraméterei (Stratégia
+                # Paraméterek ablak). A stratégia neve az oszlopból (col.strategy_name).
+                if on_marker_click is not None:
+                    cell.config(cursor="hand2")
+                    cell.bind("<Button-1>",
+                              lambda e, sn=col.strategy_name: on_marker_click(symbol, sn))
                 circles = []
                 for skey, _slabel in col.stages:
                     c = tk.Label(cell, text="●", bg=self._bg, fg=FG_GRAY,
                                  font=mono_font, padx=0)
+                    if on_marker_click is not None:
+                        c.config(cursor="hand2")
+                        c.bind("<Button-1>",
+                               lambda e, sn=col.strategy_name: on_marker_click(symbol, sn))
                     c.pack(side="left", expand=True)
                     circles.append((skey, c))
                 self.markers[col.key] = (cell, circles)
@@ -227,15 +252,24 @@ class PairRow:
             self.labels[col.key].config(text="—", fg=fg)
 
     def _render_marker(self, col, ds, trained, no_trade, bg):
-        """A jelölő-oszlop köreinek frissítése: stádiumonként egy kör a
-        strategy_cells[stádium_kulcs] cellából (glifa+szín). Az ELSŐ kör a
-        no-trade órában ⏸ (időszakon kívüli) jelet kap."""
+        """A jelölő-oszlop köreinek frissítése egy STRATÉGIÁHOZ (col.strategy_name):
+        stádiumonként egy kör a strategy_cells[strat][stádium] cellából (glifa+szín).
+        Ha a stratégia ezen az instrumentumon KI van kapcsolva → halvány szürke körök.
+        Az ELSŐ kör a no-trade órában ⏸ (időszakon kívüli) jelet kap."""
         _frame, circles = self.markers[col.key]
+        sname = col.strategy_name
+        enabled_list = getattr(ds, "enabled_strategies", None) or []
+        # Üres lista → az egyetlen/aktív stratégia engedélyezett (visszafelé komp.).
+        strat_enabled = (sname in enabled_list) if enabled_list else True
+        cells = ds.strategy_cells.get(sname, {}) if (trained and strat_enabled) else {}
         for idx, (skey, c) in enumerate(circles):
+            if not strat_enabled:
+                c.config(text="●", fg=FG_GRAY_DIM, bg=bg)   # kikapcsolt stratégia
+                continue
             if no_trade and idx == 0:
                 c.config(text="⏸", fg=FG_GRAY, bg=bg)
                 continue
-            cell = ds.strategy_cells.get(skey) if trained else None
+            cell = cells.get(skey)
             if cell:
                 c.config(text=cell[0], fg=sem_color(cell[1]), bg=bg)
             else:
@@ -1458,7 +1492,10 @@ class DashboardWindow:
         self._on_stop         = on_stop_pair
         self._on_slots_change = on_slots_change
         self.strategy         = strategy or get_strategy(cfg)
-        self._columns         = build_columns(self.strategy)
+        # Több-stratégia: oszlop MINDEN regisztrált stratégiához (fejléc = neve).
+        from strategy import registered_strategy_names, get_strategy_by_name
+        self._all_strategies  = [get_strategy_by_name(n) for n in registered_strategy_names()]
+        self._columns         = build_columns(self._all_strategies)
         # Stratégia-hatókörű params-tárolás: aktív stratégia + egyszeri migráció.
         from core.params_store import set_active_strategy, migrate_flat_layout
         set_active_strategy(self.strategy.name)
@@ -1673,9 +1710,10 @@ class DashboardWindow:
                 self._table_frame, symbol, idx, self._columns,
                 on_run=self._handle_run, on_opt=self._handle_opt,
                 on_delete=self._handle_delete, on_risky=self._handle_risky,
-                on_name_click=self._show_instrument_params,
+                on_name_click=self._show_instrument_settings,
                 mono_font=mono_font, small_font=small_font,
-                on_status_click=self._show_opt_log, on_viz=self._handle_viz)
+                on_status_click=self._show_opt_log, on_viz=self._handle_viz,
+                on_marker_click=self._show_strategy_params)
 
         self._apply_filter_sort()
 
@@ -1906,9 +1944,10 @@ class DashboardWindow:
             self._table_frame, symbol, idx, self._columns,
             on_run=self._handle_run, on_opt=self._handle_opt,
             on_delete=self._handle_delete, on_risky=self._handle_risky,
-            on_name_click=self._show_instrument_params,
+            on_name_click=self._show_instrument_settings,
             mono_font=self._mono_font, small_font=self._small_font,
-            on_status_click=self._show_opt_log, on_viz=self._handle_viz)
+            on_status_click=self._show_opt_log, on_viz=self._handle_viz,
+            on_marker_click=self._show_strategy_params)
         self._apply_filter_sort()
 
     # ── JSON szintaxis-színezés (Text widgethez) ─────────────────────────
@@ -2017,15 +2056,81 @@ class DashboardWindow:
         tk.Button(btns, text="Mégse", bg=BTN_DIS_BG, fg=BTN_DIS_FG, relief="flat",
                   font=self._small_font, command=popup.destroy).pack(side="left", padx=6)
 
-    # ── Instrumentum-paraméter szerkesztő (a Symbol-cellára kattintva) ──
-    def _show_instrument_params(self, symbol: str):
-        """Az ablak a dashboard/instrument_dialog modulban él (a gui.py-t
-        tehermentesítendő). Optimalizálatlan párnál is nyílik: ilyenkor
-        alap-paraméterekkel jön, és a Mentés létrehozza a {symbol}.json-t."""
+    # ── Stratégia Paraméterek (a KÖRRE kattintva — az adott stratégiáé) ──
+    def _show_strategy_params(self, symbol: str, strategy_name: str = ""):
+        """A jelölő-körre kattintva az ADOTT stratégia paraméter-ablaka nyílik.
+        Optimalizálatlan párnál is nyílik (alap-paraméterek); a Mentés létrehozza
+        a data/optimized_params/<strategy>/<symbol>.json-t."""
         from dashboard.instrument_dialog import InstrumentParamsDialog
+        from strategy import get_strategy_by_name
+        strat = get_strategy_by_name(strategy_name) if strategy_name else self.strategy
         InstrumentParamsDialog(
-            self.root, symbol, self.cfg, self.strategy,
+            self.root, symbol, self.cfg, strat,
             self._header_font, self._small_font, self._save_main_config)
+
+    def _show_instrument_params(self, symbol: str):
+        """Visszafelé komp.: az elsődleges stratégia paraméterei (a Pozíciók fül
+        a Symbol-névre kattintva ezt hívja)."""
+        self._show_strategy_params(symbol, self.strategy.name)
+
+    # ── Instrumentum beállítások (az instrumentum NEVÉRE kattintva) ──────
+    def _show_instrument_settings(self, symbol: str):
+        """Mely stratégiák aktívak ezen az instrumentumon (több is választható →
+        pairs.<sym>.strategies). A per-stratégia kockázatcsökkentés és a V-gomb
+        stratégiája később kerül ide (a jegyzet szerint tisztázandó)."""
+        from strategy import (registered_strategy_names, enabled_strategy_names,
+                              default_strategy_name)
+        popup = tk.Toplevel(self.root)
+        popup.title(f"{symbol} — instrumentum beállítások")
+        popup.configure(bg=BG)
+        popup.grab_set()
+        tk.Label(popup, text=symbol, bg=BG, fg=FG_WHITE,
+                 font=self._header_font).pack(anchor="w", padx=12, pady=(12, 2))
+        tk.Label(popup, text="Aktív stratégiák ezen az instrumentumon (több is "
+                             "választható):", bg=BG, fg=FG_GRAY,
+                 font=self._small_font).pack(anchor="w", padx=12, pady=(4, 2))
+        cur = set(enabled_strategy_names(self.cfg, symbol))
+        _vars = {}
+        for name in registered_strategy_names():
+            v = tk.BooleanVar(value=(name in cur))
+            _vars[name] = v
+            tk.Checkbutton(popup, text=name, variable=v, bg=BG, fg=FG_WHITE,
+                           selectcolor=BG_HEADER, font=self._small_font,
+                           activebackground=BG, activeforeground=FG_WHITE).pack(
+                           anchor="w", padx=20)
+        lbl = tk.Label(popup, text="", bg=BG, fg=FG_GRAY, font=self._small_font,
+                       wraplength=360, justify="left")
+        lbl.pack(anchor="w", padx=12, pady=(2, 0))
+
+        def _save():
+            chosen = [n for n in registered_strategy_names() if _vars[n].get()]
+            if not chosen:
+                lbl.config(text="Legalább egy stratégia legyen aktív.", fg=FG_RED)
+                return
+            pc = self.cfg.setdefault("pairs", {}).setdefault(symbol, {})
+            # Ha csak az elsődleges → ne szennyezzük a configot (default viselkedés).
+            if chosen == [default_strategy_name(self.cfg)]:
+                pc.pop("strategies", None)
+            else:
+                pc["strategies"] = chosen
+            # A tábla szürkítése azonnal követi (a következő frissítéskor); a
+            # KERESKEDÉS a következő botindításkor veszi át az új stratégialistát.
+            ds = self.dashboard_ref.get(symbol)
+            if ds is not None:
+                ds.enabled_strategies = chosen
+            try:
+                self._save_main_config()
+                lbl.config(text=f"Mentve: {', '.join(chosen)}. A tábla azonnal követi; "
+                                f"a kereskedés a következő botindításkor.", fg=FG_GREEN)
+            except Exception as ex:
+                lbl.config(text=f"Mentési hiba: {ex}", fg=FG_RED)
+
+        btns = tk.Frame(popup, bg=BG)
+        btns.pack(pady=10)
+        tk.Button(btns, text="Mentés", bg=BTN_PLAY_BG, fg=BTN_PLAY_FG, relief="flat",
+                  font=self._small_font, command=_save).pack(side="left", padx=6)
+        tk.Button(btns, text="Bezárás", bg=BTN_DIS_BG, fg=BTN_DIS_FG, relief="flat",
+                  font=self._small_font, command=popup.destroy).pack(side="left", padx=6)
 
     # ── Opt státusz részletek (a státusz-cellára kattintva) ──────────────
     @staticmethod
@@ -2545,16 +2650,30 @@ class DashboardWindow:
             bars[label] = df
 
         md = MarketData(symbol=symbol, params=params, bars=bars)
-        # Ha a MOTOR (LIVE pár) frissen írta a jelzés-cellákat a saját
-        # állapotából, NE írjuk felül a rekonstrukcióval — a motor élő állapota
-        # az egyetlen forrás. Ha a motor rég nem frissített (STOPPED / session-en
-        # kívül / demo), a GUI rekonstrukciója veszi át.
+        # Az instrumentumon ENGEDÉLYEZETT stratégiák (a GUI szürkíti a kikapcsoltakat).
+        from strategy import enabled_strategy_names, get_strategy_by_name
+        enabled = enabled_strategy_names(self.cfg, symbol)
+        ds.enabled_strategies = enabled
+        # Ha a MOTOR (LIVE pár) frissen írta a jelzés-cellákat a saját állapotából,
+        # NE írjuk felül a rekonstrukcióval — a motor az egyetlen forrás. Ha a motor
+        # rég nem frissített (STOPPED / session-en kívül / demo), a GUI rekonstruál
+        # STRATÉGIÁNKÉNT, mindegyik a SAJÁT paramétereivel (per-stratégia cellák).
         if time.time() - getattr(ds, "cells_ts", 0.0) >= 30.0:
-            try:
-                cells = self.strategy.compute_display(md)
-                ds.strategy_cells = {k: (c.text, c.color) for k, c in cells.items()}
-            except Exception:
-                pass
+            for sn in enabled:
+                try:
+                    st = get_strategy_by_name(sn)
+                    if sn == self.strategy.name:
+                        sp = params                    # már betöltve fent
+                    else:
+                        _f = params_file(symbol, sn)
+                        sp = (json.load(open(_f, encoding="utf-8")).get("params", {})
+                              if _f.exists() else st.base_params(self.cfg))
+                    smd = MarketData(symbol=symbol, params=sp, bars=bars)
+                    cells = st.compute_display(smd)
+                    ds.strategy_cells[sn] = {k: (c.text, c.color)
+                                             for k, c in cells.items()}
+                except Exception:
+                    pass
 
         # Max spread (ATR-alapú) — a fő időkeret ATR-jéből
         if info and info.point > 0:
@@ -2844,10 +2963,11 @@ def _demo_dashboard(cfg: dict):
     random.shuffle(states_pool)
 
     db, inst_state, opt_status = {}, {}, {}
-    strat_keys = [c.key for c in strategy.columns() if c.kind == "strategy"]
-    # Körös jelölő stádium-kulcsai (a demó ezeket tölti random körökkel)
-    stage_keys = [sk for c in strategy.columns() if c.kind == "marker"
-                  for sk, _ in c.stages]
+    from strategy import registered_strategy_names, get_strategy_by_name
+    reg_strats = [get_strategy_by_name(n) for n in registered_strategy_names()]
+    # Per-stratégia stádium-kulcsok a demó köreihez {strat_név: [stádium_kulcs,…]}
+    stages_by_strat = {st.name: [sk for c in st.columns() if c.kind == "marker"
+                                 for sk, _ in c.stages] for st in reg_strats}
 
     for i, symbol in enumerate(symbols):
         trained = symbol in real_trained
@@ -2875,22 +2995,14 @@ def _demo_dashboard(cfg: dict):
             position_pnl=None, risk_free=False, daily_pnl=0.0,
             opt_grade=grade_cell, opt_grade_reason=grade_reason,
             viz_enabled=cfg["pairs"][symbol].get("viz_enabled", True),
+            enabled_strategies=[st_.name for st_ in reg_strats],
         )
-        # Stratégia-cellák szimulálása (csak LIVE pároknál mutatunk értéket)
+        # Stratégia-cellák szimulálása per stratégia (csak LIVE pároknál)
         if st == "LIVE":
-            for k in strat_keys:
-                if "wpr" in k:
-                    ds.strategy_cells[k] = (f"{random.uniform(-95,-5):.1f}", "white")
-                elif "sig" in k:
-                    sig = random.choice([("BUY▲", "green"), ("SELL▼", "red"), ("—", "muted")])
-                    ds.strategy_cells[k] = sig
-                else:  # irány-oszlop
-                    d = random.choice([("BUY", "green"), ("SELL", "red"), ("—", "muted")])
-                    ds.strategy_cells[k] = d
-            # Körös jelölő stádiumai: random színes kör
-            for sk in stage_keys:
-                ds.strategy_cells[sk] = ("●", random.choice(
-                    ["green", "red", "muted", "muted"]))
+            for sname, sks in stages_by_strat.items():
+                ds.strategy_cells[sname] = {
+                    sk: ("●", random.choice(["green", "red", "muted", "muted"]))
+                    for sk in sks}
         for tf in strategy.timeframes():
             ds.timeframe_remaining[tf.minutes] = random.randint(0, tf.minutes * 60 - 1)
         db[symbol] = ds

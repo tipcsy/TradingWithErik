@@ -17,6 +17,17 @@ from strategy.base import (
 )
 
 
+# A regisztrált (ismert) stratégiák nevei — a dashboard ezekből képez EGY-EGY
+# jelölő-oszlopot (fejléc = stratégia neve). Új stratégia = egy név ide + egy ág a
+# get_strategy_by_name-ben + egy modul a strategy/-ben.
+_REGISTERED = ("wpr_sma",)
+
+
+def registered_strategy_names() -> list[str]:
+    """A dashboard-oszlopokhoz: az összes ismert stratégia neve (sorrendben)."""
+    return list(_REGISTERED)
+
+
 # A stratégia-példányok gyorsítótára (stratégia-nevenként EGY példány; a példány
 # állapotmentes az élő jelzésállapoton kívül, amit páronként külön tartunk).
 _INSTANCES: dict[str, Strategy] = {}
@@ -74,5 +85,5 @@ __all__ = [
     "Strategy", "Column", "CountdownColumn", "StrategyColumn", "MarkerColumn",
     "MarketData", "Cell", "Timeframe",
     "get_strategy", "get_strategy_by_name", "default_strategy_name",
-    "enabled_strategy_names", "strategies_for",
+    "enabled_strategy_names", "strategies_for", "registered_strategy_names",
 ]

@@ -47,8 +47,11 @@ class Column:
     timeframe_min: int = 0    # countdown esetén: az időkeret percben
     # marker esetén: a stádiumok (feltételek) sorrendben — (stádium_kulcs, felirat).
     # A megjelenítés stádiumonként EGY kört rajzol; a kör színe/glifája a
-    # strategy_cells[stádium_kulcs] cellából jön (glifa=szöveg, szín=szín-név).
+    # strategy_cells[strategy_name][stádium_kulcs] cellából jön (glifa=szöveg,
+    # szín=szín-név). `strategy_name`: MELYIK stratégiát mutatja ez a jelölő-oszlop
+    # (több-stratégia: oszloponként egy). Üres = az egyetlen/aktív stratégia.
     stages: tuple = ()
+    strategy_name: str = ""
 
 
 def StrategyColumn(key: str, header: str, width: int = 8, anchor: str = "center") -> Column:
@@ -56,15 +59,17 @@ def StrategyColumn(key: str, header: str, width: int = 8, anchor: str = "center"
     return Column(key=key, header=header, width=width, anchor=anchor, kind="strategy")
 
 
-def MarkerColumn(key: str, header: str, stages, width: int | None = None) -> Column:
+def MarkerColumn(key: str, header: str, stages, width: int | None = None,
+                 strategy_name: str = "") -> Column:
     """Körös jelölő-oszlop: stádiumonként EGY kör (`● ● ●`). A `stages` egy
     (stádium_kulcs, felirat) sorozat; a stratégia a `compute_display`/`live_cells`
     a stádium-kulcsokra ad kör-glifás cellát (`Cell("●", szín-név)`). A fejléc
-    általában a stratégia neve. A szélesség alapból a körök számából adódik."""
+    általában a stratégia neve. `strategy_name`: melyik stratégiát mutatja (több-
+    stratégia). A szélesség alapból a körök számából adódik."""
     stages = tuple(tuple(s) for s in stages)
     w = width if width is not None else max(len(header), 2 * len(stages) + 1)
     return Column(key=key, header=header, width=w, anchor="center",
-                  kind="marker", stages=stages)
+                  kind="marker", stages=stages, strategy_name=strategy_name)
 
 
 def CountdownColumn(timeframe_min: int, header: str, width: int = 7) -> Column:

@@ -97,13 +97,16 @@ class PairDashboardState:
     max_spread_pts:   int  = 0      # megengedett max spread pontban
     timeframe_remaining: dict = field(default_factory=dict)  # {percek: hátralévő mp}
 
-    # ── Stratégia-specifikus cellák: {oszlop_kulcs: (szöveg, szín-név)} ───
-    # LIVE párnál a MOTOR tölti a saját jelzésállapotából (strategy.live_cells) →
-    # a tábla PONTOSAN azt mutatja, amivel a motor kereskedik. STOPPED/preview
-    # párnál a GUI tölti (compute_display). A cells_ts a motor utolsó írásának
-    # ideje: ha friss, a GUI nem írja felül a rekonstrukcióval.
+    # ── Stratégia-specifikus cellák PER STRATÉGIA: {strat_név: {stádium: (szöveg,
+    # szín-név)}} ─── Több stratégia futhat egy páron, mindegyiknek SAJÁT oszlopa/
+    # köre van. LIVE párnál a MOTOR tölti a saját jelzésállapotából (live_cells);
+    # STOPPED/preview párnál a GUI (compute_display). A cells_ts a motor utolsó
+    # írásának ideje (bármely stratégia): ha friss, a GUI nem írja felül.
     strategy_cells:   dict = field(default_factory=dict)
     cells_ts:         float = 0.0
+    # Mely stratégiák engedélyezettek ezen az instrumentumon (a GUI szürkíti a
+    # ki-kapcsoltak köreit). Üres → az elsődleges/aktív stratégia.
+    enabled_strategies: list = field(default_factory=list)
 
     # Per-instrumentum vizualizáció ki/be (a GUI V gombja billenti). A motor
     # csak akkor írja a viz-fájlt, ha ez True. Kikapcsoláskor a GUI törli a
@@ -607,15 +610,15 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
 
     # A tábla jelzés-celláit a MOTOR ÉLŐ állapotából töltjük (nem külön
     # rekonstrukcióból) → a kijelzés PONTOSAN azt mutatja, amivel kereskedünk.
-    # Több stratégia esetén CSAK az elsődleges (is_display) írja a soron a köröket,
-    # hogy ne írják felül egymást (a per-stratégia oszlopok az A4-ben jönnek).
-    if getattr(state, "is_display", True):
-        try:
-            cells = strategy.live_cells(state.strat_state, md)
-            ds.strategy_cells = {k: (c.text, c.color) for k, c in cells.items()}
-            ds.cells_ts = time.time()
-        except Exception:
-            pass
+    # Több stratégia esetén MINDEGYIK a SAJÁT oszlopát/köreit írja (per-stratégia
+    # kulcs), így nem írják felül egymást.
+    try:
+        cells = strategy.live_cells(state.strat_state, md)
+        ds.strategy_cells[strategy.name] = {k: (c.text, c.color)
+                                            for k, c in cells.items()}
+        ds.cells_ts = time.time()
+    except Exception:
+        pass
 
     # --- Pozícióterv (méretezés) a STRATÉGIÁTÓL + spread-kapu ─────────────
     # Konvenció: az első deklarált időkeret a "fő" (magasabb). Az SL/TP-méretet a
@@ -978,6 +981,7 @@ def run(cfg: dict, slot_mgr: SlotManager):
             enabled=pair_cfg.get("enabled", False),
             trained=trained,
             viz_enabled=pair_cfg.get("viz_enabled", True),   # V mód a config.json-ból
+            enabled_strategies=[st.name for st in strats],
         )
         # Kezdeti állapot: ha enabled és van tanított stratégia → LIVE
         if pair_cfg.get("enabled", False) and trained:
