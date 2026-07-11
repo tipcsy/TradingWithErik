@@ -108,6 +108,12 @@ class PairDashboardState:
     # ki-kapcsoltak köreit). Üres → az elsődleges/aktív stratégia.
     enabled_strategies: list = field(default_factory=list)
 
+    # Piac-előszűrő (market strategy) — a kiválasztott osztályozó neve (vagy None),
+    # és az AKTUÁLIS piac-állapot rövid címkéje + szemantikus színe a „Piac" oszlophoz.
+    market_strategy:    Optional[str] = None
+    market_state_label: str = ""
+    market_state_color: str = "muted"
+
     # Per-instrumentum vizualizáció ki/be (a GUI V gombja billenti). A motor
     # csak akkor írja a viz-fájlt, ha ez True. Kikapcsoláskor a GUI törli a
     # chart-objektumokat (mt5_visual.clear).
@@ -382,6 +388,34 @@ def apply_no_trade(objects: list, pair_cfg: dict) -> list:
     return result
 
 
+def apply_market_state(objects: list, df15, pair_cfg: dict = None) -> list:
+    """KERETRENDSZER-szintű PIAC-ÁLLAPOT overlay: minden per-gyertya `BarState`-hez
+    beállítja a `market_state` KÓDOT a per-pár KIVÁLASZTOTT piac-stratégia (config
+    `pairs.<sym>.market_strategy`) M15-ös besorolásából.
+
+    Csak akkor tölt, ha (1) van kiválasztott piac-stratégia ÉS (2) a `market_viz`
+    kérve van — különben a kód 0 marad (a Bands-sáv üres). OSZTÁLYOZÓ-FÜGGETLEN: ha
+    más piac-stratégiát választasz, CSAK a besorolás cserélődik; a mező + a sáv marad."""
+    from core import market_strategy as _ms
+    pc = pair_cfg or {}
+    name = _ms.market_name_of(pc)
+    if not name or not pc.get("market_viz", True):
+        return objects                      # nincs osztályozó VAGY nem kérik a charton
+    if df15 is None or len(df15) < 3:
+        return objects
+    try:
+        from strategy import visual as viz
+        s = _ms.classify_series(name, df15)
+        code_by_epoch = {int(ts.timestamp()): _ms.code(name, cat)
+                         for ts, cat in s.items()}
+        for o in objects:
+            if isinstance(o, viz.BarState):
+                o.market_state = code_by_epoch.get(int(o.t), 0)
+    except Exception as e:
+        log.debug("piac-állapot overlay hiba: %s", e)
+    return objects
+
+
 def actual_trade_objects(symbol: str, since_ts: int) -> list:
     """A VALÓS kötések (MT5 deal-history) rétege — a replay jel-vonalaktól eltérő:
       • belépő-NYÍL a tényleges betöltési áron (fel=BUY / le=SELL),
@@ -473,11 +507,12 @@ def actual_trade_objects(symbol: str, since_ts: int) -> list:
     return objs
 
 
-def write_pair_visuals(symbol: str, params: dict, strategy, pip_size: float,
-                       pair_cfg: dict = None):
-    """A stratégia + keretrendszer rajzolási objektumait kiírja a viz-fájlba. MÉLY
-    adatablakot tölt (visual_lookback_bars) — több, mint a jelzés-warmup —, hogy a
-    megjelenített előzmény (SMA-szalag) több napra visszamenjen."""
+def pair_visual_lines(symbol: str, params: dict, strategy, pip_size: float,
+                      pair_cfg: dict = None) -> list:
+    """Egy stratégia + keretrendszer rajz-objektumainak TAGELT sorai (a stratégia
+    nevével — `strategy.visual.tag_line`), hogy több stratégia UGYANABBA a
+    szimbólum-fájlba írhasson, az MQL5 indikátor pedig `InpStrategy` szerint szűrjön.
+    MÉLY adatablakot tölt (visual_lookback_bars). Üres lista, ha nincs adat."""
     bars = {}
     for tf in strategy.timeframes():
         n = strategy.visual_lookback_bars(params, tf.label)
@@ -485,21 +520,63 @@ def write_pair_visuals(symbol: str, params: dict, strategy, pip_size: float,
             continue
         df = get_candles(symbol, mt5_timeframe(tf.minutes), n)
         if df is None or len(df) < 3:
-            return
+            return []
         bars[tf.label] = df
     if not bars:
-        return
+        return []
     # pip_size a jövőbeli TP/SL-rajzoláshoz (feltétel 3) — a params nem tartalmazza.
     md = MarketData(symbol=symbol, params={**params, "pip_size": pip_size}, bars=bars)
-    # A stratégia per-gyertya BarState-jeire a keret RÁMASZKOLJA a no-trade órákat
-    # (a szürke sáv + a trend/kék eltüntetése ott) — a Viz csak megjeleníti.
+    # A stratégia per-gyertya BarState-jeire a keret RÁMASZKOLJA a no-trade órákat.
     objects = apply_no_trade(strategy.visual_objects(md), pair_cfg or {})
-    # + a VALÓS kötések nyilai ugyanarra az M1-ablakra (a replay-jelek mellé, hogy
-    # látszódjon, melyik jelből lett tényleges trade). A maszkolás UTÁN fűzzük hozzá.
+    # + a GENERIKUS piac-állapot kód a per-gyertya BarState-ekhez (a per-pár
+    #   kiválasztott piac-stratégiából; csak ha kérve van a charton).
+    objects = apply_market_state(objects, bars.get("M15"), pair_cfg)
+    # + a VALÓS kötések nyilai ugyanarra az M1-ablakra (a maszkolás UTÁN).
     m1 = bars.get("M1")
     if m1 is not None and len(m1):
         objects = objects + actual_trade_objects(symbol, int(m1.index[0].timestamp()))
-    mt5_visual.write(symbol, objects)
+    from strategy.visual import tag_line
+    return [tag_line(o.line(), strategy.name) for o in objects]
+
+
+def write_pair_visuals(symbol: str, params: dict, strategy, pip_size: float,
+                       pair_cfg: dict = None):
+    """Egy stratégia viz-e a szimbólum-fájlba (tool/kompat — pl. viz_render).
+    A több-stratégiás élő út a `run()` per-szimbólum koordinátorán megy át."""
+    mt5_visual.write_lines(
+        symbol, pair_visual_lines(symbol, params, strategy, pip_size, pair_cfg))
+
+
+def _write_symbol_viz(symbol, pair_cfg, strats, pair_states):
+    """Egy szimbólum chart-vizualizációja: MINDEN élő, engedélyezett stratégia
+    rajza EGY `TFV_<symbol>.csv` fájlba, stratégia-taggel (az MQL5 `InpStrategy`
+    input szerint szűr → az egyik chart-ablak az A-t, a másik a B-t mutatja).
+    Throttle-olva; a viz MEGJELENÍTÉS → kereskedési szünetben is frissül."""
+    ds = dashboard.get(symbol)
+    if not (VIZ_ENABLED and ds is not None and ds.viz_enabled):
+        return
+    now = time.time()
+    if now - _viz_last_write.get(symbol, 0.0) < VIZ_INTERVAL_SEC:
+        return
+    _viz_last_write[symbol] = now
+    pip_size = pair_cfg.get("pip_size")
+    if not pip_size:
+        return
+    lines = []
+    for st in strats:
+        key = (symbol, st.name)
+        if key not in pair_states:
+            continue
+        try:
+            # A LEGFRISSEBB JSON-paraméter (követi az instrumentum-ablak Mentését).
+            vparams = load_pair_params(symbol, st.name) or pair_states[key].params
+            lines += pair_visual_lines(symbol, vparams, st, pip_size, pair_cfg)
+        except Exception as e:
+            log.debug("%s/%s — viz sor hiba: %s", symbol, st.name, e)
+    try:
+        mt5_visual.write_lines(symbol, lines)
+    except Exception as e:
+        log.debug("%s — viz írás hiba: %s", symbol, e)
 
 
 # ---------------------------------------------------------------------------
@@ -544,24 +621,9 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         {**trading_cfg, "account_risk_pct": trading_cfg["account_risk_pct"] * 0.5}
         if _cautious else trading_cfg)
 
-    # --- MT5 chart-vizualizáció (throttle-olva, mély adatablakkal) ---
-    # A kereskedési kapuk (session/napi limit/adathiány) ELŐTT: a viz MEGJELENÍTÉS,
-    # nem kereskedés — kereskedési szüneten (pl. session-en kívül) is frissüljön,
-    # különben a sávok „megállnak" a session végén.
-    now_ts = time.time()
-    if (VIZ_ENABLED and ds.viz_enabled
-            and now_ts - _viz_last_write.get(symbol, 0.0) >= VIZ_INTERVAL_SEC):
-        _viz_last_write[symbol] = now_ts
-        try:
-            # A viz a LEGFRISSEBB JSON-paramétert használja → ha az instrumentum-
-            # ablakban átírod a paramétereket (Mentés), a chart-rajz KÖVETI (a
-            # következő viz-ciklusban). A KERESKEDÉS ellenben marad a Play-kori
-            # `state.params`-nál (nyitott pozíciót ne zavarjon meg) — az a következő
-            # Play-nél frissül. A V ki/be azonnal újrarajzoltat.
-            viz_params = load_pair_params(symbol) or params
-            write_pair_visuals(symbol, viz_params, strategy, pip_size, pair_cfg)
-        except Exception as e:
-            log.debug("%s — viz írás hiba: %s", symbol, e)
+    # A chart-vizualizációt a run() per-szimbólum koordinátora írja (minden
+    # engedélyezett stratégiát EGY fájlba, stratégia-taggel) — nem itt, mert egy
+    # szimbólumhoz több stratégia is futhat és nem írhatják felül egymás fájlját.
 
     # Óra-kapu: az engedélyezett órák LISTÁJA (trade_hours), amit kézzel állítasz
     # az óránkénti P&L-bontás alapján. Ha nincs trade_hours → visszaesik a régi
@@ -1080,6 +1142,8 @@ def run(cfg: dict, slot_mgr: SlotManager):
                         key = (symbol, st.name)
                         if key in pair_states:
                             process_pair(pair_states[key], slot_mgr, balance, st)
+                    # Chart-viz: minden élő stratégia EGY fájlba (stratégia-taggel).
+                    _write_symbol_viz(symbol, pair_cfg, strats, pair_states)
 
             time.sleep(10)
 

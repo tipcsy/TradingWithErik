@@ -60,6 +60,7 @@ LEADING_COLUMNS = [
 TRAILING_COLUMNS = [
     Column("position", "Pozíció",    10, "center", kind="fixed"),
     Column("daily",    "Napi P&L",    9, "center", kind="fixed"),
+    Column("market",   "Piac",       10, "center", kind="fixed"),
     Column("quality",  "Minőség",     9, "center", kind="fixed"),
     Column("opt",      "Opt státusz",12, "center", kind="fixed"),
 ]
@@ -135,6 +136,12 @@ def _fixed_cell(key: str, ds, opt_status: str, inst_state: str) -> tuple[str, st
         return "—", "muted"
     if key == "daily":
         return f"{ds.daily_pnl:+.2f}$", ("green" if ds.daily_pnl >= 0 else "red")
+    if key == "market":
+        # Piac-előszűrő aktuális állapota (ha van kiválasztva); egyébként „—".
+        if getattr(ds, "market_strategy", None):
+            return (getattr(ds, "market_state_label", "") or "—",
+                    getattr(ds, "market_state_color", "muted"))
+        return "—", "muted"
     if key == "quality":
         g = getattr(ds, "opt_grade", None)
         if g:
@@ -2098,9 +2105,26 @@ class DashboardWindow:
                            selectcolor=BG_HEADER, font=self._small_font,
                            activebackground=BG, activeforeground=FG_WHITE).pack(
                            anchor="w", padx=20)
+
+        # ── Piac-előszűrő (piac-állapot osztályozó) — instrumentumonként EGY ──
+        from core import market_strategy as _ms
+        _pc0 = (self.cfg.get("pairs", {}).get(symbol, {}) or {})
+        tk.Label(popup, text="Piac-előszűrő (piac-állapot osztályozó — 1/instrumentum):",
+                 bg=BG, fg=FG_GRAY, font=self._small_font).pack(anchor="w", padx=12, pady=(8, 2))
+        ms_var = tk.StringVar(value=(_ms.market_name_of(_pc0) or "Nincs"))
+        _om = tk.OptionMenu(popup, ms_var, *(["Nincs"] + _ms.registered_market_names()))
+        _om.config(bg=BG_HEADER, fg=FG_WHITE, font=self._small_font, relief="flat",
+                   highlightthickness=0, activebackground=BG_HEADER)
+        _om["menu"].config(bg=BG_HEADER, fg=FG_WHITE)
+        _om.pack(anchor="w", padx=20)
+        viz_var = tk.BooleanVar(value=bool(_pc0.get("market_viz", True)))
+        tk.Checkbutton(popup, text="Piac-állapot sáv a charton (Viz)", variable=viz_var,
+                       bg=BG, fg=FG_WHITE, selectcolor=BG_HEADER, font=self._small_font,
+                       activebackground=BG, activeforeground=FG_WHITE).pack(anchor="w", padx=20)
+
         lbl = tk.Label(popup, text="", bg=BG, fg=FG_GRAY, font=self._small_font,
                        wraplength=360, justify="left")
-        lbl.pack(anchor="w", padx=12, pady=(2, 0))
+        lbl.pack(anchor="w", padx=12, pady=(8, 0))
 
         def _save():
             chosen = [n for n in registered_strategy_names() if _vars[n].get()]
@@ -2113,15 +2137,28 @@ class DashboardWindow:
                 pc.pop("strategies", None)
             else:
                 pc["strategies"] = chosen
-            # A tábla szürkítése azonnal követi (a következő frissítéskor); a
-            # KERESKEDÉS a következő botindításkor veszi át az új stratégialistát.
+            # Piac-előszűrő + chart-sáv kapcsoló
+            msname = ms_var.get()
+            if msname in ("Nincs", "", "none"):
+                pc.pop("market_strategy", None)
+            else:
+                pc["market_strategy"] = msname
+            if viz_var.get():
+                pc.pop("market_viz", None)     # True az alap → ne szennyezze
+            else:
+                pc["market_viz"] = False
+            # A tábla szürkítése/piac-cellája azonnal követi (a következő frissítéskor);
+            # a KERESKEDÉS a következő botindításkor veszi át.
             ds = self.dashboard_ref.get(symbol)
             if ds is not None:
                 ds.enabled_strategies = chosen
+                ds.market_strategy = pc.get("market_strategy")
             try:
                 self._save_main_config()
-                lbl.config(text=f"Mentve: {', '.join(chosen)}. A tábla azonnal követi; "
-                                f"a kereskedés a következő botindításkor.", fg=FG_GREEN)
+                _mstxt = msname if msname != "Nincs" else "nincs piac-előszűrő"
+                lbl.config(text=f"Mentve: {', '.join(chosen)} | piac: {_mstxt}. A tábla "
+                                f"azonnal követi; a kereskedés a következő botindításkor.",
+                           fg=FG_GREEN)
             except Exception as ex:
                 lbl.config(text=f"Mentési hiba: {ex}", fg=FG_RED)
 
@@ -2654,6 +2691,17 @@ class DashboardWindow:
         from strategy import enabled_strategy_names, get_strategy_by_name
         enabled = enabled_strategy_names(self.cfg, symbol)
         ds.enabled_strategies = enabled
+        # Piac-előszűrő AKTUÁLIS állapota a „Piac" oszlophoz (ha van kiválasztva).
+        from core import market_strategy as _ms
+        _pcfg = self.cfg.get("pairs", {}).get(symbol, {}) or {}
+        ds.market_strategy = _ms.market_name_of(_pcfg)
+        if ds.market_strategy and bars.get("M15") is not None:
+            try:
+                _cat = _ms.latest_category(ds.market_strategy, bars["M15"])
+                if _cat:
+                    ds.market_state_label, ds.market_state_color = _ms.display(_cat)
+            except Exception:
+                pass
         # Ha a MOTOR (LIVE pár) frissen írta a jelzés-cellákat a saját állapotából,
         # NE írjuk felül a rekonstrukcióval — a motor az egyetlen forrás. Ha a motor
         # rég nem frissített (STOPPED / session-en kívül / demo), a GUI rekonstruál

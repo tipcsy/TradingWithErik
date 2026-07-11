@@ -49,6 +49,35 @@ def _name(name: str) -> str:
     return name if name.startswith(PREFIX) else PREFIX + name
 
 
+# A stratégia-tag elválasztója az objektum-névben: TFV_<strategy>@<eredeti_név>.
+# Így az MQL5 indikátor egy `InpStrategy` input alapján szűrhet (a névre), és
+# TÖBB stratégia objektumai UGYANABBAN a fájlban sem ütköznek (upsert stratégiánként).
+STRAT_SEP = "@"
+
+
+def tag_line(line: str, strategy: str) -> str:
+    """Egy sorosított objektum-sort megjelöl a stratégia nevével (több-stratégiás
+    viz: minden stratégia UGYANABBA a szimbólum-fájlba ír, az indikátor szűr).
+
+    - Nevesített objektum (RECT/VLINE/TREND/ARROW/TEXT/LABEL): a NÉV mezőt
+      namespace-eljük: `TFV_<eredeti>` → `TFV_<strategy>@<eredeti>`.
+    - Névtelen sor (STATE/IND): a stratégiát a TÍPUS UTÁN szúrjuk be (`STATE;<strat>;
+      …`), mert az IND változó-hosszú szint-listája miatt a sor VÉGE nem egyértelmű.
+    - CLEAR: érintetlen (direktíva).
+    `strategy` üres → a sor változatlan (egy-stratégiás, régi viselkedés)."""
+    if not strategy:
+        return line
+    typ, sep, rest = line.partition(";")
+    if typ == "CLEAR":
+        return line
+    if typ in ("STATE", "IND"):
+        return f"{typ};{strategy};{rest}" if sep else f"{typ};{strategy}"
+    fields = line.split(";")
+    if len(fields) >= 2 and fields[1].startswith(PREFIX):
+        fields[1] = PREFIX + strategy + STRAT_SEP + fields[1][len(PREFIX):]
+    return ";".join(fields)
+
+
 # ---------------------------------------------------------------------------
 # Primitívek — mindegyik egy `;`-elválasztott sorrá sorosítható (.line()).
 # ---------------------------------------------------------------------------
@@ -167,16 +196,23 @@ class BarState:
 
     A no-trade maszkolást a KÜLDŐ (live_trader) végzi: no-trade gyertyánál
     notrade=1 ÉS dir=0, window=0 (így a Viz csak a szürkét mutatja). A stratégia
-    az órákról nem tud → mindig notrade=0-t ad, a keret írja felül."""
+    az órákról nem tud → mindig notrade=0-t ad, a keret írja felül.
+
+    `market_state`: GENERIKUS piac-állapot kód (0 = nincs). A KERET (a per-pár
+    piac-stratégia) tölti fel — jelenleg a `core.regime` osztályozó kódjával, de
+    bármely más piac-osztályozó ugyanebbe a mezőbe/sávba írhat. A színt a
+    TradeForgeBands indikátor rendeli a kódhoz."""
     t: int
     notrade: int = 0
     dir: int = 0
     window: int = 0
+    market_state: int = 0
 
     def line(self) -> str:
         return ";".join([
             "STATE", str(int(self.t)), str(int(self.notrade)),
             str(int(self.dir)), str(int(self.window)),
+            str(int(self.market_state)),
         ])
 
 

@@ -36,11 +36,10 @@ def files_dir() -> Optional[Path]:
     return Path(info.commondata_path) / "Files"
 
 
-def write(symbol: str, objects: list) -> Optional[Path]:
-    """A `symbol` teljes objektum-pillanatképét kiírja `TFV_<symbol>.csv`-be.
-
-    Visszaad: a kiírt fájl útvonala, vagy None ha a Common\\Files nem elérhető.
-    """
+def write_lines(symbol: str, lines: list) -> Optional[Path]:
+    """A `symbol` teljes pillanatképét kiírja `TFV_<symbol>.csv`-be ELŐRE
+    sorosított sorokból (több-stratégiás viz: a hívó stratégiánként `tag_line`-nal
+    megjelölt sorokat ad). Atomikus (temp → replace)."""
     d = files_dir()
     if d is None:
         return None
@@ -48,7 +47,7 @@ def write(symbol: str, objects: list) -> Optional[Path]:
     path = d / f"{PREFIX}{symbol}.csv"
     tmp  = path.with_suffix(".csv.tmp")
 
-    payload = "\n".join(o.line() for o in objects)
+    payload = "\n".join(lines)
     if payload:
         payload += "\n"
     tmp.write_text(payload, encoding="ascii", errors="replace")
@@ -62,6 +61,12 @@ def write(symbol: str, objects: list) -> Optional[Path]:
         except PermissionError:
             time.sleep(0.05)
     return None
+
+
+def write(symbol: str, objects: list) -> Optional[Path]:
+    """A `symbol` objektum-pillanatképe (nem-tagelt, egy-stratégiás). Visszafelé
+    kompatibilis burok a `write_lines` fölött."""
+    return write_lines(symbol, [o.line() for o in objects])
 
 
 def clear(symbol: str) -> Optional[Path]:

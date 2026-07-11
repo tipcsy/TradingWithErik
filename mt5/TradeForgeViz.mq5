@@ -16,8 +16,10 @@
 
 input int    TimerSeconds = 1;       // Fájl-újraolvasás gyakorisága (mp)
 input string FilePrefix   = "TFV_";  // Objektum-név és fájl prefix
+input string InpStrategy  = "";      // Melyik STRATÉGIÁT mutassa (üres = MIND)
 
 string g_file;                    // TFV_<Symbol>.csv
+string g_objpref;                 // szűrő-prefix: TFV_ (mind) VAGY TFV_<InpStrategy>@
 bool   g_ind_done = false;        // az indikátorok fel vannak-e már rakva
 string g_ma_name  = "";           // a felrakott SMA rövidneve (fő ablak, leszedéshez)
 
@@ -43,6 +45,9 @@ void RemoveOurWPRs()
 int OnInit()
 {
    g_file = FilePrefix + _Symbol + ".csv";
+   // Szűrő-prefix: ha van InpStrategy, csak a TFV_<strat>@ nevű objektumok a mieink
+   // (a Python minden objektumot a stratégia nevével jelöl). Üres → minden TFV_.
+   g_objpref = (InpStrategy == "") ? FilePrefix : (FilePrefix + InpStrategy + "@");
    g_ind_done = false;
    g_ma_name  = "";
    RemoveOurWPRs();   // előző futás maradék WPR-jei (halmozódás ellen)
@@ -99,7 +104,7 @@ void RefreshFromFile()
          continue;
       if(StringFind(ln, "CLEAR") == 0)   // V-off: a saját objektumok törlése
       {
-         ObjectsDeleteAll(0, FilePrefix);
+         ObjectsDeleteAll(0, g_objpref);
          cleared = true;
          continue;
       }
@@ -126,7 +131,7 @@ void RefreshFromFile()
    // upsert így NŐ/mozgat, a söprés pedig eltakarít — nincs halmozódás.
    // A CLEAR ág külön van (már mindent törölt), ott nem söprünk.
    if(!cleared)
-      SweepOrphans(FilePrefix, seen, nseen);
+      SweepOrphans(g_objpref, seen, nseen);
 
    // Az indikátorokat CSAK EGYSZER rakjuk fel (amint először látjuk az IND sorokat).
    if(!g_ind_done && nind > 0)
@@ -151,6 +156,12 @@ string ApplyLine(string ln)
 
    string type = f[0];
    string name = f[1];
+
+   // Több-stratégia szűrő: csak a MI stratégiánk (g_objpref prefixű) objektumait
+   // rajzoljuk. A Python minden nevet TFV_<strat>@… alakúra jelöl; InpStrategy
+   // üresnél g_objpref="TFV_" → minden stratégia látszik.
+   if(StringFind(name, g_objpref) != 0)
+      return "";
 
    // RECT (SMA-szalag + M15 doboz) → a TradeForgeBands al-ablak rajzolja, itt kihagyjuk.
    if(type == "VLINE" && n >= 5) { UpsertVLine(name, f); return name; }
@@ -340,8 +351,11 @@ ENUM_TIMEFRAMES TfFromStr(string s)
 void SetupIndicators(string &inds[], int cnt)
 {
    // Szalag/doboz AL-ABLAK (TradeForgeBands) — a TradeForgeViz vezérli, hogy
-   // EGY indikátor rakjon fel mindent. FELTÉTEL: a TradeForgeBands.ex5 megvan.
-   int bh = iCustom(_Symbol, PERIOD_CURRENT, "TradeForgeBands");
+   // EGY indikátor rakjon fel mindent. Átadjuk a szűrő-stratégiát is (input-
+   // sorrend: TimerSeconds, FilePrefix, InpStrategy), hogy a sávok UGYANARRA a
+   // stratégiára szűrjenek, mint a Viz. FELTÉTEL: a TradeForgeBands.ex5 megvan.
+   int bh = iCustom(_Symbol, PERIOD_CURRENT, "TradeForgeBands",
+                    TimerSeconds, FilePrefix, InpStrategy);
    if(bh != INVALID_HANDLE)
       ChartIndicatorAdd(0, (int)ChartGetInteger(0, CHART_WINDOWS_TOTAL), bh);
 
@@ -349,13 +363,16 @@ void SetupIndicators(string &inds[], int cnt)
    {
       string f[];
       int n = StringSplit(inds[i], ';', f);
-      if(n < 4)
+      if(n < 5)                              // IND;<strat>;kind;tf;period;...
          continue;
-      string          kind   = f[1];
-      ENUM_TIMEFRAMES tf     = TfFromStr(f[2]);
-      int             period = (int)StringToInteger(f[3]);
+      // Több-stratégia szűrő: csak a MI stratégiánk indikátorai (f[1] = stratégia).
+      if(InpStrategy != "" && f[1] != InpStrategy)
+         continue;
+      string          kind   = f[2];
+      ENUM_TIMEFRAMES tf     = TfFromStr(f[3]);
+      int             period = (int)StringToInteger(f[4]);
 
-      // f[4] = vonalszín ("r,g,b" vagy "-" = alapértelmezett); WPR-nél f[5..] szintek.
+      // f[5] = vonalszín ("r,g,b" vagy "-" = alapértelmezett); WPR-nél f[6..] szintek.
       if(kind == "MA")
       {
          int hnd = iMA(_Symbol, tf, period, 0, MODE_SMA, PRICE_CLOSE);
@@ -368,11 +385,11 @@ void SetupIndicators(string &inds[], int cnt)
       {
          // Saját WPR (TradeForgeWPR): állítható szín + szintek. A matek a
          // stratégiáé. FELTÉTEL: a TradeForgeWPR.ex5 le van fordítva.
-         color  clr = (n > 4 && f[4] != "-") ? StringToColor(f[4]) : clrBlack;
-         double l1  = (n > 5) ? StringToDouble(f[5]) : -20.0;
-         double l2  = (n > 6) ? StringToDouble(f[6]) : -50.0;
-         double l3  = (n > 7) ? StringToDouble(f[7]) : -80.0;
-         double l4  = (n > 8) ? StringToDouble(f[8]) : 0.0;   // opcionális 4. szint (M15: 2 trigger)
+         color  clr = (n > 5 && f[5] != "-") ? StringToColor(f[5]) : clrBlack;
+         double l1  = (n > 6) ? StringToDouble(f[6]) : -20.0;
+         double l2  = (n > 7) ? StringToDouble(f[7]) : -50.0;
+         double l3  = (n > 8) ? StringToDouble(f[8]) : -80.0;
+         double l4  = (n > 9) ? StringToDouble(f[9]) : 0.0;   // opcionális 4. szint (M15: 2 trigger)
          int hnd = iCustom(_Symbol, tf, "TradeForgeWPR", period, clr, l1, l2, l3, l4);
          if(hnd == INVALID_HANDLE)
             continue;
