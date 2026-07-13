@@ -4,11 +4,14 @@
 //|  (0..1) rajzolja — így zoomtól/scrolltól függetlenül MINDIG       |
 //|  látható, és a teljes betöltött szélességet kitölti.             |
 //|                                                                  |
-//|  NÉGY sáv, PER-GYERTYA színbufferrel (DRAW_COLOR_HISTOGRAM2):     |
-//|    • FENT (kék)      — M15 jelzési ablak nyitva                   |
+//|  3 VAGY 4 sáv, PER-GYERTYA színbufferrel (DRAW_COLOR_HISTOGRAM2), |
+//|  PARAMETRIKUSAN elosztva — FENTRŐL LEFELÉ:                        |
+//|    • (kék)           — M15 jelzési ablak nyitva                   |
 //|    • (zöld/piros)    — SMA-irány (BUY/SELL)                       |
-//|    • PIAC-ÁLLAPOT    — generikus, kódonként (0..8) színezve       |
-//|    • LENT (szürke)   — no-trade óra                              |
+//|    • PIAC-ÁLLAPOT    — CSAK ha a piac-viz BE (kódonként 0..8)      |
+//|    • (szürke)        — no-trade óra                              |
+//|  Ha a piac-viz KI (a Python market=-1-et küld), a piac-sáv KIMARAD|
+//|  és 3-sávos (alacsonyabb) elrendezésre vált.                     |
 //|                                                                  |
 //|  Adat: a Python `TFV_<Symbol>.csv` `STATE` sorai, tagelve:        |
 //|  STATE;<stratégia>;<epoch>;<notrade>;<dir>;<window>;<market>. Az  |
@@ -26,17 +29,17 @@ input int    TimerSeconds = 1;      // fájl-újraolvasás (mp)
 input string FilePrefix   = "TFV_"; // ugyanaz, mint a TradeForgeViz-nél
 input string InpStrategy  = "";     // Melyik STRATÉGIA sávjait mutassa (üres = MIND)
 input int    BarWidth     = 3;      // a per-gyertya oszlop vastagsága (px)
-input int    SubWinHeightPx = 110;  // az al-ablak magassága px (0 = ne állítsd, kézi húzás)
-// NÉGY sáv az al-ablakban (0..1), FENTRŐL LEFELÉ: kék M15-ablak, SMA-trend
-// (zöld/piros), PIAC-ÁLLAPOT (generikus, kódonként színezve), szürke no-trade.
-input double BoxTop       = 0.95;   // M15 ablak (kék)
-input double BoxBot       = 0.75;
-input double RibbonTop    = 0.70;   // SMA-trend (zöld/piros)
-input double RibbonBot    = 0.52;
-input double MarketTop    = 0.47;   // PIAC-ÁLLAPOT (a szürke és a trend KÖZÖTT)
-input double MarketBot    = 0.29;
-input double NoTradeTop   = 0.24;   // no-trade órák (szürke)
-input double NoTradeBot   = 0.05;
+input int    BandHeightPx = 27;     // EGY sáv magassága px (az al-ablak = sávszám × ez)
+
+// Az elrendezés PARAMETRIKUS: a sávok a [0.05 .. 0.95] tartományban egyenletesen
+// oszlanak el, FENTRŐL LEFELÉ. Sávok száma a PIAC-SÁV állapotától függ:
+//   • piac BE  → 4 sáv: kék M15-ablak, SMA-trend (zöld/piros), PIAC-ÁLLAPOT, szürke no-trade
+//   • piac KI  → 3 sáv: kék M15-ablak, SMA-trend, szürke no-trade   (a piac-sáv KIMARAD)
+// A piac BE/KI onnan derül ki, hogy a fájl STATE sorai adnak-e >=0 piac-kódot
+// (a Python -1-et küld, ha a piac-viz ki van kapcsolva / nincs piac-stratégia).
+#define BAND_LO       0.05
+#define BAND_HI       0.95
+#define BAND_FILLFRAC 0.82          // a sáv a slot-jának hány százalékát tölti ki
 
 // Színbufferek — plotonként (érték-alsó, érték-felső, színindex).
 double NtTop[],  NtBot[],  NtCol[];   // plot 0: no-trade (szürke)
@@ -49,31 +52,49 @@ datetime g_st_time[];
 int      g_st_notrade[];
 int      g_st_dir[];
 int      g_st_window[];
-int      g_st_mstate[];               // generikus piac-állapot kód (0..8)
+int      g_st_mstate[];               // piac-állapot kód (-1 = nincs sáv; 0..8 = kód)
 int      g_nstate = 0;
 int      g_step   = 900;              // állapot-lépésköz mp-ben (a state-időkből)
+bool     g_market_on = false;         // van-e piac-sáv (bármely STATE sor kódja >= 0)
+int      g_nbands    = 3;             // aktív sávok száma (3 vagy 4)
 
 // Az OnCalculate-ből mentett gyertya-idők (a bufferbe töltéshez OnTimer-kor is).
 datetime g_time[];
 int      g_rates = 0;
 
 string g_file;
-bool   g_height_set = false;          // az al-ablak magasságát egyszer állítjuk
+int    g_applied_h = -1;               // a MÁR beállított al-ablak-magasság (px)
 
 //+------------------------------------------------------------------+
-//| Az al-ablak magasságának EGYSZERI beállítása (utána a user szabadon
-//| húzhatja). A saját al-ablak indexét ChartWindowFind adja; ha még nincs
-//| kész (indul az indikátor), a következő timer-tick újrapróbálja.        |
+//| A `k`. sáv (0 = legfelső) függőleges helye N sávos elrendezésben, |
+//| a [BAND_LO..BAND_HI] tartományban egyenletesen elosztva.          |
+//+------------------------------------------------------------------+
+void BandPos(int k, int n, double &top, double &bot)
+{
+   double slot = (BAND_HI - BAND_LO) / n;      // egy sávnyi hely
+   double fill = slot * BAND_FILLFRAC;         // ebből a színes rész
+   double slot_top = BAND_HI - k * slot;       // a slot teteje
+   top = slot_top - (slot - fill) / 2.0;       // a fill a slot közepén
+   bot = top - fill;
+}
+
+//+------------------------------------------------------------------+
+//| Az al-ablak magassága = aktív sávszám × BandHeightPx. Csak akkor  |
+//| állítjuk, ha a CÉL változott (piac BE/KI vált 3↔4 sávot) — így a  |
+//| két váltás között a user szabadon húzhatja. BandHeightPx<=0 → kézi.|
 //+------------------------------------------------------------------+
 void ApplyWindowHeight()
 {
-   if(SubWinHeightPx <= 0 || g_height_set)
+   if(BandHeightPx <= 0)
+      return;
+   int target = g_nbands * BandHeightPx;
+   if(target == g_applied_h)
       return;
    int w = ChartWindowFind();
    if(w < 0)
       return;
-   ChartSetInteger(0, CHART_HEIGHT_IN_PIXELS, w, SubWinHeightPx);
-   g_height_set = true;
+   ChartSetInteger(0, CHART_HEIGHT_IN_PIXELS, w, target);
+   g_applied_h = target;
 }
 
 //+------------------------------------------------------------------+
@@ -216,7 +237,7 @@ void RefreshFromFile()
       nt[cnt]  = (int)StringToInteger(f[3]);
       dr[cnt]  = (int)StringToInteger(f[4]);
       wn[cnt]  = (int)StringToInteger(f[5]);
-      ms[cnt]  = (n >= 7) ? (int)StringToInteger(f[6]) : 0;   // piac-állapot kód
+      ms[cnt]  = (n >= 7) ? (int)StringToInteger(f[6]) : -1;  // -1 = nincs piac-sáv
       cnt++;
    }
    FileClose(h);
@@ -234,6 +255,13 @@ void RefreshFromFile()
       g_st_mstate[i]  = ms[i];
    }
    g_nstate = cnt;
+
+   // Piac-sáv BE, ha BÁRMELY állapot kódja >= 0 (a Python -1-et küld, ha a
+   // piac-viz ki van kapcsolva) → 4 sáv; különben 3 sáv (a piac-sáv kimarad).
+   g_market_on = false;
+   for(int i = 0; i < cnt; i++)
+      if(g_st_mstate[i] >= 0) { g_market_on = true; break; }
+   g_nbands = g_market_on ? 4 : 3;
 
    // Lépésköz a legkisebb pozitív szomszéd-különbségből (M15 = 900 mp; hézagoknál
    // a nagyobb rés kimarad → az ottani gyertyák üresek maradnak).
@@ -255,6 +283,22 @@ void RefreshFromFile()
 //+------------------------------------------------------------------+
 void FillBuffers()
 {
+   // A sávok függőleges helye az AKTÍV sávszámból (parametrikus). Fentről lefelé:
+   //   0=kék M15-ablak, 1=SMA-trend, [2=piac-állapot ha BE], utolsó=szürke no-trade.
+   double wTop, wBot, tTop, tBot, mTop, mBot, nTop, nBot;
+   BandPos(0, g_nbands, wTop, wBot);                 // M15-ablak (kék)
+   BandPos(1, g_nbands, tTop, tBot);                 // SMA-trend
+   if(g_market_on)
+   {
+      BandPos(2, g_nbands, mTop, mBot);              // piac-állapot
+      BandPos(3, g_nbands, nTop, nBot);              // no-trade (a piac ALATT)
+   }
+   else
+   {
+      mTop = 0.0; mBot = 0.0;                        // nincs piac-sáv
+      BandPos(2, g_nbands, nTop, nBot);              // no-trade a 3. helyen
+   }
+
    for(int i = 0; i < g_rates; i++)
    {
       int s = FindState(g_time[i]);
@@ -267,17 +311,19 @@ void FillBuffers()
          continue;
       }
       // No-trade sáv (szürke)
-      if(g_st_notrade[s] == 1) { NtTop[i] = NoTradeTop; NtBot[i] = NoTradeBot; NtCol[i] = 0; }
+      if(g_st_notrade[s] == 1) { NtTop[i] = nTop; NtBot[i] = nBot; NtCol[i] = 0; }
       else                     { NtTop[i] = EMPTY_VALUE; NtBot[i] = EMPTY_VALUE; }
       // Trend sáv (zöld BUY=0 / piros SELL=1)
-      if(g_st_dir[s] != 0)     { TrTop[i] = RibbonTop; TrBot[i] = RibbonBot;
+      if(g_st_dir[s] != 0)     { TrTop[i] = tTop; TrBot[i] = tBot;
                                  TrCol[i] = (g_st_dir[s] > 0) ? 0 : 1; }
       else                     { TrTop[i] = EMPTY_VALUE; TrBot[i] = EMPTY_VALUE; }
       // M15-ablak sáv (kék)
-      if(g_st_window[s] == 1)  { WnTop[i] = BoxTop; WnBot[i] = BoxBot; WnCol[i] = 0; }
+      if(g_st_window[s] == 1)  { WnTop[i] = wTop; WnBot[i] = wBot; WnCol[i] = 0; }
       else                     { WnTop[i] = EMPTY_VALUE; WnBot[i] = EMPTY_VALUE; }
-      // Piac-állapot sáv — MINDIG rajzolva (a szín = a kód, 0..8)
-      MsTop[i] = MarketTop; MsBot[i] = MarketBot; MsCol[i] = g_st_mstate[s];
+      // Piac-állapot sáv — CSAK ha a piac-viz BE van ÉS a kód érvényes (>=0).
+      if(g_market_on && g_st_mstate[s] >= 0)
+                               { MsTop[i] = mTop; MsBot[i] = mBot; MsCol[i] = g_st_mstate[s]; }
+      else                     { MsTop[i] = EMPTY_VALUE; MsBot[i] = EMPTY_VALUE; }
    }
 }
 

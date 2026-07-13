@@ -198,15 +198,17 @@ class BarState:
     notrade=1 ÉS dir=0, window=0 (így a Viz csak a szürkét mutatja). A stratégia
     az órákról nem tud → mindig notrade=0-t ad, a keret írja felül.
 
-    `market_state`: GENERIKUS piac-állapot kód (0 = nincs). A KERET (a per-pár
-    piac-stratégia) tölti fel — jelenleg a `core.regime` osztályozó kódjával, de
-    bármely más piac-osztályozó ugyanebbe a mezőbe/sávba írhat. A színt a
-    TradeForgeBands indikátor rendeli a kódhoz."""
+    `market_state`: GENERIKUS piac-állapot kód. **-1 = NINCS piac-sáv** (a piac-viz
+    kikapcsolva vagy nincs kiválasztott piac-stratégia) → a TradeForgeBands NEM
+    rajzol piac-sávot, és 3-sávos elrendezésre vált. **0..8 = besorolás-kód** (0 =
+    besorolatlan). A KERET (a per-pár piac-stratégia) tölti fel — jelenleg a
+    `core.regime` osztályozó kódjával, de bármely más piac-osztályozó ugyanebbe a
+    mezőbe/sávba írhat. A színt a TradeForgeBands indikátor rendeli a kódhoz."""
     t: int
     notrade: int = 0
     dir: int = 0
     window: int = 0
-    market_state: int = 0
+    market_state: int = -1
 
     def line(self) -> str:
         return ";".join([

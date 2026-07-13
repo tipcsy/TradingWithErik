@@ -49,6 +49,7 @@ log = logging.getLogger(__name__)
 # függés). Az aktív stratégiát a run() állítja be a config alapján.
 from core.params_store import (
     PARAMS_DIR, params_file, set_active_strategy, migrate_flat_layout,
+    resolve_trade_hours,
 )
 TRADES_CSV   = ROOT / "trades.csv"
 
@@ -300,6 +301,9 @@ class LivePairState:
     # több stratégia nem írja felül egymás jelölő-köreit ugyanazon a soron.
     strategy:    object = None
     is_display:  bool   = True
+    # Az első bemelegítés MÉLY M15-ablakból történik (a jelzés-állapotgép a teljes
+    # előzménytől függ → egyezzen a vizzel); utána inkrementális, sekély fetch elég.
+    signal_warmed: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +346,7 @@ def sl_journal_read(symbol: str) -> dict:
     return out
 
 
-def apply_no_trade(objects: list, pair_cfg: dict) -> list:
+def apply_no_trade(objects: list, pair_cfg: dict, trade_hours=None) -> list:
     """KERETRENDSZER-szintű no-trade MASZKOLÁS a `trade_hours` alapján. A stratégia
     az órákról nem tud — a KÜLDŐ (keret) alkalmazza a saját szabályát:
 
@@ -354,9 +358,12 @@ def apply_no_trade(objects: list, pair_cfg: dict) -> list:
     A Viz „buta" marad (mindent úgy rajzol, ahogy kap); a szeparáció megmarad: a
     stratégia NYERS jelét a keret a kereskedési-óra szabályával fedi el. Az óra a
     SZERVER/CHART idő UTC epochból — ugyanaz, amivel a live `process_pair` kapuz.
+
+    `trade_hours`: a MÁR feloldott (stratégia-hatókörű) óra-lista; ha None, a régi
+    config.json szimbólum-szintű `trade_hours`-ra esik vissza (visszafelé komp.).
     """
     from strategy import visual as viz
-    th = pair_cfg.get("trade_hours")
+    th = trade_hours if trade_hours is not None else pair_cfg.get("trade_hours")
     if th is None:
         return objects
     no_trade = set(range(24)) - {int(h) for h in th}
@@ -394,8 +401,10 @@ def apply_market_state(objects: list, df15, pair_cfg: dict = None) -> list:
     `pairs.<sym>.market_strategy`) M15-ös besorolásából.
 
     Csak akkor tölt, ha (1) van kiválasztott piac-stratégia ÉS (2) a `market_viz`
-    kérve van — különben a kód 0 marad (a Bands-sáv üres). OSZTÁLYOZÓ-FÜGGETLEN: ha
-    más piac-stratégiát választasz, CSAK a besorolás cserélődik; a mező + a sáv marad."""
+    kérve van — különben a `market_state` a BarState alap **-1** értékén marad, amit
+    a TradeForgeBands „NINCS piac-sáv"-ként értelmez (nem rajzol sávot, 3-sávos
+    elrendezés). OSZTÁLYOZÓ-FÜGGETLEN: ha más piac-stratégiát választasz, CSAK a
+    besorolás (0..8) cserélődik; a mező + a sáv marad."""
     from core import market_strategy as _ms
     pc = pair_cfg or {}
     name = _ms.market_name_of(pc)
@@ -526,8 +535,10 @@ def pair_visual_lines(symbol: str, params: dict, strategy, pip_size: float,
         return []
     # pip_size a jövőbeli TP/SL-rajzoláshoz (feltétel 3) — a params nem tartalmazza.
     md = MarketData(symbol=symbol, params={**params, "pip_size": pip_size}, bars=bars)
-    # A stratégia per-gyertya BarState-jeire a keret RÁMASZKOLJA a no-trade órákat.
-    objects = apply_no_trade(strategy.visual_objects(md), pair_cfg or {})
+    # A stratégia per-gyertya BarState-jeire a keret RÁMASZKOLJA a no-trade órákat
+    # — a STRATÉGIA-hatókörű órákkal (fájl → különben a config.json legacy).
+    th = resolve_trade_hours(symbol, strategy.name, (pair_cfg or {}).get("trade_hours"))
+    objects = apply_no_trade(strategy.visual_objects(md), pair_cfg or {}, th)
     # + a GENERIKUS piac-állapot kód a per-gyertya BarState-ekhez (a per-pár
     #   kiválasztott piac-stratégiából; csak ha kérve van a charton).
     objects = apply_market_state(objects, bars.get("M15"), pair_cfg)
@@ -635,7 +646,10 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
     _tick = mt5.symbol_info_tick(symbol)
     hour = (datetime.fromtimestamp(_tick.time, tz=timezone.utc).hour
             if _tick else datetime.now(timezone.utc).hour)
-    trade_hours = pair_cfg.get("trade_hours")
+    # STRATÉGIA-hatókörű óra-kapu: a stratégia saját `{symbol}_hours.json`-ja (ha
+    # van), különben a régi config.json szimbólum-szintű trade_hours (legacy).
+    _sn = state.strategy.name if state.strategy else None
+    trade_hours = resolve_trade_hours(symbol, _sn, pair_cfg.get("trade_hours"))
     if trade_hours is not None:
         if hour not in {int(h) for h in trade_hours}:
             return
@@ -658,17 +672,27 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         return
 
     # --- Piaci adat a stratégia időkereteire ---
+    # Az ELSŐ bemelegítéskor MÉLY ablakot töltünk (signal_warmup_bars — a jelzés-
+    # állapotgép a teljes előzménytől függ, hogy a live a vizzel EGYEZŐ ablak-
+    # állapotot adjon); utána sekély (warmup_bars) elég, mert az on_bar_close
+    # inkrementálisan viszi tovább az állapotot. A KÖTELEZŐ minimum mindig az
+    # indikátor-warmup (rövid előzményű szimbólum is működik, a viz is lenient).
     bars = {}
     for tf in strategy.timeframes():
-        wu = strategy.warmup_bars(params, tf.label)
+        wu_min = strategy.warmup_bars(params, tf.label)
+        wu = (strategy.signal_warmup_bars(params, tf.label)
+              if not state.signal_warmed else wu_min)
         df = get_candles(symbol, mt5_timeframe(tf.minutes), wu)
-        if df is None or len(df) < wu:
+        if df is None or len(df) < wu_min:
             return
         bars[tf.label] = df
     md = MarketData(symbol=symbol, params=params, bars=bars)
 
     # --- Jelzés a stratégiától (ZÁRT gyertyán, állapottartó) ---
     state.strat_state, signal = strategy.on_bar_close(state.strat_state, md)
+    # A mély első bemelegítés megtörtént (az on_bar_close visszajátszotta a mély
+    # ablakot) → a következő ciklusoktól elég a sekély fetch.
+    state.signal_warmed = True
 
     # A tábla jelzés-celláit a MOTOR ÉLŐ állapotából töltjük (nem külön
     # rekonstrukcióból) → a kijelzés PONTOSAN azt mutatja, amivel kereskedünk.

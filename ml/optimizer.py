@@ -289,15 +289,53 @@ def _rr_for_run(spec: "dict | None"):
     return spec
 
 
+def _dep_order(specs: dict) -> list:
+    """A range-paraméterek suggeszt-SORRENDJE: a `gt`/`lt`-vel hivatkozott
+    paramétereket ELŐBB kell suggesztálni, hogy a dinamikus tartomány (lásd
+    `_suggest_params`) az ő értékükből szűkíthető legyen. Kahn-szerű topologikus
+    rendezés; körkörös hivatkozásnál a maradékot az eredeti sorrendben fűzi hozzá
+    (a constraints-szűrő úgyis elkapja az esetleges érvénytelent)."""
+    deps = {}
+    for k, s in specs.items():
+        deps[k] = {r for r in (s.get("gt"), s.get("lt")) if r in specs}
+    order, placed, remaining = [], set(), dict(deps)
+    while remaining:
+        ready = [k for k, refs in remaining.items() if refs <= placed]
+        if not ready:                       # körkörös dep → ne akadjunk el
+            order.extend(remaining.keys())
+            break
+        for k in ready:
+            order.append(k); placed.add(k); del remaining[k]
+    return order
+
+
 def _suggest_params(trial, opt_cfg: dict, base_params: dict) -> dict:
-    """Optuna trial → paraméter dict."""
+    """Optuna trial → paraméter dict.
+
+    A `gt`/`lt` metaadattal ellátott range-eket DINAMIKUSAN szűkíti a MÁR
+    suggeszált paraméterek alapján → érvénytelen kombináció ELŐ SEM ÁLL (nincs
+    elpazarolt trial): `gt: X` → szigorúan X fölött (X+step), `lt: Y` → szigorúan
+    Y alatt (Y−step). A range-eket a `_dep_order` szerint suggeszti (a hivatkozott
+    paraméterek előbb)."""
     params = deepcopy(base_params)
-    for key, spec in opt_cfg.items():
-        if not isinstance(spec, dict) or "min" not in spec:
-            continue
+    specs = {k: v for k, v in opt_cfg.items()
+             if isinstance(v, dict) and "min" in v}
+    for key in _dep_order(specs):
+        spec = specs[key]
         lo, hi, step = spec["min"], spec["max"], spec["step"]
-        if isinstance(lo, int) and isinstance(hi, int) and isinstance(step, int):
-            params[key] = trial.suggest_int(key, lo, hi, step=max(1, int(step)))
+        gt, lt = spec.get("gt"), spec.get("lt")
+        if gt is not None and gt in params:
+            lo = max(lo, params[gt] + step)          # szigorúan nagyobb
+        if lt is not None and lt in params:
+            hi = min(hi, params[lt] - step)          # szigorúan kisebb
+        if lo > hi:
+            # A már suggeszált határok túl közel → nincs érvényes érték; essünk
+            # vissza a teljes tartományra (ritka; a constraints-szűrő elkapja).
+            lo, hi = spec["min"], spec["max"]
+        if isinstance(spec["min"], int) and isinstance(spec["max"], int) and isinstance(step, int):
+            step_i = max(1, int(step))
+            hi = int(lo) + ((int(hi) - int(lo)) // step_i) * step_i   # rácsra igazít
+            params[key] = trial.suggest_int(key, int(lo), int(hi), step=step_i)
         else:
             params[key] = trial.suggest_float(key, float(lo), float(hi), step=float(step))
     return params
@@ -328,6 +366,17 @@ def optimize_pair_optuna(
     # Opt-in: az rr (kockázatcsökkentés) is optimalizált dimenzió? Alapból NEM →
     # a keresési tér és a viselkedés bitazonos a korábbival.
     optimize_rr = bool(opt_cfg.get("optimize_rr", False))
+
+    # Deklaratív paraméter-kényszerek indításkori ellenőrzése: az elgépelt vagy
+    # ismeretlen nevű kifejezéseket LOGBA jelezzük (a check() futásidőben kihagyja).
+    _cons = opt_cfg.get("constraints", [])
+    if _cons:
+        from core import param_constraints
+        _known = set(base_params) | {k for k, v in opt_cfg.items()
+                                     if isinstance(v, dict) and "min" in v}
+        for _expr, _why in param_constraints.validate(_cons, _known):
+            log.warning("%s — hibás paraméter-kényszer (kihagyva) %r: %s",
+                        symbol, _expr, _why)
 
     windows = _walk_forward_windows(df_m15, n_splits, train_months, test_months)
     if not windows:

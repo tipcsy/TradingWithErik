@@ -2668,7 +2668,10 @@ class DashboardWindow:
             _mt5.symbol_select(symbol, True)   # streameljen akkor is, ha letiltott
             raw_bars = {}
             for tf in timeframes:
-                warmup = self.strategy.warmup_bars(params, tf.label)
+                # MÉLY ablak (signal_warmup_bars) — hogy a compute_display jelzés-
+                # állapota EGYEZZEN a vizzel és a motorral (a sekély warmup nem látná
+                # a régi „jó zóna"-élesítést → a kör tévesen szürke maradna).
+                warmup = self.strategy.signal_warmup_bars(params, tf.label)
                 raw_bars[tf.label] = _mt5.copy_rates_from_pos(
                     symbol, self._mt5_timeframe(_mt5, tf.minutes), 0, warmup)
             info = _mt5.symbol_info(symbol)
@@ -2789,8 +2792,9 @@ class DashboardWindow:
     def _is_no_trade_now(self, symbol: str) -> bool:
         """A jelenlegi BRÓKER-óra kimarad-e az aktív stratégia trade_hours-ából
         erre a párra? (A live óra-kapujával azonos logika — szerver/chart idő.)
-        A jelölés így STRATÉGIA-hatókörű: a sor = aktív stratégia + instrumentum.
-        Több stratégiánál a trade_hours per-stratégiára költözik, a jelölés követi."""
+        A jelölés STRATÉGIA-hatókörű: az ELSŐDLEGES (első engedélyezett) stratégia
+        óra-fájlját nézi (`{symbol}_hours.json`), visszaesve a config.json legacy
+        `trade_hours`-ra — így ugyanaz, amivel a live óra-kapuja számol."""
         off = getattr(self, "_mt5_cache", {}).get("server_offset_sec")
         if off is None:
             return False   # nincs bróker-idő → ne jelezzünk félre
@@ -2798,7 +2802,11 @@ class DashboardWindow:
         if not isinstance(pc, dict):
             return False
         bh = (datetime.now(timezone.utc) + timedelta(seconds=off)).hour
-        th = pc.get("trade_hours")
+        from core.params_store import resolve_trade_hours
+        from strategy import enabled_strategy_names
+        _names = enabled_strategy_names(self.cfg, symbol)
+        _sn = _names[0] if _names else None
+        th = resolve_trade_hours(symbol, _sn, pc.get("trade_hours"))
         if th is not None:
             return bh not in {int(h) for h in th}
         # Visszafelé kompatibilis: sess_start/sess_end tartomány (mint a live).

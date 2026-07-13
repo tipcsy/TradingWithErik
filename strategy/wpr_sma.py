@@ -113,6 +113,18 @@ class WprSmaStrategy(Strategy):
             return params.get("wpr_m1_period", 8) + 5
         return 50
 
+    def signal_warmup_bars(self, params: dict, timeframe_label: str) -> int:
+        """Az M15 „jó zóna" ÁLLAPOTGÉP (`check_m15_signal`) a TELJES előzménytől
+        függ: egy régi WPR-extrém élesíti, majd a trigger-áttörés nyitja az ablakot,
+        és az irányváltásig (SMA-kereszt) él. Ezért az M15 jelzés-warmupnak
+        UGYANOLYAN MÉLYNEK kell lennie, mint a viznek (`visual_lookback_bars`) —
+        különben a live motor/kijelzés a viztől ELTÉRŐ ablakállapotot ad (a sekély
+        warmup nem látja a régi élesítést → kimaradó belépések). Az M1 belépő
+        állapotmentes (csak prev/cur WPR) → marad a sekély indikátor-warmup."""
+        if timeframe_label == "M15":
+            return self.visual_lookback_bars(params, "M15")
+        return self.warmup_bars(params, timeframe_label)
+
     def compute_display(self, md: MarketData) -> dict[str, Cell]:
         """Megjelenítési cellák.
 
@@ -461,23 +473,23 @@ class WprSmaStrategy(Strategy):
                                       self.constraints_ok)
 
     def constraints_ok(self, params: dict) -> bool:
-        """WPR szint-sorrend: mindkét M15 trigger (BUY/SELL) SZIGORÚAN a felső és
-        alsó extrém között; M1 a régi közös triggerrel (változatlan)."""
-        p = params
-        se = p.get("wpr_m15_sell_extreme", -20)
-        be = p.get("wpr_m15_buy_extreme", -80)
-        _t = p.get("wpr_m15_trigger", -50)
-        st = p.get("wpr_m15_sell_trigger", _t)
-        bt = p.get("wpr_m15_buy_trigger",  _t)
-        if not (be < st < se):
-            return False
-        if not (be < bt < se):
-            return False
-        if p.get("wpr_m1_sell_extreme", -20) <= p.get("wpr_m1_trigger", -50):
-            return False
-        if p.get("wpr_m1_trigger", -50) <= p.get("wpr_m1_buy_extreme", -80):
-            return False
-        return True
+        """Érvényes-e a paraméter-kombináció? A kényszereket a stratégia SAJÁT
+        optimizer-configjából olvassa (`strategy/config/wpr_sma.json` →
+        `optimizer.constraints`, pl. WPR szint-sorrend) — EGYETLEN forrás, amit az
+        optimizer szűrése és ez az ellenőrzés is használ. Üres lista → True."""
+        from core import param_constraints
+        return param_constraints.check(params, self._opt_constraints())
+
+    _constraints_cache = None
+
+    def _opt_constraints(self) -> list:
+        """A stratégia config `optimizer.constraints` listája (fájlból, cache-elve
+        — a `constraints_ok` trial-onként hívódik)."""
+        if self._constraints_cache is None:
+            from strategy.settings import load_strategy_config
+            opt = (load_strategy_config(self.name).get("optimizer", {}) or {})
+            self._constraints_cache = list(opt.get("constraints", []))
+        return self._constraints_cache
 
     # --- Backtest-motor hookok (a core signal/indicator becsomagolva) ------
 

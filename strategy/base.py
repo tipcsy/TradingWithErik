@@ -141,6 +141,16 @@ class Strategy(ABC):
     def warmup_bars(self, params: dict, timeframe_label: str) -> int:
         """Hány gyertya kell az indikátorok bemelegítéséhez az adott időkeretre."""
 
+    def signal_warmup_bars(self, params: dict, timeframe_label: str) -> int:
+        """Hány gyertyát kell VISSZAJÁTSZANI, hogy a JELZÉS-ÁLLAPOT (állapotgép)
+        helyesen konvergáljon. Ez MÉLYEBB lehet, mint az indikátor-warmup
+        (`warmup_bars`), ha a jelzés a teljes előzménytől függ — pl. egy nyitott/
+        zárt „jó zóna", amit egy RÉGI extrém élesített. A live motor első
+        bemelegítése és a kijelzés-rekonstrukció EZT használja, hogy a viz-zel
+        (`visual_lookback_bars`) egyező ablakállapotot adjon. Alap: = warmup_bars
+        (állapotmentes stratégiánál nincs plusz mélység)."""
+        return self.warmup_bars(params, timeframe_label)
+
     @abstractmethod
     def compute_display(self, md: MarketData) -> dict[str, Cell]:
         """A stratégia-oszlopok celláinak kiszámítása MEGJELENÍTÉSHEZ.

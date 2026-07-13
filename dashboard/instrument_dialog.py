@@ -34,7 +34,9 @@ from dashboard.theme import (
     color as sem_color,
 )
 from core.quality import metric_colors
-from core.params_store import params_file, trials_file
+from core.params_store import (
+    params_file, trials_file, resolve_trade_hours, save_trade_hours,
+)
 
 # A trials CSV metrika-oszlopai (ezek NEM paraméterek, hanem az eredmény jellemzői)
 _METRIC_COLS = frozenset({
@@ -460,10 +462,11 @@ class InstrumentParamsDialog:
 
     # ── Óra-rács (trade_hours) ──────────────────────────────────────────────
     def _build_hours(self, popup, ts):
-        """A live óra-kapuja a config.json pairs.<SYM>.trade_hours listáját nézi.
-        Az óránkénti P&L (az optimalizált test_summary-ből) segít eldönteni, mely
-        órákat vegyük ki (a mínuszosakat kézzel kikattintva). A bepipált órákat az
-        EGYETLEN Mentés gomb menti a config.json-ba (NEM az optimalizált JSON-ba)."""
+        """A live óra-kapuja a STRATÉGIA-hatókörű órákat nézi (`{symbol}_hours.json`
+        a stratégia mappájában), visszaesve a régi config.json szimbólum-szintű
+        `trade_hours`-ra. Az óránkénti P&L (az optimalizált test_summary-ből) segít
+        eldönteni, mely órákat vegyük ki (a mínuszosakat kézzel kikattintva). A
+        bepipált órákat az EGYETLEN Mentés gomb menti a stratégia óra-fájljába."""
         params = self._src
         hp_raw = (ts or {}).get("hourly_pnl", {})
         hourly = {}
@@ -474,7 +477,8 @@ class InstrumentParamsDialog:
                 pass
 
         _pc = self.cfg.get("pairs", {}).get(self.symbol, {})
-        _cur = _pc.get("trade_hours")
+        _cur = resolve_trade_hours(self.symbol, self.strategy.name,
+                                   _pc.get("trade_hours"))
         if _cur is not None:
             _checked0 = {int(h) for h in _cur}
         else:
@@ -589,21 +593,20 @@ class InstrumentParamsDialog:
         return True
 
     def _save_hours(self) -> int:
-        """A bepipált órák mentése a config.json pairs.<SYM>.trade_hours-ba.
-        (A `trade_hours` stratégia-fájlba emelése külön lépés — B0.) Visszaadja a
-        kiválasztott órák számát."""
+        """A bepipált órák mentése a STRATÉGIA óra-fájljába
+        (`data/optimized_params/<strategy>/<symbol>_hours.json`) — NEM a
+        config.json-ba, így minden stratégiának SAJÁT órái lehetnek ugyanazon az
+        instrumentumon. Visszaadja a kiválasztott órák számát."""
         sel = [h for h in range(24) if self._hour_on.get(h)]
-        pcfg = self.cfg.setdefault("pairs", {}).setdefault(self.symbol, {})
-        pcfg["trade_hours"] = sel
-        # A live loop a KÖZÖS cfg dict-et nézi → a helyben-módosítás azonnal él. A
-        # chart-viz csak a következő ciklusban venné át; nullázzuk a viz-időzítőt,
-        # hogy AZONNAL az új órákkal rajzoljon. Csak ha fut a live loop.
+        save_trade_hours(self.symbol, sel, self.strategy.name)
+        # A live loop és a viz a stratégia óra-fájlját olvassa (feloldó) → a
+        # következő ciklusban azonnal él. A chart-vizt nullázzuk, hogy AZONNAL az
+        # új órákkal rajzoljon. Csak ha fut a live loop.
         try:
             from trading import live_trader as _lt
             _lt._viz_last_write.pop(self.symbol, None)
         except Exception:
             pass
-        self._save_main_config()
         return len(sel)
 
     def _save(self):

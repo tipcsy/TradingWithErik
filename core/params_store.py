@@ -18,6 +18,7 @@ optimizer) a config alapján `set_active_strategy`-vel állítanak be.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -65,6 +66,61 @@ def study_db(symbol: str, strategy: str | None = None) -> Path:
 
 def done_marker(symbol: str, strategy: str | None = None) -> Path:
     return strategy_dir(strategy) / f"{symbol}_study.done"
+
+
+def hours_file(symbol: str, strategy: str | None = None) -> Path:
+    """A kereskedési órák (trade_hours) STRATÉGIA-hatókörű tárolója.
+
+    Külön fájl (nem az optimalizált `{symbol}.json`-ban), hogy az optimalizáló
+    újrafuttatása NE írja felül a kézzel beállított órákat."""
+    return strategy_dir(strategy) / f"{symbol}_hours.json"
+
+
+def load_trade_hours(symbol: str, strategy: str | None = None) -> list[int] | None:
+    """A stratégia-hatókörű kereskedési órák listája (0..23), vagy None ha nincs
+    ilyen fájl (ilyenkor a hívó a régi config.json szimbólum-szintű értékére, majd
+    a sess-tartományra eshet vissza — lásd `resolve_trade_hours`)."""
+    p = hours_file(symbol, strategy)
+    if not p.exists():
+        return None
+    try:
+        with open(p, encoding="utf-8") as f:
+            data = json.load(f)
+        th = data.get("trade_hours")
+        if th is None:
+            return None
+        return [int(h) for h in th]
+    except Exception as e:
+        log.debug("trade_hours olvasás hiba (%s): %s", p.name, e)
+        return None
+
+
+def save_trade_hours(symbol: str, hours, strategy: str | None = None) -> None:
+    """A stratégia-hatókörű kereskedési órák atomikus kiírása (temp→replace)."""
+    p = hours_file(symbol, strategy)
+    tmp = p.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"symbol": symbol, "strategy": _sname(strategy),
+                   "trade_hours": [int(h) for h in hours]},
+                  f, indent=2, ensure_ascii=False)
+    tmp.replace(p)
+
+
+def resolve_trade_hours(symbol: str, strategy: str | None = None,
+                        legacy=None) -> list[int] | None:
+    """A tényleges kereskedési órák FELOLDÁSA (olvasók közös logikája):
+      1. stratégia-hatókörű `{symbol}_hours.json` (ha van) — EZ nyer;
+      2. különben a `legacy` (a config.json `pairs.<sym>.trade_hours`, szimbólum-
+         szintű — visszafelé kompatibilis, több stratégia közös alapja);
+      3. None → a hívó a sess_start/sess_end tartományra esik vissza.
+
+    Így egy még nem migrált párnál a régi közös óra érvényes, de amint egy
+    stratégiánál MENTED az órákat, onnantól annál a stratégiánál a saját fájlja
+    dönt (a többi stratégiáé érintetlen)."""
+    hrs = load_trade_hours(symbol, strategy)
+    if hrs is not None:
+        return hrs
+    return legacy
 
 
 def migrate_flat_layout(strategy: str | None = None) -> int:
