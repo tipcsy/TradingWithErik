@@ -35,6 +35,7 @@ from core import risky_mode
 from core import correlation
 from core import run_state
 from core import exit_signal
+from core import position_build as _position_build
 from core.indicator_engine import atr as atr_indicator
 from core.risk_manager import calc_lot, calc_effective_slots, SlotManager
 from strategy import get_strategy
@@ -138,6 +139,16 @@ optimizer_status: dict[str, str] = {}
 # A motor tölti/karbantartja; a Pozíciók fül ebből olvas és ezt billenti
 # (trailing ki/be, kézi BE jelzése).
 position_state: dict[int, dict] = {}
+
+# Per-szimbólum POZÍCIÓÉPÍTÉS-futásidejű állapot (a motor tölti, a GUI olvassa a „＋"
+# gombhoz és a manuális építéshez). Kulcsonként:
+#   {"mode","ready","direction","avg_price","ref_close","next_lot","size_factor"}
+# A `ref_close` a legutóbbi ráépítés referencia-záróára (a GUI frissíti add-kor).
+build_runtime: dict[str, dict] = {}
+
+# A manuális építés (manual_build) eléréséhez — a run() tölti indításkor.
+_run_cfg: dict = {}
+_run_slot_mgr = None
 
 # MT5 chart-vizualizáció: engedélyezés + írásgyakoriság (run() tölti a configból),
 # és a per-szimbólum utolsó írás ideje (throttle — ne írjunk minden 10 mp-ben mélyet).
@@ -922,6 +933,38 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         ds.position_pnl = pnl
         ds.risk_free     = slot_mgr.is_risk_free(ticket)
 
+    # ── Pozícióépítés-jelzés (a GUI a „＋" gombhoz olvassa a build_runtime-ból) ──
+    # Csak KOCKÁZATMENTES pozíciónál építünk (1. szabály). A ready = a gyertyás
+    # építés-jel az elsődleges időkeret ZÁRT gyertyáján. A ref_close-t a GUI frissíti
+    # a tényleges ráépítéskor; itt csak megőrizzük / első alkalommal a belépőre állítjuk.
+    from core import build_state as _bs, position_build as _pb
+    _bmode = _bs.get_mode(symbol)
+    _rf_pos = [p for p in symbol_positions if slot_mgr.is_risk_free(p.ticket)]
+    if _bmode != _pb.MODE_OFF and _rf_pos:
+        _bdir  = "BUY" if _rf_pos[0].type == mt5.ORDER_TYPE_BUY else "SELL"
+        _avg   = _pb.average_price([(p.price_open, p.volume) for p in symbol_positions])
+        _bcfg  = _bs.get_config(symbol)
+        _rt    = build_runtime.setdefault(symbol, {})
+        _ref   = _rt.get("ref_close")
+        if _ref is None:   # első alkalom → a (legkorábbi) belépő ára a kiindulás
+            _ref = (min(p.price_open for p in symbol_positions) if _bdir == "BUY"
+                    else max(p.price_open for p in symbol_positions))
+        _bbars = bars.get(_bcfg.get("timeframe", "M15"))
+        _last_lot = min(p.volume for p in symbol_positions)   # a legkisebb = az utolsó add
+        _rt.update({
+            "mode":        _bmode,
+            "direction":   _bdir,
+            "avg_price":   _avg,
+            "ref_close":   _ref,
+            "size_factor": _bcfg["size_factor"],
+            "ready":       _pb.build_signal(_bbars, _bdir, _ref),
+            "next_lot":    _pb.next_lot(_last_lot, _bcfg["size_factor"],
+                                        pair_cfg.get("min_lot", 0.01),
+                                        pair_cfg.get("lot_step", 0.01)),
+        })
+    else:
+        build_runtime.pop(symbol, None)
+
     # Lezárt pozíciók észlelése — a GLOBÁLIS nyitott halmazhoz mérve!
     # (Korábbi hiba: az aktuális szimbólum pozícióihoz mértünk, így egy MÁSIK
     #  pár feldolgozása tévesen "lezártnak" vette és kivette e pár ticketjeit a
@@ -1040,8 +1083,62 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
 # Fő ciklus
 # ---------------------------------------------------------------------------
 
+def manual_build(symbol: str) -> bool:
+    """Kézi ráépítés (a GUI „＋" gombja hívja). A `build_runtime` alapján nyit egy
+    piramidális adalék-pozíciót AZONOS irányba, majd az ÖSSZES azonos-szimbólumú
+    stopot az új ÁTLAGÁRRA húzza (1. szabály: kockázatmentesség). Visszaad: True, ha
+    a ráépítés megtörtént; False, ha nem alkalmas (nincs jel / pozíció / méret)."""
+    rt = build_runtime.get(symbol)
+    if not rt or not rt.get("ready"):
+        return False
+    direction = rt.get("direction")
+    add_lot   = float(rt.get("next_lot") or 0.0)
+    if direction not in ("BUY", "SELL") or add_lot <= 0:
+        return False
+    with mt5_connector.MT5_LOCK:
+        positions = mt5.positions_get(symbol=symbol)
+    if not positions:
+        build_runtime.pop(symbol, None)
+        return False
+    magic = positions[0].magic
+
+    # 1) Az adalék megnyitása (nincs fix TP; az SL-t mindjárt az átlagárra tesszük).
+    ticket = open_position(symbol, direction, add_lot, sl=0.0, tp=0.0, magic=magic,
+                           comment="build", strategy_name="build")
+    if not ticket:
+        return False
+    if _run_slot_mgr is not None:
+        _run_slot_mgr.add(ticket)
+        _run_slot_mgr.set_risk_free(ticket)   # a build kockázatmentes (SL az átlagáron)
+
+    # 2) Új átlagár az ÖSSZES (immár bővült) pozícióból + minden stop oda (null pont).
+    with mt5_connector.MT5_LOCK:
+        positions = mt5.positions_get(symbol=symbol) or positions
+        info = mt5.symbol_info(symbol)
+    digits = info.digits if info else 5
+    avg = round(_position_build.average_price(
+        [(p.price_open, p.volume) for p in positions]), digits)
+    for p in positions:
+        modify_sl(p.ticket, avg)
+        if _run_slot_mgr is not None:
+            _run_slot_mgr.set_risk_free(p.ticket)
+        position_state.setdefault(p.ticket, {})["be_done"] = True
+
+    # 3) Referencia-frissítés: a KÖVETKEZŐ ráépítéshez az árnak túl kell esnie az
+    #    aktuális ráépítés árán (a fill ár jó proxy a gyertya-záróra).
+    _new = next((p for p in positions if p.ticket == ticket), None)
+    if _new is not None:
+        rt["ref_close"] = float(_new.price_open)
+    rt["ready"] = False
+    log.info("➕ %s — kézi ráépítés: +%.2f lot %s | átlagár SL=%.*f | %d pozíció",
+             symbol, add_lot, direction, digits, avg, len(positions))
+    return True
+
+
 def run(cfg: dict, slot_mgr: SlotManager):
-    global VIZ_ENABLED, VIZ_INTERVAL_SEC
+    global VIZ_ENABLED, VIZ_INTERVAL_SEC, _run_cfg, _run_slot_mgr
+    _run_cfg = cfg
+    _run_slot_mgr = slot_mgr
     trading_cfg = cfg["trading"]
     viz_cfg     = cfg.get("visualization", {})
     VIZ_ENABLED      = viz_cfg.get("enabled", True)

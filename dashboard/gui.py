@@ -1208,7 +1208,8 @@ POSITION_COLUMNS = [
 
 class PositionRow:
     def __init__(self, parent, ticket, mono_font, small_font,
-                 on_be, on_trail, on_panic, on_name_click, on_trail_dist):
+                 on_be, on_trail, on_panic, on_name_click, on_trail_dist,
+                 on_build=None):
         self.ticket = ticket
         self._small = small_font
         self._symbol = None
@@ -1235,6 +1236,17 @@ class PositionRow:
         self._be_tip = None
         self.btn_be.bind("<Enter>", self._be_tip_show)
         self.btn_be.bind("<Leave>", self._be_tip_hide)
+        # „＋" pozícióépítés (ráépítés): csak akkor aktív, ha az építés-mód Kézi és a
+        # gyertyás jel szól (a pozíció kockázatmentes). Tooltip mondja meg az okot.
+        self.btn_build = tk.Button(self.frame, text="＋", width=2, font=small_font,
+                                   relief="flat", bg=BTN_DIS_BG, fg=FG_GRAY,
+                                   state="disabled",
+                                   command=(lambda: on_build(ticket)) if on_build else None)
+        self.btn_build.pack(side="left", padx=1)
+        self._build_tip_text = ""
+        self._build_tip = None
+        self.btn_build.bind("<Enter>", self._build_tip_show)
+        self.btn_build.bind("<Leave>", self._build_tip_hide)
         self.btn_trail = tk.Button(self.frame, text="Trail", width=5, font=small_font,
                                    relief="flat", bg=BTN_DIS_BG, fg=FG_GRAY,
                                    command=lambda: on_trail(ticket))
@@ -1286,6 +1298,29 @@ class PositionRow:
             except Exception:
                 pass
             self._be_tip = None
+
+    def _build_tip_show(self, _event=None):
+        text = (self._build_tip_text or "").strip()
+        if not text or self._build_tip is not None:
+            return
+        tip = tk.Toplevel(self.btn_build)
+        tip.wm_overrideredirect(True)
+        tip.attributes("-topmost", True)
+        x = self.btn_build.winfo_rootx()
+        y = self.btn_build.winfo_rooty() + self.btn_build.winfo_height() + 2
+        tk.Label(tip, text=text, bg="#2a2a3a", fg="#e0e0f0", font=self._small,
+                 padx=6, pady=3, relief="solid", bd=1, justify="left",
+                 wraplength=320).pack()
+        tip.wm_geometry(f"+{x}+{y}")
+        self._build_tip = tip
+
+    def _build_tip_hide(self, _event=None):
+        if self._build_tip is not None:
+            try:
+                self._build_tip.destroy()
+            except Exception:
+                pass
+            self._build_tip = None
 
     def update(self, pos, pstate, digits, trail_default=None, point=None,
                strategy_name="—"):
@@ -1361,6 +1396,28 @@ class PositionRow:
             self.btn_be.config(text="BE", bg=BTN_OPT_BG, fg="#ffffff", state="normal")
             self._be_tip_text = ""
 
+        # „＋" építés gomb — a motor build_runtime-jából (per szimbólum). Csak Kézi
+        # módban és a gyertyás jelre aktív; a tooltip mondja meg az állapotot.
+        sym = pos.get("symbol")
+        _rt = None
+        try:
+            from trading.live_trader import build_runtime as _br
+            _rt = _br.get(sym) if sym else None
+        except Exception:
+            _rt = None
+        if _rt and _rt.get("mode") == "manual" and _rt.get("ready"):
+            self.btn_build.config(state="normal", bg=BTN_OPT_BG, fg="#ffffff")
+            self._build_tip_text = (f"Ráépítés: +{_rt.get('next_lot', 0):.2f} lot azonos "
+                                    f"irányba, az összes stop az átlagárra "
+                                    f"(≈{_rt.get('avg_price', 0):.5f}).")
+        elif _rt and _rt.get("mode") == "manual":
+            self.btn_build.config(state="disabled", bg=BTN_DIS_BG, fg=FG_GRAY)
+            self._build_tip_text = ("Építés (Kézi): várakozás a jelre — kockázatmentes "
+                                    "pozíció + a gyertya új csúcsra/mélyre zár.")
+        else:
+            self.btn_build.config(state="disabled", bg=BTN_DIS_BG, fg=FG_GRAY)
+            self._build_tip_text = ""
+
         # Trail gomb — 3 állapot, "benyomott" (sunken) ha be van kapcsolva:
         #   • KI:            lapos, szürke
         #   • BE, de VÁR:    benyomott, NARANCS (nincs még BE/kockázatmentes → nem húz)
@@ -1395,7 +1452,7 @@ class PositionsTab:
                  positions_provider, pos_state, digits_provider,
                  on_be, on_trail, on_panic, on_close_all,
                  on_name_click, on_trail_dist, trail_default_provider,
-                 point_provider, strategy_provider=None):
+                 point_provider, strategy_provider=None, on_build=None):
         self.parent = parent
         self.cfg = cfg
         self._mono, self._small, self._header = mono_font, small_font, header_font
@@ -1407,6 +1464,7 @@ class PositionsTab:
         self._on_close_all = on_close_all
         self._on_name_click = on_name_click
         self._on_trail_dist = on_trail_dist
+        self._on_build = on_build
         self._trail_default_provider = trail_default_provider
         self._point_provider = point_provider
         self._rows: dict[int, PositionRow] = {}
@@ -1462,7 +1520,8 @@ class PositionsTab:
             if row is None:
                 row = PositionRow(self._rows_frame, tid, self._mono, self._small,
                                   self._on_be, self._on_trail, self._on_panic,
-                                  self._on_name_click, self._on_trail_dist)
+                                  self._on_name_click, self._on_trail_dist,
+                                  on_build=self._on_build)
                 self._rows[tid] = row
             trail_def = self._trail_default_provider(pos["symbol"])
             point     = self._point_provider(pos["symbol"])
@@ -1737,7 +1796,8 @@ class DashboardWindow:
             on_trail_dist=self._pos_trail_dist,
             trail_default_provider=self._trail_default,
             point_provider=lambda sym: getattr(self.dashboard_ref.get(sym), "point", None),
-            strategy_provider=self._strategy_by_magic)
+            strategy_provider=self._strategy_by_magic,
+            on_build=self._pos_build)
 
         closed_frame = tk.Frame(self._notebook, bg=BG)
         self._notebook.add(closed_frame, text="  Lezárt (ma)  ")
@@ -2620,6 +2680,22 @@ class DashboardWindow:
                 _log.info("#%d — BE még nem lehetséges (az ár nem fedezi a "
                           "spread+jutalék+swap költséget) → SL változatlan", ticket)
         threading.Thread(target=_w, daemon=True, name="ManualBE").start()
+
+    def _pos_build(self, ticket: int):
+        """A „＋" gomb: kézi ráépítés a ticket SZIMBÓLUMÁRA (a motor manual_build-jét
+        hívja háttérszálon — az nyit egy piramidális adalékot + átlagár-stopokat)."""
+        pos = next((p for p in getattr(self, "_mt5_cache", {}).get("positions_detail", [])
+                    if p["ticket"] == ticket), None)
+        if not pos:
+            return
+        symbol = pos["symbol"]
+        def _w():
+            import logging as _logging
+            from trading.live_trader import manual_build
+            if not manual_build(symbol):
+                _logging.getLogger(__name__).info(
+                    "%s — ráépítés kihagyva (nincs érvényes építés-jel).", symbol)
+        threading.Thread(target=_w, daemon=True, name="ManualBuild").start()
 
     _DEFAULT_PSTATE = {"original_sl": 0.0, "trailing_enabled": True,
                        "be_done": False, "trail_points": None, "trail_moved": False}

@@ -305,6 +305,19 @@ class InstrumentParamsDialog:
         self._exit_param_vars = {}
         self._rebuild_exit_params()
 
+        # Pozícióépítés mód (Ki/Kézi/Auto) — per instrumentum (a nyertes pozícióhoz
+        # azonos irányú, csökkenő méretű ráépítések; a „＋" gomb a Pozíciók fülön).
+        from core import build_state as _bst
+        self._bst = _bst
+        tk.Label(rrbar, text="Építés:", bg=BG, fg=FG_GRAY, font=self._sf).pack(side="left", padx=(10, 0))
+        self._build_mode_name = tk.StringVar(value=_bst.NAME.get(_bst.get_mode(self.symbol), "Ki"))
+        omb = tk.OptionMenu(rrbar, self._build_mode_name,
+                            *_bst.NAME.values(), command=self._on_build_mode_change)
+        omb.config(bg=BG_HEADER, fg=FG_WHITE, font=self._sf, relief="flat",
+                   highlightthickness=0, activebackground=BG_HEADER)
+        omb["menu"].config(bg=BG_HEADER, fg=FG_WHITE)
+        omb.pack(side="left", padx=(4, 0))
+
         # Lot-létra tipp (a részleges záráshoz ≥2× min_lot kell)
         _ml = (self.cfg.get("pairs", {}).get(self.symbol, {}) or {}).get("min_lot", 0.01)
         tk.Label(popup, text=f"(A Felező/Pajzs részleges záráshoz ≥2× min_lot ({_ml}) "
@@ -790,6 +803,10 @@ class InstrumentParamsDialog:
         ind = {v: k for k, v in self._EXIND_NAME.items()}.get(name, "supertrend")
         self._rrs.set_exit_config(self.symbol, indicator=ind)
         self._rebuild_exit_params()
+
+    def _on_build_mode_change(self, name: str):
+        mode = {v: k for k, v in self._bst.NAME.items()}.get(name, self._bst.MODE_OFF)
+        self._bst.set_mode(self.symbol, mode)
 
     def _rebuild_exit_params(self):
         """Az exit-indikátor SZERKESZTHETŐ paraméter-mezőinek újraépítése (a kiválasztott
