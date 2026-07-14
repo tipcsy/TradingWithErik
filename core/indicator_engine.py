@@ -15,6 +15,27 @@ def wpr(high: pd.Series, low: pd.Series, close: pd.Series, period: int) -> pd.Se
     return pd.Series(result, index=close.index)
 
 
+def rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    """Relative Strength Index (Wilder-simítás), értékkészlet 0..100."""
+    delta = close.diff()
+    gain = delta.clip(lower=0.0)
+    loss = (-delta).clip(lower=0.0)
+    avg_gain = gain.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+    rs = avg_gain / avg_loss.replace(0.0, np.nan)
+    out = 100.0 - 100.0 / (1.0 + rs)
+    out[avg_loss == 0.0] = 100.0          # nincs veszteség → RSI=100
+    return out
+
+
+def cci(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 20) -> pd.Series:
+    """Commodity Channel Index — a tipikus ár eltérése a mozgóátlagától, közép=0."""
+    tp = (high + low + close) / 3.0
+    ma = tp.rolling(period).mean()
+    md = (tp - ma).abs().rolling(period).mean()
+    return (tp - ma) / (0.015 * md.replace(0.0, np.nan))
+
+
 def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int) -> pd.Series:
     prev_close = close.shift(1)
     tr = pd.concat([

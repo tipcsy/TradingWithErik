@@ -282,7 +282,14 @@ class InstrumentParamsDialog:
         # Kiszállási jel indikátora — CSAK a „Kiszállási jel" runner-módnál él (a
         # Pajzs/Felező maradékát ez zárja, ha nincs konkrét TP). Supertrend (10/1.7)
         # vagy WPR-átzárás (20/100). A választás a per-pár exit-configba megy.
-        self._EXIND_NAME = {"supertrend": "Supertrend", "wpr": "WPR"}
+        self._EXIND_NAME = {"supertrend": "Supertrend", "wpr": "WPR",
+                            "divergence": "Divergencia"}
+        # Az indikátortól függő, SZERKESZTHETŐ paraméter-mezők (kulcs, rövid címke).
+        self._EXIT_PARAM_SPEC = {
+            "supertrend": [("st_period", "Per"), ("st_multiplier", "Szorzó")],
+            "wpr":        [("wpr_period", "Per"), ("wpr_ma_period", "MA")],
+            "divergence": [("osc", "Oszc"), ("div_period", "Per"), ("div_pivot", "Pivot")],
+        }
         _exind = _rrs.get_exit_config(self.symbol).get("indicator", "supertrend")
         tk.Label(rrbar, text="Exit:", bg=BG, fg=FG_GRAY, font=self._sf).pack(side="left", padx=(10, 0))
         self._exit_ind_name = tk.StringVar(value=self._EXIND_NAME.get(_exind, "Supertrend"))
@@ -292,6 +299,11 @@ class InstrumentParamsDialog:
                    highlightthickness=0, activebackground=BG_HEADER)
         ome["menu"].config(bg=BG_HEADER, fg=FG_WHITE)
         ome.pack(side="left", padx=(4, 0))
+        # Az indikátor paraméterei (az indikátor-váltáskor újraépül) — per-pár mentve.
+        self._exit_pfrm = tk.Frame(rrbar, bg=BG)
+        self._exit_pfrm.pack(side="left", padx=(6, 0))
+        self._exit_param_vars = {}
+        self._rebuild_exit_params()
 
         # Lot-létra tipp (a részleges záráshoz ≥2× min_lot kell)
         _ml = (self.cfg.get("pairs", {}).get(self.symbol, {}) or {}).get("min_lot", 0.01)
@@ -777,6 +789,44 @@ class InstrumentParamsDialog:
     def _on_exit_ind_change(self, name: str):
         ind = {v: k for k, v in self._EXIND_NAME.items()}.get(name, "supertrend")
         self._rrs.set_exit_config(self.symbol, indicator=ind)
+        self._rebuild_exit_params()
+
+    def _rebuild_exit_params(self):
+        """Az exit-indikátor SZERKESZTHETŐ paraméter-mezőinek újraépítése (a kiválasztott
+        indikátor szerint), a per-pár exit-configból feltöltve."""
+        for w in self._exit_pfrm.winfo_children():
+            w.destroy()
+        self._exit_param_vars = {}
+        ind = {v: k for k, v in self._EXIND_NAME.items()}.get(self._exit_ind_name.get(), "supertrend")
+        cfg = self._rrs.get_exit_config(self.symbol)
+        for key, label in self._EXIT_PARAM_SPEC.get(ind, []):
+            tk.Label(self._exit_pfrm, text=f"{label}:", bg=BG, fg=FG_GRAY,
+                     font=self._sf).pack(side="left")
+            var = tk.StringVar(value=str(cfg.get(key, "")))
+            e = tk.Entry(self._exit_pfrm, textvariable=var, width=(5 if key == "osc" else 4),
+                         bg=BG_HEADER, fg=FG_WHITE, font=self._sf, relief="flat",
+                         insertbackground=FG_WHITE)
+            e.pack(side="left", padx=(2, 6))
+            e.bind("<FocusOut>", lambda ev, k=key: self._save_exit_param(k))
+            e.bind("<Return>",   lambda ev, k=key: self._save_exit_param(k))
+            self._exit_param_vars[key] = var
+
+    def _save_exit_param(self, key: str):
+        """Egy exit-paraméter mentése a per-pár configba (típus-validálással)."""
+        raw = self._exit_param_vars[key].get().strip()
+        if key == "osc":
+            val = raw.lower() if raw.lower() in ("rsi", "cci") else "rsi"
+        elif key == "st_multiplier":
+            try:
+                val = float(raw)
+            except ValueError:
+                return
+        else:
+            try:
+                val = int(float(raw))
+            except ValueError:
+                return
+        self._rrs.set_exit_config(self.symbol, **{key: val})
 
     def _rr_spec_from_ui(self):
         """A UI-ban beállított teljes spec (preset + óvatos méret + runner + exit).

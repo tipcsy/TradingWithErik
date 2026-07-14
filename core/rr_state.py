@@ -37,7 +37,7 @@ RUNNER_NAME = {RUNNER_TRAILING: "Trailing", RUNNER_KEEP: "Marad távol",
 # A per-pár kiszállási-modul beállítás mezői (a core.exit_signal.default_config
 # kulcsai az `enabled` NÉLKÜL — az `enabled`-et a runner==exit vezérli).
 _EXIT_KEYS = ("indicator", "timeframe", "st_period", "st_multiplier",
-              "wpr_period", "wpr_ma_period")
+              "wpr_period", "wpr_ma_period", "osc", "div_period", "div_pivot")
 
 _lock = threading.Lock()
 _state: dict[str, dict] = {}

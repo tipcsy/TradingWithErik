@@ -17,11 +17,20 @@ from __future__ import annotations
 
 import math
 
-from core.indicator_engine import supertrend, wpr as _wpr, sma as _sma
+import numpy as np
+
+from core.indicator_engine import (
+    supertrend, wpr as _wpr, sma as _sma, rsi as _rsi, cci as _cci,
+)
 
 INDICATOR_SUPERTREND = "supertrend"
 INDICATOR_WPR = "wpr"
-INDICATORS = (INDICATOR_SUPERTREND, INDICATOR_WPR)
+INDICATOR_DIVERGENCE = "divergence"
+INDICATORS = (INDICATOR_SUPERTREND, INDICATOR_WPR, INDICATOR_DIVERGENCE)
+
+OSC_RSI = "rsi"
+OSC_CCI = "cci"
+OSCILLATORS = (OSC_RSI, OSC_CCI)
 
 
 def default_config() -> dict:
@@ -37,6 +46,11 @@ def default_config() -> dict:
         # WPR + mozgóátlag (átzárás a MA-n)
         "wpr_period":    20,
         "wpr_ma_period": 100,
+        # Divergencia (a tananyag szerint a legerősebb): RSI/CCI oszcillátor +
+        # pivot-alapú divergencia + a középvonal (RSI 50 / CCI 0) átzárása.
+        "osc":           OSC_RSI,     # rsi | cci
+        "div_period":    14,
+        "div_pivot":     5,           # pivot félszélesség (±gyertya) a csúcsokhoz
     }
 
 
@@ -80,6 +94,71 @@ def wpr_exit(bars, direction: str, period: int, ma_period: int) -> bool:
         return bool(w_prev <= m_prev and w_cur > m_cur)
 
 
+def _osc_series(bars, osc: str, period: int):
+    """Az oszcillátor sorozata + a KÖZÉPVONAL (RSI→50, CCI→0)."""
+    if osc == OSC_CCI:
+        return _cci(bars["high"], bars["low"], bars["close"], period).to_numpy(), 0.0
+    return _rsi(bars["close"], period).to_numpy(), 50.0
+
+
+def divergence_exit_series(bars, direction: str, osc: str = OSC_RSI,
+                           period: int = 14, pivot: int = 5, max_gap: int = 60):
+    """Divergencia-alapú kiszállás — gyertyánkénti bool tömb (a live és a backtest is
+    ezt használja). Long-nál a BEARISH divergenciát figyeli (ár magasabb csúcs, de az
+    oszcillátor alacsonyabb csúcs a két legutóbbi MEGERŐSÍTETT pivot-csúcson), és a
+    jel akkor SZÓL, amikor az oszcillátor a KÖZÉPVONALAT lefelé keresztezi (a tananyag
+    „a gyertya átzárja a vonalat" szabálya). Short-nál a tükörkép (bullish divergencia
+    + fölfelé keresztezés). Egy pivot az i-edik gyertyán az (i+pivot)-edik gyertyán
+    válik megerősítetté (nincs look-ahead). `max_gap`: hány gyertyáig érvényes még a
+    divergencia a második pivot után."""
+    sign = _dir_sign(direction)
+    n = len(bars)
+    out = np.zeros(n, dtype=bool)
+    if sign == 0 or n < period + 2 * pivot + 3:
+        return out
+    o, mid = _osc_series(bars, osc, period)
+    h = bars["high"].to_numpy()
+    l = bars["low"].to_numpy()
+    piv: list = []                       # (idx, ár, oszc) — long: csúcsok, short: mélyek
+    for nb in range(n):
+        i = nb - pivot                   # az i-edik pivot most (nb-nél) erősödik meg
+        if i >= pivot and not np.isnan(o[i]):
+            is_piv = (h[i] == h[i - pivot:i + pivot + 1].max()) if sign > 0 \
+                else (l[i] == l[i - pivot:i + pivot + 1].min())
+            if is_piv:
+                cand = (i, (h[i] if sign > 0 else l[i]), o[i])
+                # Közeli (plató/döntetlen) pivotok dedupolása: ha az előzőhöz
+                # `pivot`-nál közelebb van, csak akkor cseréljük, ha SZÉLSŐSÉGESEBB;
+                # különben ÚJ pivotként vesszük fel. Így két külön csúcs marad külön.
+                if piv and (i - piv[-1][0]) <= pivot:
+                    if (sign > 0 and cand[1] > piv[-1][1]) or (sign < 0 and cand[1] < piv[-1][1]):
+                        piv[-1] = cand
+                else:
+                    piv.append(cand)
+        if nb < 1 or len(piv) < 2 or np.isnan(o[nb]) or np.isnan(o[nb - 1]):
+            continue
+        (i1, p1, o1) = piv[-2]
+        (i2, p2, o2) = piv[-1]
+        if (nb - i2) > max_gap:
+            continue
+        if sign > 0:
+            div = (p2 > p1) and (o2 < o1)               # magasabb ár-csúcs, alacsonyabb oszc-csúcs
+            crossed = (o[nb - 1] >= mid and o[nb] < mid)  # középvonal lefelé
+        else:
+            div = (p2 < p1) and (o2 > o1)               # alacsonyabb ár-mély, magasabb oszc-mély
+            crossed = (o[nb - 1] <= mid and o[nb] > mid)  # középvonal fölfelé
+        out[nb] = bool(div and crossed)
+    return out
+
+
+def divergence_exit(bars, direction: str, osc: str, period: int, pivot: int) -> bool:
+    """Divergencia-kiszállás az UTOLSÓ ZÁRT gyertyán (a formálódó az utolsó sor)."""
+    if bars is None:
+        return False
+    s = divergence_exit_series(bars, direction, osc, period, pivot)
+    return bool(s[-2]) if len(s) >= 2 else False
+
+
 def exit_triggered(bars, direction: str, cfg: dict) -> bool:
     """A kiválasztott kiszállási indikátor jele az utolsó ZÁRT gyertyán.
     `cfg` a `default_config()` szerinti (a hívó tölti a per-pár beállításból).
@@ -95,4 +174,9 @@ def exit_triggered(bars, direction: str, cfg: dict) -> bool:
         return wpr_exit(bars, direction,
                         int(cfg.get("wpr_period", 20)),
                         int(cfg.get("wpr_ma_period", 100)))
+    if ind == INDICATOR_DIVERGENCE:
+        return divergence_exit(bars, direction,
+                               cfg.get("osc", OSC_RSI),
+                               int(cfg.get("div_period", 14)),
+                               int(cfg.get("div_pivot", 5)))
     return False

@@ -298,6 +298,17 @@ def _build_exit_evaluator(m15: pd.DataFrame, rr_spec: dict):
     from core import exit_signal as _exsig
     from core.indicator_engine import supertrend as _st, wpr as _wprf, sma as _smaf
     ind = ex.get("indicator", _exsig.INDICATOR_SUPERTREND)
+    if ind == _exsig.INDICATOR_DIVERGENCE:
+        # Divergencia: irányonként EGYSZER kiszámoljuk a gyertyánkénti jelet (a series
+        # már look-ahead-mentes: a pivot az i+pivot gyertyán erősödik meg).
+        osc = ex.get("osc", _exsig.OSC_RSI)
+        per = int(ex.get("div_period", 14)); piv = int(ex.get("div_pivot", 5))
+        buy_s  = _exsig.divergence_exit_series(m15, "BUY",  osc, per, piv)
+        sell_s = _exsig.divergence_exit_series(m15, "SELL", osc, per, piv)
+        def _at(i, direction):
+            arr = buy_s if direction == "BUY" else sell_s
+            return bool(0 <= i < len(arr) and arr[i])
+        return _at
     if ind == _exsig.INDICATOR_WPR:
         w  = _wprf(m15["high"], m15["low"], m15["close"], int(ex.get("wpr_period", 20)))
         ma = _smaf(w, int(ex.get("wpr_ma_period", 100))).to_numpy()
