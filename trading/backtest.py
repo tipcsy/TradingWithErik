@@ -70,6 +70,9 @@ class Trade:
     reduced: bool = False       # megtörtént-e a részleges zárás (1R-nél, egyszer)
     runner_mode: str = "keep"   # a maradék stopja: keep|breakeven|trailing
     rr_technique: str = ""      # a ténylegesen alkalmazott technika (log/CSV)
+    # ── Pozícióépítés (AUTO) — több „láb" (ráépítés) egy átlagárral ──
+    legs: list = field(default_factory=list)   # [(price, lot), …]; üres → egyleges
+    build_ref: float = 0.0      # a következő ráépítés referencia-záróára
 
 
 @dataclass
@@ -155,11 +158,16 @@ def pip_to_price(pips: float, pip_size: float) -> float:
 
 
 def calc_pnl(trade: Trade, close_price: float) -> float:
-    diff = close_price - trade.open_price
-    if trade.direction == "SELL":
-        diff = -diff
-    pips = diff / trade.pip_size
-    return pips * trade.lot * trade.pv1_usd
+    # Épített pozíció: a P&L a LÁBAKON (ráépítéseken) összegződik, mindegyik a saját
+    # belépő áráról. Egyleges (üres legs) → a régi számítás (open_price, lot).
+    legs = trade.legs if trade.legs else [(trade.open_price, trade.lot)]
+    total = 0.0
+    for price, lot in legs:
+        diff = close_price - price
+        if trade.direction == "SELL":
+            diff = -diff
+        total += (diff / trade.pip_size) * lot * trade.pv1_usd
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +196,10 @@ def _update_stops(trade: "Trade", high: float, low: float, params: dict,
     """BE + trailing SL frissítése egy nyitott trade-re (mutálja trade.sl /
     risk_free). risky=False esetén BITAZONOS a korábbi inline logikával; risky=True
     a live_trader-t modellezi (azonnali BE, azonnali trailing, felezett távolság)."""
+    # Épített pozíció (több láb): az SL az ÁTLAGÁRON van (a build kezeli) → nem
+    # trailelünk (különben a trailing és az átlagár-stop egymással versenyezne).
+    if len(trade.legs) > 1:
+        return
     be_pct     = params.get("breakeven_pct", 0.5)
     trail_act  = 0.0 if risky else params.get("trail_activation_pips", 8)
     trail_dist = params.get("trail_distance_pips", 6) * (RISKY_TRAIL_FACTOR if risky else 1.0)
@@ -418,6 +430,16 @@ def run_pair(
     m15_times = m15.index.to_list()
     m15_ptr = 0  # melyik M15 gyertya az aktuális
     _exit_at = _build_exit_evaluator(m15, rr_spec)   # kiszállási-jel (None, ha nincs)
+    # Pozícióépítés modellezése — CSAK AUTO módban (determinista; a Kézi user-vezérelt)
+    # és CSAK OFF presetnél (nincs részleges zárás, tiszta eset). None → nincs építés.
+    _build_cfg = None
+    try:
+        from core import build_state as _bstate, position_build as _posbuild
+        _bc = _bstate.get_config(symbol)
+        if _bc.get("mode") == _posbuild.MODE_AUTO and rr_spec.get("preset", "off") == "off":
+            _build_cfg = _bc
+    except Exception:
+        _build_cfg = None
 
     prev_m1_row = None
 
@@ -529,6 +551,26 @@ def run_pair(
                 trade.status      = "exit"
                 closed = True
 
+            # ── Pozícióépítés (AUTO, off preset): risk-free trade + gyertyás jel
+            # (az M15 zárás túllép a build_ref-en) → piramidális ráépítés (új láb),
+            # az SL az új ÁTLAGÁRRA. A build_ref = a jel-gyertya záróra → gyertyánként
+            # legfeljebb egyszer épít. Az m15_ptr ugyanaz az index, amit a belépő is
+            # használ (nincs plusz look-ahead).
+            if (not closed and _build_cfg is not None and trade.risk_free
+                    and 0 <= m15_ptr < len(m15)):
+                _bc_close = float(m15["close"].iloc[m15_ptr])
+                _fired = ((_bc_close > trade.build_ref) if trade.direction == "BUY"
+                          else (_bc_close < trade.build_ref))
+                if _fired:
+                    _last = min(l[1] for l in trade.legs) if trade.legs else trade.lot
+                    _add  = _posbuild.next_lot(_last, _build_cfg["size_factor"],
+                                               min_lot, lot_step)
+                    if _add > 0:
+                        trade.legs.append((float(m1_row["close"]), _add))
+                        trade.lot = round(sum(l[1] for l in trade.legs), 8)
+                        trade.sl  = round(_posbuild.average_price(trade.legs), 6)
+                        trade.build_ref = _bc_close
+
             if closed:
                 # A részleges zárás(ok)ból már realizált P&L hozzáadása a runner
                 # (maradék lot) záró P&L-jéhez → teljes trade P&L.
@@ -587,6 +629,8 @@ def run_pair(
                         risk_usd=risk_usd,
                         risk_pct=risk_usd / balance * 100 if balance > 0 else 0,
                     )
+                    trade.legs = [(open_price, lot)]     # 1. láb; a build a listát bővíti
+                    trade.build_ref = open_price         # az első ráépítés innen figyel
                     open_trades.append(trade)
 
         prev_m1_row = m1_row
