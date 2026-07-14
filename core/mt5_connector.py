@@ -177,6 +177,15 @@ def open_positions_detailed() -> list:
             return []
         out = []
         for p in positions:
+            # Költség-tudatos BE mozgatható-e MOST? (a kézi BE gomb tiltásához a GUI-n —
+            # így nem lehet némán nyomkodni, amíg a profit nem fedezi a költséget).
+            be_feasible = False
+            try:
+                _pinfo = mt5.symbol_info(p.symbol)
+                if _pinfo is not None:
+                    _, be_feasible = _breakeven_plan(p, _pinfo)
+            except Exception:
+                be_feasible = False
             out.append({
                 "ticket":        p.ticket,
                 "symbol":        p.symbol,
@@ -189,6 +198,7 @@ def open_positions_detailed() -> list:
                 "profit":        round(p.profit + p.swap, 2),
                 "magic":         p.magic,
                 "risk_free":     _pos_risk_free(p),
+                "be_feasible":   bool(be_feasible),
             })
         return out
     except Exception:
@@ -362,17 +372,29 @@ def modify_position_sl(ticket: int, new_sl: float) -> bool:
         return False
 
 
+# A nyitó jutalék a pozíció élete alatt FIX (a nyitó deal(ek)ben) → position_id-re
+# cache-eljük, hogy a GUI gyakori feasibility-ellenőrzése ne kérje le újra és újra a
+# deal-history-t. (A swap ezzel szemben napról napra változik → azt sosem cache-eljük.)
+_commission_cache: dict = {}
+
+
 def _position_costs_price(p, info) -> float:
     """A pozíció TELJES kilépési költsége ÁR-egységben kifejezve (jutalék
     round-trip + felhalmozott negatív swap). Ennyivel kell az SL-t az entry
     FÖLÉ (BUY) / ALÁ (SELL) tolni, hogy a zárás nettó (jutalék+swap után) ne
     legyen mínusz. Ha az adat nem elérhető → 0.0 (csak a spread-puffer marad)."""
     try:
-        # Jutalék a nyitó deal(ek)ből; a zárás ~ugyanannyi → round-trip ≈ ×2.
-        commission = 0.0
-        deals = mt5.history_deals_get(position=p.identifier)
-        if deals:
-            commission = sum(getattr(d, "commission", 0.0) for d in deals)
+        # Jutalék a nyitó deal(ek)ből (cache-elve); a zárás ~ugyanannyi → round-trip ≈ ×2.
+        pid = getattr(p, "identifier", None)
+        if pid in _commission_cache:
+            commission = _commission_cache[pid]
+        else:
+            commission = 0.0
+            deals = mt5.history_deals_get(position=pid)
+            if deals:
+                commission = sum(getattr(d, "commission", 0.0) for d in deals)
+            if pid is not None:
+                _commission_cache[pid] = commission
         swap = getattr(p, "swap", 0.0) or 0.0
         # Csak a levonás számít (negatív swap); a pozitív swap nem ad plusz kockázatot.
         cost_ccy = 2.0 * abs(commission) + max(0.0, -swap)
@@ -386,6 +408,44 @@ def _position_costs_price(p, info) -> float:
     except Exception:
         pass
     return 0.0
+
+
+def _breakeven_plan(p, info):
+    """(target_sl, feasible) — a költség-tudatos BE cél-SL és hogy a JELENLEGI árnál
+    a helyes oldalra mozgatható-e (nettó ≥ 0 zárás). `feasible=False`, ha a profit még
+    nem fedezi a spread+jutalék+swap költséget. Nincs order_send. HívóJA fogja a
+    MT5_LOCK-ot (a _position_costs_price deal-history-t olvashat)."""
+    digits       = info.digits
+    point        = info.point
+    spread_price = info.spread * point
+    entry        = p.price_open
+    is_buy       = (p.type == mt5.ORDER_TYPE_BUY)
+    sign         = 1 if is_buy else -1
+    cost_price   = _position_costs_price(p, info)
+    buffer_price = cost_price + max(spread_price, point)   # költség + spread cushion (≥1 pont)
+    target_sl    = round(entry + sign * buffer_price, digits)
+    cur          = p.price_current
+    feasible     = (target_sl < cur) if is_buy else (target_sl > cur)
+    return target_sl, feasible
+
+
+def breakeven_feasible(ticket: int) -> bool:
+    """Mozgatható-e MOST a pozíció a költség-tudatos breakevenre (a profit fedezi a
+    spread+jutalék+swap költséget)? A GUI ez alapján TILTJA/engedélyezi a kézi BE
+    gombot — így nem lehet némán „a semmibe" nyomkodni. Nincs order_send.
+    Pontosan azt a feltételt adja, amit a `move_to_breakeven` is használ."""
+    try:
+        with MT5_LOCK:
+            pos = mt5.positions_get(ticket=ticket)
+            if not pos:
+                return False
+            info = mt5.symbol_info(pos[0].symbol)
+            if info is None:
+                return False
+            _, feasible = _breakeven_plan(pos[0], info)
+            return bool(feasible)
+    except Exception:
+        return False
 
 
 def move_to_breakeven(ticket: int) -> bool:
@@ -410,24 +470,11 @@ def move_to_breakeven(ticket: int) -> bool:
             info = mt5.symbol_info(p.symbol)
             if info is None:
                 return False
-            digits       = info.digits
-            point        = info.point
-            spread_price = info.spread * point
-            entry        = p.price_open
-            is_buy       = (p.type == mt5.ORDER_TYPE_BUY)
-            sign         = 1 if is_buy else -1
-
-            cost_price = _position_costs_price(p, info)
-            # Puffer: költség (jutalék+swap) + spread cushion (min. 1 pont).
-            buffer_price = cost_price + max(spread_price, point)
-            target_sl = round(entry + sign * buffer_price, digits)
-
+            # Költség-tudatos cél-SL + feasibility (közös a kézi-gomb tiltásával).
             # Csak a HELYES oldalon mozgatunk (különben veszteséget rögzítenénk /
             # a bróker elutasítja): BUY → target < aktuális ár; SELL → target > ár.
-            cur = p.price_current
-            if is_buy and target_sl >= cur:
-                return False
-            if (not is_buy) and target_sl <= cur:
+            target_sl, feasible = _breakeven_plan(p, info)
+            if not feasible:
                 return False
 
             req = {

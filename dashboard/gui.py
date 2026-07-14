@@ -1210,6 +1210,7 @@ class PositionRow:
     def __init__(self, parent, ticket, mono_font, small_font,
                  on_be, on_trail, on_panic, on_name_click, on_trail_dist):
         self.ticket = ticket
+        self._small = small_font
         self._symbol = None
         self._on_name_click = on_name_click
         self._on_trail_dist = on_trail_dist
@@ -1229,6 +1230,11 @@ class PositionRow:
                                 relief="flat", bg=BTN_OPT_BG, fg="#ffffff",
                                 command=lambda: on_be(ticket))
         self.btn_be.pack(side="left", padx=1)
+        # A BE-gomb tiltva, ha a profit még nem fedezi a költséget → tooltip mondja meg
+        self._be_tip_text = ""
+        self._be_tip = None
+        self.btn_be.bind("<Enter>", self._be_tip_show)
+        self.btn_be.bind("<Leave>", self._be_tip_hide)
         self.btn_trail = tk.Button(self.frame, text="Trail", width=5, font=small_font,
                                    relief="flat", bg=BTN_DIS_BG, fg=FG_GRAY,
                                    command=lambda: on_trail(ticket))
@@ -1256,6 +1262,30 @@ class PositionRow:
             return
         if val > 0:
             self._on_trail_dist(self.ticket, val)
+
+    # ── BE-gomb tooltip (miért tiltott: a profit nem fedezi a költséget) ──────
+    def _be_tip_show(self, _event=None):
+        text = (self._be_tip_text or "").strip()
+        if not text or self._be_tip is not None:
+            return
+        tip = tk.Toplevel(self.btn_be)
+        tip.wm_overrideredirect(True)
+        tip.attributes("-topmost", True)
+        x = self.btn_be.winfo_rootx()
+        y = self.btn_be.winfo_rooty() + self.btn_be.winfo_height() + 2
+        tk.Label(tip, text=text, bg="#2a2a3a", fg="#e0e0f0", font=self._small,
+                 padx=6, pady=3, relief="solid", bd=1, justify="left",
+                 wraplength=320).pack()
+        tip.wm_geometry(f"+{x}+{y}")
+        self._be_tip = tip
+
+    def _be_tip_hide(self, _event=None):
+        if self._be_tip is not None:
+            try:
+                self._be_tip.destroy()
+            except Exception:
+                pass
+            self._be_tip = None
 
     def update(self, pos, pstate, digits, trail_default=None, point=None,
                strategy_name="—"):
@@ -1316,9 +1346,20 @@ class PositionRow:
         pnl = pos["profit"]
         self.labels["pnl"].config(text=f"{pnl:+.2f}$", fg=FG_GREEN if pnl >= 0 else FG_RED)
 
-        # Gombok állapota (aktív-e?)
-        self.btn_be.config(text="BE ✓" if be_done else "BE",
-                           bg=BTN_PLAY_BG if be_done else BTN_OPT_BG)
+        # Gombok állapota (aktív-e?). A kézi BE csak akkor engedélyezett, ha a
+        # költség-tudatos BE MOST mozgatható (a profit fedezi a spread+jutalék+swap
+        # költséget) — különben TILTVA + tooltip, hogy ne lehessen némán nyomkodni.
+        be_feasible = pos.get("be_feasible", True)   # True fallback (demo/régi cache)
+        if be_done:
+            self.btn_be.config(text="BE ✓", bg=BTN_PLAY_BG, fg="#ffffff", state="normal")
+            self._be_tip_text = ""
+        elif not be_feasible:
+            self.btn_be.config(text="BE", bg=BTN_DIS_BG, fg=FG_GRAY, state="disabled")
+            self._be_tip_text = ("BE még nem lehetséges — a nyereség nem fedezi a "
+                                 "spread + jutalék + swap költséget.")
+        else:
+            self.btn_be.config(text="BE", bg=BTN_OPT_BG, fg="#ffffff", state="normal")
+            self._be_tip_text = ""
 
         # Trail gomb — 3 állapot, "benyomott" (sunken) ha be van kapcsolva:
         #   • KI:            lapos, szürke
@@ -2574,6 +2615,8 @@ class DashboardWindow:
                 st["be_done"] = True
                 _log.info("✦ #%d — kézi költség-tudatos breakeven beállítva", ticket)
             else:
+                # A gomb rendes esetben tiltva van ilyenkor; ha mégis idejut (a
+                # háttér-frissítés és a kattintás közti ár-mozgás miatt), csak logol.
                 _log.info("#%d — BE még nem lehetséges (az ár nem fedezi a "
                           "spread+jutalék+swap költséget) → SL változatlan", ticket)
         threading.Thread(target=_w, daemon=True, name="ManualBE").start()
