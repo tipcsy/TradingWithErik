@@ -324,6 +324,17 @@ class BacktestDialog:
                                if getattr(t, "rr_technique", ""))
                 if summary and tech:
                     summary["_rr_tech"] = dict(tech)
+                # MT5 backtest-reprodukció: a belépők CSV-be (BacktestReplayer.mq5
+                # replay). „Amikor futtatok egy backtestet, elkészíti a belépőket."
+                try:
+                    from tools.mt5_export import export_mt5_csv
+                    from version import BASE_DIR
+                    _p = export_mt5_csv(result, self.symbol, self.params,
+                                        self.pair_cfg, BASE_DIR / "data" / "mt5_backtest")
+                    if _p and summary is not None:
+                        summary["_mt5_csv"] = _p.name
+                except Exception:
+                    pass
             except Exception as ex:
                 err = str(ex)
             try:
@@ -360,9 +371,17 @@ class BacktestDialog:
         self._pbar.config(value=100.0)
         self._pct_lbl.config(text="100%")
         tech = (summary or {}).pop("_rr_tech", None) or {}
+        _tech_txt = ""
         if tech:
-            self._tech_lbl.config(text="Ténylegesen alkalmazott technika: " + ", ".join(
-                f"{_TECH_NAMES.get(k, k)}×{v}" for k, v in tech.items()))
+            _tech_txt = "Ténylegesen alkalmazott technika: " + ", ".join(
+                f"{_TECH_NAMES.get(k, k)}×{v}" for k, v in tech.items())
+        # MT5 backtest-reprodukció CSV neve (a metrikák közül kivéve).
+        _mt5 = (summary or {}).pop("_mt5_csv", None)
+        if _mt5:
+            _tech_txt = (_tech_txt + "   |   " if _tech_txt else "") + \
+                        f"MT5 CSV: data/mt5_backtest/{_mt5}"
+        if _tech_txt:
+            self._tech_lbl.config(text=_tech_txt)
         self._summary = summary
         self._render_metrics(summary)
         if result is not None:
