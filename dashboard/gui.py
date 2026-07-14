@@ -1414,6 +1414,10 @@ class PositionRow:
             self.btn_build.config(state="disabled", bg=BTN_DIS_BG, fg=FG_GRAY)
             self._build_tip_text = ("Építés (Kézi): várakozás a jelre — kockázatmentes "
                                     "pozíció + a gyertya új csúcsra/mélyre zár.")
+        elif _rt and _rt.get("mode") == "auto":
+            # Auto: a motor magától épít → a gomb tiltva, de cián jelzi, hogy aktív.
+            self.btn_build.config(text="＋", state="disabled", bg=BTN_DIS_BG, fg=FG_CYAN)
+            self._build_tip_text = "Építés: Auto — a motor magától ráépít a jel-gyertyán."
         else:
             self.btn_build.config(state="disabled", bg=BTN_DIS_BG, fg=FG_GRAY)
             self._build_tip_text = ""

@@ -526,6 +526,17 @@ def actual_trade_objects(symbol: str, since_ts: int) -> list:
         if tp and tp > 0:
             objs.append(viz.Trend(name=f"dealtp_{d.ticket}", t1=t, p1=tp, t2=t_end, p2=tp,
                                   color="green", width=1, style=1))
+
+    # ── Átlagár (null pont) vonal — ha TÖBB nyitott pozíció van a szimbólumon
+    #    (pozícióépítés fut): a volumen-súlyozott átlagár vízszintes SÁRGA vonala,
+    #    ide kerülnek a stopok (1. szabály). ──
+    if positions and len(positions) >= 2:
+        _avg = _position_build.average_price([(p.price_open, p.volume) for p in positions])
+        if _avg > 0:
+            objs.append(viz.Trend(
+                name="build_avg", t1=int(since_ts), p1=_avg,
+                t2=int(datetime.now(timezone.utc).timestamp()), p2=_avg,
+                color="yellow", width=2, style=2))
     return objs
 
 
@@ -962,6 +973,17 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
                                         pair_cfg.get("min_lot", 0.01),
                                         pair_cfg.get("lot_step", 0.01)),
         })
+        # ── AUTO mód: a motor magától ráépít a jel-gyertyán — de gyertyánként
+        # LEGFELJEBB EGYSZER (last_build_bar őr), hogy egy cikluson belül / azonos
+        # gyertyán ne duplázzon. A ref_close-t a gyertya-záróra állítjuk (a doc:
+        # a következő ráépítéshez az árnak e gyertya záróján TÚL kell esnie).
+        if (_bmode == _pb.MODE_AUTO and _rt.get("ready")
+                and _bbars is not None and len(_bbars) >= 2):
+            _bar_t = int(_bbars.index[-2].timestamp())
+            if _rt.get("last_build_bar") != _bar_t and manual_build(symbol):
+                _rt["last_build_bar"] = _bar_t
+                _rt["ref_close"] = float(_bbars["close"].iloc[-2])
+                _rt["ready"] = False
     else:
         build_runtime.pop(symbol, None)
 
