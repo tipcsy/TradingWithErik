@@ -33,6 +33,7 @@ from core import mt5_connector
 from core import mt5_visual
 from core import risky_mode
 from core import correlation
+from core import run_state
 from core.indicator_engine import atr as atr_indicator
 from core.risk_manager import calc_lot, calc_effective_slots, SlotManager
 from strategy import get_strategy
@@ -533,11 +534,15 @@ def pair_visual_lines(symbol: str, params: dict, strategy, pip_size: float,
         bars[tf.label] = df
     if not bars:
         return []
-    # pip_size a jövőbeli TP/SL-rajzoláshoz (feltétel 3) — a params nem tartalmazza.
-    md = MarketData(symbol=symbol, params={**params, "pip_size": pip_size}, bars=bars)
     # A stratégia per-gyertya BarState-jeire a keret RÁMASZKOLJA a no-trade órákat
     # — a STRATÉGIA-hatókörű órákkal (fájl → különben a config.json legacy).
     th = resolve_trade_hours(symbol, strategy.name, (pair_cfg or {}).get("trade_hours"))
+    no_trade_set = (set(range(24)) - {int(h) for h in th}) if th is not None else set()
+    # pip_size a jövőbeli TP/SL-rajzoláshoz (feltétel 3) — a params nem tartalmazza.
+    # A no_trade_hours-t a visual_objects ELŐTT állítjuk be → a kék sáv + belépő-
+    # jelölések visszajátszása ugyanúgy RESETEL a szüneteknél, mint a live motor.
+    md = MarketData(symbol=symbol, params={**params, "pip_size": pip_size}, bars=bars,
+                    no_trade_hours=no_trade_set)
     objects = apply_no_trade(strategy.visual_objects(md), pair_cfg or {}, th)
     # + a GENERIKUS piac-állapot kód a per-gyertya BarState-ekhez (a per-pár
     #   kiválasztott piac-stratégiából; csak ha kérve van a charton).
@@ -651,13 +656,21 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
     _sn = state.strategy.name if state.strategy else None
     trade_hours = resolve_trade_hours(symbol, _sn, pair_cfg.get("trade_hours"))
     if trade_hours is not None:
-        if hour not in {int(h) for h in trade_hours}:
-            return
+        _allowed = {int(h) for h in trade_hours}
     else:
         sess_start = pair_cfg.get("sess_start", 0)
         sess_end   = pair_cfg.get("sess_end", 24)
-        if not (sess_start <= hour < sess_end):
-            return
+        _allowed = set(range(int(sess_start), int(sess_end)))
+    no_trade_set = set(range(24)) - _allowed        # a jelzés-reset ezekben az órákban
+    if hour not in _allowed:
+        # No-trade (szürke) óra: NEM kereskedünk, ÉS a szünet RESETELJE az M15
+        # jelzést — a következő tradeable ciklusban az on_bar_close MÉLY, hour-aware
+        # újra-bemelegítést végez (signal_warmed=False), így a szünet ELŐTTI ablak nem
+        # él túl a szüneten és nem lép be egy elavult szetupra a szünet után.
+        state.signal_warmed = False
+        if state.strat_state is not None and hasattr(state.strat_state, "last_m15_time"):
+            state.strat_state.last_m15_time = None
+        return
 
     # Napi reset
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -686,7 +699,10 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         if df is None or len(df) < wu_min:
             return
         bars[tf.label] = df
-    md = MarketData(symbol=symbol, params=params, bars=bars)
+    # A no-trade órákat átadjuk a stratégiának → az M15 jelzés-visszajátszás ezekben
+    # az órákban RESETEL (a mély warmup is hour-aware, így a szünet előtti ablak nem
+    # épül vissza).
+    md = MarketData(symbol=symbol, params=params, bars=bars, no_trade_hours=no_trade_set)
 
     # --- Jelzés a stratégiától (ZÁRT gyertyán, állapottartó) ---
     state.strat_state, signal = strategy.on_bar_close(state.strat_state, md)
@@ -1069,15 +1085,22 @@ def run(cfg: dict, slot_mgr: SlotManager):
             viz_enabled=pair_cfg.get("viz_enabled", True),   # V mód a config.json-ból
             enabled_strategies=[st.name for st in strats],
         )
-        # Kezdeti állapot: ha enabled és van tanított stratégia → LIVE
-        if pair_cfg.get("enabled", False) and trained:
+        # Kezdeti állapot (restart-biztos): a KERESKEDÉS-SZÁNDÉK a config.json
+        # `run_state`-jéből (per stratégia), legacy fallback a szimbólum-szintű
+        # `enabled`-re (= az összes engedélyezett stratégia, mint eddig). Csak a
+        # "live" szándékú ÉS tanított stratégiákat indítjuk → újraindítás után a
+        # korábban futó párok maguktól folytatják a kereskedést.
+        _primary = strats[0].name if strats else None
+        _live = set(run_state.live_strategies(cfg, symbol, [st.name for st in strats]))
+        startable = [st for st in strats
+                     if st.name in _live and load_pair_params(symbol, st.name) is not None]
+        if startable:
             instrument_state[symbol] = "LIVE"
-            for _i, st in enumerate(strats):
-                ps = _make_state(symbol, pair_cfg, st, is_display=(_i == 0))
+            for st in startable:
+                ps = _make_state(symbol, pair_cfg, st, is_display=(st.name == _primary))
                 if ps is not None:
                     pair_states[(symbol, st.name)] = ps
-            _n = sum(1 for st in strats if (symbol, st.name) in pair_states)
-            log.info("%s — LIVE (%d stratégia, params betöltve)", symbol, _n)
+            log.info("%s — LIVE (%d stratégia, params betöltve)", symbol, len(startable))
         else:
             instrument_state[symbol] = "STOPPED"
             if not trained:

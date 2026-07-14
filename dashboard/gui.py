@@ -62,7 +62,7 @@ TRAILING_COLUMNS = [
     Column("daily",    "Napi P&L",    9, "center", kind="fixed"),
     Column("market",   "Piac",       10, "center", kind="fixed"),
     Column("quality",  "Minőség",     9, "center", kind="fixed"),
-    Column("opt",      "Opt státusz",12, "center", kind="fixed"),
+    Column("opt",      "Opt státusz",18, "w",      kind="fixed"),
 ]
 
 
@@ -164,11 +164,13 @@ def _fixed_cell(key: str, ds, opt_status: str, inst_state: str) -> tuple[str, st
 class PairRow:
     def __init__(self, parent: tk.Frame, symbol: str, row_idx: int, columns: list,
                  on_run, on_opt, on_delete, on_risky, on_name_click, mono_font, small_font,
-                 on_status_click=None, on_viz=None, on_marker_click=None):
+                 on_status_click=None, on_viz=None, on_marker_click=None, on_opt_menu=None):
         self.symbol  = symbol
         self.columns = columns
         self._bg     = BG_ROW_ODD if row_idx % 2 == 0 else BG_ROW_EVEN
         self._mono   = mono_font
+        self._opt_full = ""       # az Opt státusz TELJES szövege (tooltiphez)
+        self._opt_tip  = None     # a lebegő tooltip-ablak (Toplevel), ha látszik
 
         self.frame = tk.Frame(parent, bg=self._bg)
         # Nem csomagoljuk magát — _apply_filter_sort() kezeli
@@ -213,10 +215,15 @@ class PairRow:
         self.labels["symbol"].config(cursor="hand2")
         self.labels["symbol"].bind("<Button-1>", lambda e: on_name_click(symbol))
 
-        # Az Opt státusz cellára kattintva → részletes állapot / hibalog / trials CSV
-        if on_status_click and "opt" in self.labels:
-            self.labels["opt"].config(cursor="hand2")
-            self.labels["opt"].bind("<Button-1>", lambda e: on_status_click(symbol))
+        # Az Opt státusz cellára kattintva → részletes állapot / hibalog / trials CSV;
+        # RÁHÚZVA (hover) → a TELJES státusz-szöveg tooltipben (a cella keskeny, a
+        # "wpr_sma 112/500 45%" kifutna).
+        if "opt" in self.labels:
+            if on_status_click:
+                self.labels["opt"].config(cursor="hand2")
+                self.labels["opt"].bind("<Button-1>", lambda e: on_status_click(symbol))
+            self.labels["opt"].bind("<Enter>", self._opt_tip_show)
+            self.labels["opt"].bind("<Leave>", self._opt_tip_hide)
 
         # Egy gomb a futtatáshoz (Play↔Stop morph) és egy az OPT-hoz (OPT↔STOP morph)
         self.btn_run = tk.Button(self.frame, text="▶", width=3,
@@ -237,6 +244,9 @@ class PairRow:
                                  bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
                                  relief="flat", command=lambda: on_opt(symbol))
         self.btn_opt.pack(side="left", padx=1)
+        # JOBB-klikk az OPT-on → konkrét stratégia választása (több-stratégiás eset)
+        if on_opt_menu is not None:
+            self.btn_opt.bind("<Button-3>", lambda e: on_opt_menu(symbol, e))
         self.btn_del = tk.Button(self.frame, text="✕", width=2,
                                  bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
                                  relief="flat", command=lambda: on_delete(symbol))
@@ -247,6 +257,31 @@ class PairRow:
             btn.config(text=text, bg=active_bg, fg=active_fg, state="normal")
         else:
             btn.config(text=text, bg=BTN_DIS_BG, fg=BTN_DIS_FG, state="disabled")
+
+    # ── Opt státusz tooltip (a keskeny cellában elcsúszó teljes szöveg) ──────
+    def _opt_tip_show(self, event):
+        text = (self._opt_full or "").strip()
+        if not text or text == "—" or self._opt_tip is not None:
+            return
+        lbl = self.labels.get("opt")
+        tip = tk.Toplevel(lbl)
+        tip.wm_overrideredirect(True)       # keret nélküli buborék
+        tip.attributes("-topmost", True)
+        x = lbl.winfo_rootx()
+        y = lbl.winfo_rooty() + lbl.winfo_height() + 2
+        tk.Label(tip, text=text, bg="#2a2a3a", fg="#e0e0f0",
+                 font=self._mono, padx=6, pady=3, relief="solid", bd=1,
+                 justify="left").pack()
+        tip.wm_geometry(f"+{x}+{y}")
+        self._opt_tip = tip
+
+    def _opt_tip_hide(self, event=None):
+        if self._opt_tip is not None:
+            try:
+                self._opt_tip.destroy()
+            except Exception:
+                pass
+            self._opt_tip = None
 
     def _blank_all(self, fg, except_keys=()):
         for col in self.columns:
@@ -286,6 +321,7 @@ class PairRow:
                no_trade: bool = False):
         trained      = ds.trained
         has_position = ds.position_pnl is not None
+        self._opt_full = opt_status or ""     # a tooltip a belépéskori teljes szöveget mutatja
 
         if inst_state == "OPTIMIZING":
             bg = BG_OPT_ROW
@@ -497,15 +533,18 @@ class OptimizerController:
                 self._pool_failed = True
 
     def _drain_progress(self):
-        """A gyermekfolyamatok haladását a fő státusz dict-be vezeti."""
+        """A gyermekfolyamatok haladását a fő státusz dict-be vezeti. A progress-queue
+        szimbólum-szintű (symbol, done, total); a MELYIK stratégia a futó tételből
+        derül ki (egy szimbólumon egyszerre egy fut)."""
         while True:
             try:
                 symbol, done, total = self._progress_q.get()
             except Exception:
                 break
-            if symbol in self._running:
+            strat = next((st for (s, st) in self._running if s == symbol), None)
+            if strat is not None:
                 pct = int(done / total * 100) if total else 0
-                self.optimizer_status[symbol] = f"{done}/{total}  {pct}%"
+                self.optimizer_status[symbol] = f"{strat} {done}/{total}  {pct}%"
                 self._last_progress[symbol] = time.time()   # halad → stall-óra újraindul
 
     def shutdown(self):
@@ -521,40 +560,84 @@ class OptimizerController:
             pass
 
     # ── Vezérlés ──────────────────────────────────────────────────────────
-    def request_optimize(self, symbol: str):
+    # A munkatételek (symbol, strategy) párok — így per-stratégia tudjuk, MELYIK
+    # optimalizál. A KIJELZÉS (instrument_state / optimizer_status) szimbólum-szintű
+    # marad (aggregátum): egy szimbólumon EGYSZERRE EGY stratégia optimalizál (a
+    # másik sorba kerül), így a szimbólum egyértelműen egy futó tételt azonosít.
+
+    def _default_strategy(self) -> str:
+        return getattr(self.strategy, "name", "wpr_sma")
+
+    def _symbol_busy(self, symbol: str) -> bool:
+        """Fut vagy sorban áll-e MÁR bármely stratégia ezen a szimbólumon."""
+        return (any(s == symbol for s, _ in self._running)
+                or any(s == symbol for s, _ in self._queue))
+
+    def request_optimize(self, symbol: str, strategy: str | None = None):
+        """Egy (symbol, strategy) optimalizálás kérése. Ugyanarra a szimbólumra TÖBB
+        stratégia is kérhető — egyszerre EGY fut, a többi sorba kerül. LIVE
+        (kereskedő) szimbólumot nem optimalizálunk."""
+        strategy = strategy or self._default_strategy()
         with self._lock:
-            if self.instrument_state.get(symbol) != "STOPPED":
+            if self.instrument_state.get(symbol) == "LIVE":
                 return
-            if symbol in self._running or symbol in self._queue:
-                return
-            if len(self._running) < self.max_parallel:
-                self._start(symbol)
+            job = (symbol, strategy)
+            if job in self._running or job in self._queue:
+                return                       # ezt a stratégiát már kérték
+            symbol_running = any(s == symbol for s, _ in self._running)
+            if len(self._running) < self.max_parallel and not symbol_running:
+                self._start(job)
             else:
-                self._queue.append(symbol)
-                self.instrument_state[symbol] = "QUEUED"
-                self.optimizer_status[symbol] = "Várakozik..."
+                self._queue.append(job)
+                # Ha a szimbólum MÁR optimalizál (más stratégia), maradjon OPTIMIZING;
+                # különben QUEUED (a pool tele van).
+                if not symbol_running:
+                    self.instrument_state[symbol] = "QUEUED"
+                    self.optimizer_status[symbol] = f"Várakozik... ({strategy})"
 
     def cancel_queued(self, symbol: str):
-        """Sorban álló (QUEUED) optimalizálás visszavonása. A MÁR FUTÓ nem
-        szakítható meg — azt az időtúllépés-védelem zárja le, ha elakad."""
+        """Sorban álló (QUEUED) optimalizálás visszavonása (a szimbólum összes
+        sorban álló tétele). A MÁR FUTÓ nem szakítható meg — azt az időtúllépés-
+        védelem zárja le, ha elakad."""
         with self._lock:
-            if symbol in self._queue:
-                self._queue.remove(symbol)
+            self._queue = [(s, st) for (s, st) in self._queue if s != symbol]
+            if not self._symbol_busy(symbol):
                 self.instrument_state[symbol] = "STOPPED"
                 self.optimizer_status[symbol] = ""
 
-    def _start(self, symbol: str):
-        self._running.add(symbol)
-        self.instrument_state[symbol] = "OPTIMIZING"
-        self.optimizer_status[symbol] = "Indul..."
-        threading.Thread(target=self._run_worker, args=(symbol,), daemon=True).start()
+    def resume_unfinished(self):
+        """INDÍTÁSKOR: a fájlrendszerben talált BEFEJEZETLEN study-k (van `_study.db`,
+        nincs `.done`) automatikus sorba állítása — per (symbol, strategy). Az optuna a
+        `.db`-ből folytat. A LIVE (kereskedő) szimbólumokat kihagyja (azok szándéka a
+        kereskedés). A `live_trader` induló állapot-beállítása után hívandó (kis
+        késleltetéssel, hogy a LIVE jelölés már beálljon)."""
+        try:
+            from core.params_store import unfinished_studies
+            pending = unfinished_studies()
+        except Exception:
+            return
+        for symbol, strat in pending:
+            if self.instrument_state.get(symbol) == "LIVE":
+                continue                     # kereskedő pár — nem optimalizáljuk
+            self.request_optimize(symbol, strat)   # per-job dedup + sor a request-ben
 
-    def _run_worker(self, symbol: str):
+    def _start(self, job):
+        symbol, strategy = job
+        self._running.add(job)
+        self.instrument_state[symbol] = "OPTIMIZING"
+        self.optimizer_status[symbol] = f"Indul... ({strategy})"
+        threading.Thread(target=self._run_worker, args=(job,), daemon=True).start()
+
+    def _run_worker(self, job):
         """HáttérSZÁL: adat-előkészítés (MT5, IO) → a CPU-nehéz optimalizálás
-        külön PROCESSZBE. A fő (UI) szál egyiket sem érinti → nem fagy."""
+        külön PROCESSZBE. A fő (UI) szál egyiket sem érinti → nem fagy.
+        `job` = (symbol, strategy) — per-stratégia optimalizálás."""
+        symbol, strategy = job
         try:
             from ml.optimizer import optimize_job, params_file
             from trading.backtest import load_data
+            from strategy import get_strategy_by_name
+            job_strat = get_strategy_by_name(strategy)
 
             opt_cfg     = self.cfg["optimizer"]
             initial_bal = self.cfg.get("ml", {}).get("starting_balance_eur", 1000.0)
@@ -571,7 +654,7 @@ class OptimizerController:
             connected = _mt5c.connect(self.cfg)
 
             if connected:
-                for tf in (t.label for t in self.strategy.timeframes()):
+                for tf in (t.label for t in job_strat.timeframes()):
                     pq = ROOT / "data" / tf.lower() / f"{symbol}.parquet"
                     if pq.exists():
                         self.optimizer_status[symbol] = f"Gap-fill {tf}..."
@@ -610,7 +693,7 @@ class OptimizerController:
                 from concurrent.futures import TimeoutError as _FutTimeout
                 t_submit = time.time()
                 self._last_progress[symbol] = t_submit
-                fut = self._pool.submit(optimize_job, *args, self._progress_q)
+                fut = self._pool.submit(optimize_job, *args, self._progress_q, strategy)
                 while True:
                     try:
                         entry = fut.result(timeout=10)   # rövid poll
@@ -633,7 +716,7 @@ class OptimizerController:
                             self.optimizer_status[symbol] = "Hiba: abszolút időlimit"
                             return
             else:
-                entry = optimize_job(*args, _LocalProgress(self.optimizer_status))
+                entry = optimize_job(*args, _LocalProgress(self.optimizer_status), strategy)
 
             if "error" in entry:
                 self.optimizer_status[symbol] = f"Hiba: {entry['error']}"
@@ -651,7 +734,7 @@ class OptimizerController:
             _rr = full.get("rr")
             if not _rr:
                 full.pop("rr", None)
-            out = params_file(symbol)
+            out = params_file(symbol, strategy)
             tmp = out.with_suffix(".tmp")
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(full, f, indent=2, ensure_ascii=False, default=str)
@@ -672,9 +755,12 @@ class OptimizerController:
             self.optimizer_status[symbol] = f"Hiba: {e}"
         finally:
             with self._lock:
-                self._running.discard(symbol)
-                self._last_progress.pop(symbol, None)
-                self.instrument_state[symbol] = "STOPPED"
+                self._running.discard(job)
+                # A szimbólum csak akkor lesz STOPPED, ha NINCS több futó/sorban álló
+                # tétele (más stratégia még optimalizálhat ugyanarra a szimbólumra).
+                if not self._symbol_busy(symbol):
+                    self._last_progress.pop(symbol, None)
+                    self.instrument_state[symbol] = "STOPPED"
                 self._try_start_next()
 
     @staticmethod
@@ -688,10 +774,15 @@ class OptimizerController:
             pass
 
     def _try_start_next(self):
-        while self._queue and len(self._running) < self.max_parallel:
-            nxt = self._queue.pop(0)
-            if self.instrument_state.get(nxt) == "QUEUED":
-                self._start(nxt)
+        # A sorból az ELSŐ olyan tételt indítjuk, amelynek a szimbóluma épp NEM fut
+        # (egy szimbólumon egyszerre egy stratégia optimalizál). A többi a sorban marad.
+        while len(self._running) < self.max_parallel:
+            nxt = next((j for j in self._queue
+                        if not any(s == j[0] for s, _ in self._running)), None)
+            if nxt is None:
+                break
+            self._queue.remove(nxt)
+            self._start(nxt)
 
 
 # ---------------------------------------------------------------------------
@@ -1490,8 +1581,9 @@ class DashboardWindow:
     def __init__(self, cfg: dict, dashboard_ref: dict,
                  instrument_state: dict, optimizer_status: dict,
                  on_play_pair, on_stop_pair, strategy=None,
-                 on_slots_change=None):
+                 on_slots_change=None, auto_resume_opt=False):
         self.cfg              = cfg
+        self._auto_resume_opt = auto_resume_opt
         self.dashboard_ref    = dashboard_ref
         self.instrument_state = instrument_state
         self.optimizer_status = optimizer_status
@@ -1720,7 +1812,8 @@ class DashboardWindow:
                 on_name_click=self._show_instrument_settings,
                 mono_font=mono_font, small_font=small_font,
                 on_status_click=self._show_opt_log, on_viz=self._handle_viz,
-                on_marker_click=self._show_strategy_params)
+                on_marker_click=self._show_strategy_params,
+                on_opt_menu=self._handle_opt_menu)
 
         self._apply_filter_sort()
 
@@ -1954,7 +2047,8 @@ class DashboardWindow:
             on_name_click=self._show_instrument_settings,
             mono_font=self._mono_font, small_font=self._small_font,
             on_status_click=self._show_opt_log, on_viz=self._handle_viz,
-            on_marker_click=self._show_strategy_params)
+            on_marker_click=self._show_strategy_params,
+            on_opt_menu=self._handle_opt_menu)
         self._apply_filter_sort()
 
     # ── JSON szintaxis-színezés (Text widgethez) ─────────────────────────
@@ -2259,6 +2353,21 @@ class DashboardWindow:
         elif st == "LIVE":
             self._handle_stop(symbol)
 
+    def _persist_run_state(self, symbol: str, state: str):
+        """A kereskedés-SZÁNDÉK perzisztálása a config.json-ba (restart-biztos):
+        a szimbólum engedélyezett stratégiáira beállítja a `run_state`-et (+ az
+        `enabled`-et szinkronban), majd ment. Így újraindításkor a `run()` a
+        korábban futó párokat magától LIVE-ba teszi."""
+        try:
+            from core import run_state as _rs
+            from strategy import enabled_strategy_names
+            strat_names = enabled_strategy_names(self.cfg, symbol) or [self.strategy.name]
+            for sn in strat_names:
+                _rs.set_state(self.cfg, symbol, sn, state)
+            self._save_main_config()
+        except Exception:
+            pass
+
     def _handle_play(self, symbol: str):
         ds = self.dashboard_ref.get(symbol)
         if ds is None or not ds.trained:
@@ -2266,6 +2375,7 @@ class DashboardWindow:
         if self.instrument_state.get(symbol) != "STOPPED":
             return
         self.instrument_state[symbol] = "LIVE"
+        self._persist_run_state(symbol, "live")      # restart után folytassa a kereskedést
         if self._on_play:
             self._on_play(symbol)
 
@@ -2278,18 +2388,56 @@ class DashboardWindow:
         if ds.position_pnl is not None:
             return
         self.instrument_state[symbol] = "STOPPED"
+        self._persist_run_state(symbol, "stopped")   # restart után NE induljon magától
         if self._on_stop:
             self._on_stop(symbol)
 
+    def _opt_strategies_for(self, symbol: str) -> list:
+        """Az instrumentumon OPTIMALIZÁLHATÓ stratégiák (az engedélyezettek; ha nincs
+        explicit lista, az elsődleges/aktív)."""
+        from strategy import enabled_strategy_names
+        return enabled_strategy_names(self.cfg, symbol) or [self.strategy.name]
+
     def _handle_opt(self, symbol: str):
-        """OPT↔STOP morph: STOPPED → optimalizálás indítása; QUEUED → sorból törlés."""
+        """OPT↔STOP morph. STOPPED → az instrumentum ÖSSZES engedélyezett stratégiájának
+        optimalizálása (mindegyik saját (symbol, strategy) tétel, egyszerre egy fut, a
+        többi sorba). QUEUED → a szimbólum sorban álló tételeinek törlése. Egy KONKRÉT
+        stratégia optimalizálásához: JOBB-klikk az OPT gombon (menü)."""
         st = self.instrument_state.get(symbol)
         if st == "STOPPED":
-            self._opt_ctrl.request_optimize(symbol)
+            for sn in self._opt_strategies_for(symbol):
+                self._opt_ctrl.request_optimize(symbol, sn)
         elif st == "QUEUED":
             self._opt_ctrl.cancel_queued(symbol)
         else:
             return
+        self._refresh_row(symbol)
+
+    def _handle_opt_menu(self, symbol: str, event):
+        """JOBB-klikk az OPT gombon: egy KONKRÉT stratégia optimalizálásának indítása
+        (a többstratégiás eset kezelése). LIVE szimbólumnál nem teszünk semmit."""
+        if self.instrument_state.get(symbol) == "LIVE":
+            return
+        names = self._opt_strategies_for(symbol)
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label=f"— {symbol} optimalizálása —", state="disabled")
+        for sn in names:
+            menu.add_command(
+                label=f"▶ {sn}",
+                command=lambda s=sn: (self._opt_ctrl.request_optimize(symbol, s),
+                                      self._refresh_row(symbol)))
+        if len(names) > 1:
+            menu.add_separator()
+            menu.add_command(
+                label="▶ Mind",
+                command=lambda: ([self._opt_ctrl.request_optimize(symbol, s)
+                                  for s in names], self._refresh_row(symbol)))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _refresh_row(self, symbol: str):
         row = self.rows.get(symbol)
         ds  = self.dashboard_ref.get(symbol)
         if row and ds:
@@ -2689,7 +2837,13 @@ class DashboardWindow:
             df.set_index("time", inplace=True)
             bars[label] = df
 
-        md = MarketData(symbol=symbol, params=params, bars=bars)
+        # No-trade órák → a compute_display jelzés-visszajátszása ugyanúgy RESETEL a
+        # szüneteknél, mint a live motor és a viz (a kör a szünet után nulláról).
+        from core.params_store import resolve_trade_hours as _rth
+        _th = _rth(symbol, self.strategy.name,
+                   (self.cfg.get("pairs", {}).get(symbol, {}) or {}).get("trade_hours"))
+        _nt = (set(range(24)) - {int(h) for h in _th}) if _th is not None else set()
+        md = MarketData(symbol=symbol, params=params, bars=bars, no_trade_hours=_nt)
         # Az instrumentumon ENGEDÉLYEZETT stratégiák (a GUI szürkíti a kikapcsoltakat).
         from strategy import enabled_strategy_names, get_strategy_by_name
         enabled = enabled_strategy_names(self.cfg, symbol)
@@ -2989,6 +3143,11 @@ class DashboardWindow:
         threading.Thread(target=_loop, daemon=True, name="UIWatchdog").start()
 
     def run(self):
+        # Auto-folytatás: a megszakadt optimalizálások újraindítása INDÍTÁSKOR.
+        # Késleltetve, hogy a live_trader induló LIVE-jelölése (magic-recovery +
+        # run_state) már beálljon → a kereskedő szimbólumokat NE optimalizáljuk.
+        if self._auto_resume_opt:
+            self.root.after(4000, self._resume_optimizations)
         try:
             self.root.mainloop()
         finally:
@@ -2996,6 +3155,11 @@ class DashboardWindow:
                 self._opt_ctrl.shutdown()
             except Exception:
                 pass
+
+    def _resume_optimizations(self):
+        """A befejezetlen study-k sorba állítása (háttérszálon, hogy az UI ne akadjon)."""
+        threading.Thread(target=self._opt_ctrl.resume_unfinished, daemon=True,
+                         name="OptResume").start()
 
 
 # ---------------------------------------------------------------------------

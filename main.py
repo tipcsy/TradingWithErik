@@ -77,6 +77,7 @@ def cmd_live():
         on_play_pair=None,   # instrument_state váltás elegendő, a run() loop felkapja
         on_stop_pair=None,
         on_slots_change=on_slots_change,
+        auto_resume_opt=True,   # induláskor a megszakadt optimalizálások folytatása
     )
 
     def update_header():

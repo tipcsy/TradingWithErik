@@ -975,14 +975,18 @@ def run_optimizer(cfg: dict, symbols: Optional[list[str]] = None):
 # Külön PROCESSZBEN futtatható feladat (GIL-mentes — a GUI sosem fagy tőle)
 # ---------------------------------------------------------------------------
 
-def optimize_job(symbol, df_m15, df_m1, cfg, initial_balance, progress_q=None) -> dict:
+def optimize_job(symbol, df_m15, df_m1, cfg, initial_balance, progress_q=None,
+                 strategy_name=None) -> dict:
     """Az `optimize_symbol` PROCESSZBEN futtatható burka (a GUI ezt küldi a pool-nak).
 
     Minden bemenet picklezhető (DataFrame-ek + a teljes cfg dict), nincs MT5 vagy
     tkinter függés. A haladást a progress_q-ra teszi (symbol, done, total) hármasként.
     A method-döntést (optuna|grid|random) az optimize_symbol intézi → a GUI és a CLI
     UGYANAZT az utat járja. Visszaad: {"train_summary","test_summary","params"} | {"error"}.
-    """
+
+    `strategy_name`: MELYIK stratégiát optimalizáljuk (picklázható név, a subprocess
+    a `get_strategy_by_name`-mel oldja fel). None → a config alapértelmezett stratégiája
+    (visszafelé kompatibilis)."""
     def _progress(done, total, best):
         if progress_q is not None:
             try:
@@ -991,8 +995,12 @@ def optimize_job(symbol, df_m15, df_m1, cfg, initial_balance, progress_q=None) -
                 pass
 
     try:
+        strategy = None
+        if strategy_name:
+            from strategy import get_strategy_by_name
+            strategy = get_strategy_by_name(strategy_name)
         return optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance,
-                               progress=_progress)
+                               progress=_progress, strategy=strategy)
     except Exception as e:
         import traceback
         return {"error": f"{e}", "traceback": traceback.format_exc()}

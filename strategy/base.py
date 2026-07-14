@@ -104,6 +104,12 @@ class MarketData:
     symbol: str
     params: dict
     bars:   dict[str, pd.DataFrame] = field(default_factory=dict)
+    # KERETRENDSZER-szintű no-trade órák (0..23, SZERVER/chart idő) — a keret tölti
+    # a stratégia-hatókörű `trade_hours` KOMPLEMENTERÉVEL. A stratégia ezekben az
+    # órákban RESETELI a jelzési állapotot (a szünet után nulláról fegyverkezik), így
+    # nem visz át a szüneten egy elavult szetupot. Üres → nincs no-trade reset
+    # (visszafelé kompatibilis: aki nem tölti, a régi viselkedést kapja).
+    no_trade_hours: set = field(default_factory=set)
 
     def closed(self, label: str) -> Optional[pd.Series]:
         df = self.bars.get(label)

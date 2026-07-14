@@ -46,6 +46,15 @@ class WprSmaState:
         self.signal = PairState(self.symbol)
 
 
+def _is_no_trade(md: MarketData, ts) -> bool:
+    """Igaz, ha az adott gyertya-idő (`ts`) a keret által megadott no-trade órába
+    esik → a jelzési állapotgépet ilyenkor RESETELJÜK (a szünet után nulláról). A
+    `ts.hour` a SZERVER/chart idő (mint a live óra-kapu), tehát egyezik a szürke sáv
+    óráival. Üres `no_trade_hours` → sosem igaz (régi viselkedés)."""
+    nt = getattr(md, "no_trade_hours", None)
+    return bool(nt) and int(ts.hour) in nt
+
+
 def _clamp_wpr(v: float) -> float:
     """WPR a [-100, 0] tartományba szorítva, a -0.0 normalizálva 0.0-ra."""
     if v is None or math.isnan(v):
@@ -150,6 +159,10 @@ class WprSmaStrategy(Strategy):
         state  = PairState(md.symbol)
         seen_closed = False
         for i in range(len(m15) - 1):            # az utolsó sor a formálódó gyertya
+            if _is_no_trade(md, m15.index[i]):   # no-trade óra → a jelzést reseteljük
+                state = PairState(md.symbol)
+                seen_closed = True
+                continue
             s, w = smas[i], wprs15[i]
             if math.isnan(s) or math.isnan(w):
                 continue
@@ -167,7 +180,9 @@ class WprSmaStrategy(Strategy):
         # lépéssel az élő gyertyára is kiértékeljük. A `state` (zárt) érintetlen.
         live_state = replace(state)
         s_live, w_live, c_live = smas[-1], wprs15[-1], closes[-1]
-        if not (math.isnan(s_live) or math.isnan(w_live)):
+        if _is_no_trade(md, m15.index[-1]):      # a formálódó gyertya no-trade órában → reset
+            live_state = PairState(md.symbol)
+        elif not (math.isnan(s_live) or math.isnan(w_live)):
             live_state = check_m15_signal(
                 live_state, close=float(c_live), sma=float(s_live),
                 wpr_m15=float(w_live), params=md.params)
@@ -223,6 +238,9 @@ class WprSmaStrategy(Strategy):
             smas   = m15["sma"].values
             wprs   = m15["wpr"].values
             for i in range(len(m15) - 1):          # az utolsó sor a formálódó
+                if _is_no_trade(md, m15.index[i]): # no-trade óra → reset (szünet utáni friss)
+                    state.signal = PairState(md.symbol)
+                    continue
                 if math.isnan(smas[i]) or math.isnan(wprs[i]):
                     continue
                 state.signal = check_m15_signal(
@@ -234,13 +252,16 @@ class WprSmaStrategy(Strategy):
         elif state.last_m15_time != m15_time:
             # Inkrementális: csak ÚJ M15 gyertyazáráskor
             state.last_m15_time = m15_time
-            state.signal = check_m15_signal(
-                state.signal,
-                close=float(m15_closed["close"]),
-                sma=float(m15_closed["sma"]),
-                wpr_m15=float(m15_closed["wpr"]),
-                params=md.params,
-            )
+            if _is_no_trade(md, m15_time):       # no-trade óra → reset (nem visz át a szüneten)
+                state.signal = PairState(md.symbol)
+            else:
+                state.signal = check_m15_signal(
+                    state.signal,
+                    close=float(m15_closed["close"]),
+                    sma=float(m15_closed["sma"]),
+                    wpr_m15=float(m15_closed["wpr"]),
+                    params=md.params,
+                )
 
         cur_m1_wpr = float(m1_closed["wpr"])
         signal = "NONE"
@@ -360,6 +381,11 @@ class WprSmaStrategy(Strategy):
         state = PairState(md.symbol)
         tl_t, tl_dir, tl_win, tl_atr = [], [], [], []
         for i in range(len(m15) - 1):      # csak ZÁRT M15 gyertyák
+            if _is_no_trade(md, m15.index[i]):   # no-trade óra → reset (a kék nem éli túl a szünetet)
+                state = PairState(md.symbol)
+                tl_t.append(times[i]); tl_dir.append(state.direction)
+                tl_win.append(state.m15_window_open); tl_atr.append(atr15[i])
+                continue
             s, w, c = smas[i], wprs15[i], closes[i]
             if math.isnan(s) or math.isnan(w):
                 continue

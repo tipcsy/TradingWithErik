@@ -395,9 +395,12 @@ def run_pair(
     for i, (m1_time, m1_row) in enumerate(m1.iterrows()):
         if progress_callback is not None and i % _PROG_EVERY == 0:
             _report(i, m1_time)
-        # Óra-szűrő (csak ha allowed_hours adott — preview; egyébként minden óra)
+        # Óra-szűrő (csak ha allowed_hours adott — preview; egyébként minden óra).
+        # A no-trade óra RESETELI a jelzés-állapotot (mint a live/viz): a szünet után
+        # nulláról fegyverkezik, nem visz át elavult M15 szetupot a szüneten.
         hour = m1_time.hour
         if allowed_hours is not None and hour not in allowed_hours:
+            state = strategy.bt_new_state(symbol)
             prev_m1_row = m1_row
             continue
 

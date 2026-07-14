@@ -123,6 +123,48 @@ def resolve_trade_hours(symbol: str, strategy: str | None = None,
     return legacy
 
 
+def list_strategies() -> list[str]:
+    """A PARAMS_DIR-ben lévő stratégia-almappák nevei (amelyekben van optimalizált
+    kimenet). Üres, ha még semmi. A live/GUI ez alapján tudja végigjárni az összes
+    stratégia study-jait a több-stratégiás auto-folytatáshoz."""
+    try:
+        return sorted(d.name for d in PARAMS_DIR.iterdir() if d.is_dir())
+    except Exception:
+        return []
+
+
+def study_state(symbol: str, strategy: str | None = None) -> str:
+    """Egy (symbol, strategy) optimalizálás-study állapota A FÁJLOKBÓL:
+      • "done"       — van `_study.done` marker (a futás befejeződött);
+      • "unfinished" — van `_study.db`, de NINCS `.done` (elkezdve, megszakadt/fut);
+      • "none"       — nincs study egyáltalán.
+    A JSON léte NEM számít (lehet régi) — csak a study/marker az igazság."""
+    if done_marker(symbol, strategy).exists():
+        return "done"
+    if study_db(symbol, strategy).exists():
+        return "unfinished"
+    return "none"
+
+
+def unfinished_studies() -> list[tuple[str, str]]:
+    """MINDEN stratégia-almappában a befejezetlen study-k: `(symbol, strategy)`
+    lista, ahol van `<SYM>_study.db`, de nincs `<SYM>_study.done`. Ezt a GUI
+    használja induláskor: az így visszaadott párokat automatikusan sorba teszi
+    (az optuna a `.db`-ből folytat). Determinista rendezés (strat, symbol)."""
+    out: list[tuple[str, str]] = []
+    suffix = "_study.db"
+    for strat in list_strategies():
+        d = PARAMS_DIR / strat
+        try:
+            for f in d.glob(f"*{suffix}"):
+                symbol = f.name[: -len(suffix)]
+                if not done_marker(symbol, strat).exists():
+                    out.append((symbol, strat))
+        except Exception:
+            continue
+    return sorted(out, key=lambda t: (t[1], t[0]))
+
+
 def migrate_flat_layout(strategy: str | None = None) -> int:
     """A RÉGI lapos elrendezés (fájlok közvetlenül a PARAMS_DIR-ben) átmozgatása a
     stratégia-almappába. Idempotens: csak a gyökérben lévő fájlt mozgatja, és csak
