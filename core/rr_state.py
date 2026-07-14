@@ -19,9 +19,10 @@ from pathlib import Path
 from core import risky_mode
 from core.risk_reduction import (
     PRESET_OFF, PRESET_RISKY, PRESET_HALVING, PRESET_SHIELD, PRESETS,
-    RUNNER_KEEP, RUNNER_BREAKEVEN, RUNNER_TRAILING,
+    RUNNER_KEEP, RUNNER_BREAKEVEN, RUNNER_TRAILING, RUNNER_EXIT,
     default_config, wants_cautious_size,
 )
+from core import exit_signal
 
 PATH = Path(__file__).resolve().parents[1] / "data" / "risk_mode.json"
 
@@ -29,9 +30,14 @@ CYCLE = (PRESET_OFF, PRESET_RISKY, PRESET_HALVING, PRESET_SHIELD)
 LABEL = {PRESET_OFF: "—", PRESET_RISKY: "R", PRESET_HALVING: "F", PRESET_SHIELD: "P"}
 NAME  = {PRESET_OFF: "Ki", PRESET_RISKY: "Risky", PRESET_HALVING: "Felező",
          PRESET_SHIELD: "Pajzs"}
-RUNNERS = (RUNNER_TRAILING, RUNNER_KEEP, RUNNER_BREAKEVEN)
+RUNNERS = (RUNNER_TRAILING, RUNNER_KEEP, RUNNER_BREAKEVEN, RUNNER_EXIT)
 RUNNER_NAME = {RUNNER_TRAILING: "Trailing", RUNNER_KEEP: "Marad távol",
-               RUNNER_BREAKEVEN: "BE"}
+               RUNNER_BREAKEVEN: "BE", RUNNER_EXIT: "Kiszállási jel"}
+
+# A per-pár kiszállási-modul beállítás mezői (a core.exit_signal.default_config
+# kulcsai az `enabled` NÉLKÜL — az `enabled`-et a runner==exit vezérli).
+_EXIT_KEYS = ("indicator", "timeframe", "st_period", "st_multiplier",
+              "wpr_period", "wpr_ma_period")
 
 _lock = threading.Lock()
 _state: dict[str, dict] = {}
@@ -57,6 +63,10 @@ def _norm(v) -> dict:
         for k in _CALIB_KEYS:
             if isinstance(v.get(k), (int, float)):
                 d[k] = float(v[k])
+        # Per-pár kiszállási-modul beállítás (csak az ismert kulcsok, ha van).
+        ex = v.get("exit")
+        if isinstance(ex, dict):
+            d["exit"] = {k: ex[k] for k in _EXIT_KEYS if k in ex}
         return d
     return {"preset": PRESET_OFF}
 
@@ -119,6 +129,35 @@ def set_runner(symbol: str, runner: str):
     _set(symbol, runner=runner if runner in RUNNERS else RUNNER_TRAILING)
 
 
+def get_exit_config(symbol: str) -> dict:
+    """A per-pár KISZÁLLÁSI-MODUL beállítása (core.exit_signal cfg formátumban).
+    A default_config-ra ráolvasztjuk a per-pár override-ot, és az `enabled`-et a
+    runner-mód dönti: csak akkor él, ha a runner == 'exit' (Kiszállási jel)."""
+    cfg = exit_signal.default_config()
+    with _lock:
+        ov = _entry(symbol).get("exit")
+        runner = _entry(symbol).get("runner", default_config()["runner_stop"])
+    if isinstance(ov, dict):
+        cfg.update({k: ov[k] for k in _EXIT_KEYS if k in ov})
+    cfg["enabled"] = (runner == RUNNER_EXIT)
+    return cfg
+
+
+def set_exit_config(symbol: str, **params):
+    """A per-pár kiszállási-modul mezőinek frissítése (indicator/paraméterek).
+    Csak az ismert kulcsokat tartja meg; a meglévő override-ot kiegészíti."""
+    upd = {k: params[k] for k in _EXIT_KEYS if k in params}
+    if not upd:
+        return
+    with _lock:
+        d = dict(_entry(symbol))
+        ex = dict(d.get("exit") or {})
+        ex.update(upd)
+        d["exit"] = ex
+        _state[symbol] = _norm(d)
+        _save_locked()
+
+
 def set_cautious(symbol: str, value):
     _set(symbol, cautious=(None if value is None else bool(value)))
 
@@ -166,6 +205,9 @@ def spec_for(symbol: str) -> dict:
     spec.update(get_calibration(symbol))
     c = get_cautious(symbol)
     spec["cautious"] = wants_cautious_size(preset) if c is None else bool(c)
+    # A kiszállási-modul beállítása (enabled = runner==exit) — a motor/backtest ezt
+    # adja tovább az exit_signal.exit_triggered-nek a runner zárásához.
+    spec["exit"] = get_exit_config(symbol)
     return spec
 
 

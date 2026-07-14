@@ -284,6 +284,43 @@ def _manage_position(trade: "Trade", high: float, low: float, params: dict,
         # RUNNER_KEEP → a stop marad az EREDETI (távol) helyén — a videó Pajzsa
 
 
+def _build_exit_evaluator(m15: pd.DataFrame, rr_spec: dict):
+    """A KISZÁLLÁSI-modul kiértékelője a backtesthez (mindkét motor használja).
+
+    Visszaad egy `fn(i, direction) -> bool`-t: az `i`-edik (a backtest `m15_ptr`-je
+    szerinti) M15 gyertyán szól-e a kiszállási jel. `None`, ha a modul nincs
+    bekapcsolva (runner != exit). Az indikátort EGYSZER számoljuk ki a teljes M15-re
+    (nem gyertyánként) → nincs teljesítmény-vesztés. A `core.exit_signal` élő
+    logikájával AZONOS: Supertrend-flip / WPR-átzárás."""
+    ex = rr_spec.get("exit") or {}
+    if not ex.get("enabled"):
+        return None
+    from core import exit_signal as _exsig
+    from core.indicator_engine import supertrend as _st, wpr as _wprf, sma as _smaf
+    ind = ex.get("indicator", _exsig.INDICATOR_SUPERTREND)
+    if ind == _exsig.INDICATOR_WPR:
+        w  = _wprf(m15["high"], m15["low"], m15["close"], int(ex.get("wpr_period", 20)))
+        ma = _smaf(w, int(ex.get("wpr_ma_period", 100))).to_numpy()
+        wa = w.to_numpy()
+        def _at(i, direction):
+            if i < 1 or i >= len(wa):
+                return False
+            wp, wc, mp, mc = wa[i-1], wa[i], ma[i-1], ma[i]
+            if any(np.isnan(x) for x in (wp, wc, mp, mc)):
+                return False
+            return (wp >= mp and wc < mc) if direction == "BUY" else (wp <= mp and wc > mc)
+        return _at
+    # default: Supertrend — flip a pozícióval szembe
+    _line, _dir = _st(m15["high"], m15["low"], m15["close"],
+                      int(ex.get("st_period", 10)), float(ex.get("st_multiplier", 1.7)))
+    da = _dir.to_numpy()
+    def _at(i, direction):
+        if i < 0 or i >= len(da):
+            return False
+        return (int(da[i]) == -1) if direction == "BUY" else (int(da[i]) == 1)
+    return _at
+
+
 # ---------------------------------------------------------------------------
 # Fő szimuláció egy párra
 # ---------------------------------------------------------------------------
@@ -369,6 +406,7 @@ def run_pair(
     # M15 gyertyák indexe gyors kereséshez
     m15_times = m15.index.to_list()
     m15_ptr = 0  # melyik M15 gyertya az aktuális
+    _exit_at = _build_exit_evaluator(m15, rr_spec)   # kiszállási-jel (None, ha nincs)
 
     prev_m1_row = None
 
@@ -466,6 +504,19 @@ def run_pair(
                 else:
                     _manage_position(trade, m1_row["high"], m1_row["low"],
                                      params, pip_size, min_lot, lot_step, rr_spec)
+
+            # Runner KISZÁLLÁSI JELRE zárása (Pajzs/Felező maradéka, TP nélkül fut):
+            # a részleges zárás UTÁN figyeljük; a jel az m15_ptr gyertyán (ugyanaz az
+            # index, amit a belépő-jel is használ → nincs look-ahead). A gyertyazáró
+            # áron zárunk.
+            if (not closed and _exit_at is not None and trade.reduced
+                    and trade.runner_mode == _rrm.RUNNER_EXIT
+                    and _exit_at(m15_ptr, trade.direction)):
+                trade.close_price = m1_row["close"]
+                trade.close_time  = m1_time
+                trade.pnl_usd     = calc_pnl(trade, trade.close_price)
+                trade.status      = "exit"
+                closed = True
 
             if closed:
                 # A részleges zárás(ok)ból már realizált P&L hozzáadása a runner
@@ -864,6 +915,10 @@ def run_portfolio_backtest(
             # A kockázatcsökkentő spec: globális rr (mind a párra), különben a
             # per-pár választott preset (rr_state) + gyenge-minősítés auto-risky.
             "rr":        rr if rr else _pair_auto_rr(sym, pair_risky.get(sym, False)),
+            # Kiszállási-jel kiértékelő (None, ha a runner != exit) — a runner
+            # zárásához, ugyanaz a logika, mint a run_pair-ben és az élő motorban.
+            "exit_at":   _build_exit_evaluator(
+                             m15, rr if rr else _pair_auto_rr(sym, pair_risky.get(sym, False))),
             "state":     strategy.bt_new_state(sym),
             "prev_row":  None,
         }
@@ -967,6 +1022,20 @@ def run_portfolio_backtest(
                 else:
                     _manage_position(trade, row["high"], row["low"], params,
                                      pip_size, _minlot, _lotstep, rr_spec)
+
+            # Runner KISZÁLLÁSI JELRE zárása (mint a run_pair-ben): a részleges zárás
+            # UTÁN, a jel az info["m15_ptr"] gyertyán, a gyertyazáró áron.
+            if (not closed and info.get("exit_at") is not None and trade.reduced
+                    and trade.runner_mode == _rrm2.RUNNER_EXIT
+                    and info["exit_at"](info["m15_ptr"], trade.direction)):
+                trade.close_price = row["close"]
+                trade.close_time  = m1_time
+                trade.pnl_usd     = calc_pnl(trade, trade.close_price)
+                trade.pnl_pips    = ((trade.close_price - trade.open_price)
+                                     if trade.direction == "BUY"
+                                     else (trade.open_price - trade.close_price)) / pip_size - sp
+                trade.status      = "exit"
+                closed = True
 
             if closed:
                 trade.pnl_usd += trade.booked_pnl   # a részleges zárás(ok) realizált P&L-je

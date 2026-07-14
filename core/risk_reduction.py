@@ -33,6 +33,7 @@ PRESETS = (PRESET_OFF, PRESET_RISKY, PRESET_HALVING, PRESET_SHIELD)
 RUNNER_KEEP      = "keep"        # marad a TÁVOLI (eredeti) stop — a videó Pajzsa
 RUNNER_BREAKEVEN = "breakeven"   # a maradék stopja a nyitóra (óvatosabb)
 RUNNER_TRAILING  = "trailing"    # a maradék trailinggel fut
+RUNNER_EXIT      = "exit"        # a maradékot KISZÁLLÁSI JELRE zárjuk (core.exit_signal)
 
 _EPS = 1e-9
 

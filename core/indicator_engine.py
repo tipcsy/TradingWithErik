@@ -25,6 +25,61 @@ def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int) -> pd.Se
     return tr.rolling(period).mean()
 
 
+def supertrend(high: pd.Series, low: pd.Series, close: pd.Series,
+               period: int = 10, multiplier: float = 3.0):
+    """Supertrend indikátor — ATR-alapú trend-követő sáv.
+
+    Visszaad: (line, direction) két pd.Series:
+      • line      : az aktuális Supertrend-vonal ára (a felső VAGY alsó sáv),
+      • direction : +1 = emelkedő trend (a vonal az ár ALATT), -1 = csökkenő
+                    (a vonal az ár FÖLÖTT).
+    A `direction` VÁLTÁSA (flip) a be-/kiszállási jel: long pozíciónál a +1→-1
+    váltás a kiszállás. A warmup (ATR NaN) tartományban direction=+1, line=NaN.
+    Standard algoritmus (végleges sávok átvitellel), a `core.indicator_engine.atr`
+    (SMA-simítású TR) baseline-jával — konzisztens a projekt többi ATR-jével."""
+    atr_ = atr(high, low, close, period).to_numpy()
+    hl2 = ((high + low) / 2.0).to_numpy()
+    c = close.to_numpy()
+    n = len(c)
+    basic_upper = hl2 + multiplier * atr_
+    basic_lower = hl2 - multiplier * atr_
+
+    final_upper = np.full(n, np.nan)
+    final_lower = np.full(n, np.nan)
+    line = np.full(n, np.nan)
+    direction = np.ones(n, dtype=int)   # alapból +1 (emelkedő)
+
+    prev_valid = False
+    for i in range(n):
+        if np.isnan(atr_[i]):
+            continue                     # warmup — még nincs ATR
+        if not prev_valid:
+            # Első érvényes sor: induljunk az alsó sávról, emelkedő iránnyal.
+            final_upper[i] = basic_upper[i]
+            final_lower[i] = basic_lower[i]
+            direction[i] = 1
+            line[i] = final_lower[i]
+            prev_valid = True
+            continue
+        # Végleges felső sáv: szűkül, hacsak az előző zárás ki nem törte fölfelé.
+        final_upper[i] = (basic_upper[i]
+                          if (basic_upper[i] < final_upper[i-1] or c[i-1] > final_upper[i-1])
+                          else final_upper[i-1])
+        # Végleges alsó sáv: emelkedik, hacsak az előző zárás ki nem törte lefelé.
+        final_lower[i] = (basic_lower[i]
+                          if (basic_lower[i] > final_lower[i-1] or c[i-1] < final_lower[i-1])
+                          else final_lower[i-1])
+        # Irány: az előző vonal áttörése vált.
+        if direction[i-1] == 1:
+            direction[i] = -1 if c[i] < final_lower[i] else 1
+        else:
+            direction[i] = 1 if c[i] > final_upper[i] else -1
+        line[i] = final_lower[i] if direction[i] == 1 else final_upper[i]
+
+    idx = close.index
+    return pd.Series(line, index=idx), pd.Series(direction, index=idx)
+
+
 def compute_indicators(
     df_m15: pd.DataFrame,
     df_m1: pd.DataFrame,

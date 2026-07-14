@@ -34,6 +34,7 @@ from core import mt5_visual
 from core import risky_mode
 from core import correlation
 from core import run_state
+from core import exit_signal
 from core.indicator_engine import atr as atr_indicator
 from core.risk_manager import calc_lot, calc_effective_slots, SlotManager
 from strategy import get_strategy
@@ -835,6 +836,19 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
                     and not pstate.get("be_done")):
                 if mt5_connector.move_to_breakeven(ticket):
                     pstate["be_done"] = True
+            # runner KISZÁLLÁSI JEL: a maradékot (Pajzs/Felező, TP nélkül fut) a
+            # kiszállási jelre zárjuk. A „virtuális célár" itt automatikus — a
+            # részleges zárás UTÁN kezdjük figyelni —, a stop közben TÁVOL marad.
+            if (pstate.get("rr_reduced")
+                    and pstate.get("runner_mode") == _rr.RUNNER_EXIT):
+                _ex   = _spec.get("exit") or {}
+                _exbars = bars.get(_ex.get("timeframe", "M15"))
+                _dir  = "BUY" if pos.type == mt5.ORDER_TYPE_BUY else "SELL"
+                if exit_signal.exit_triggered(_exbars, _dir, _ex) and \
+                        mt5_connector.close_position(ticket):
+                    log.info("⎗ %s #%d — runner lezárva KISZÁLLÁSI JELRE (%s/%s)",
+                             symbol, ticket, _ex.get("indicator"), _ex.get("timeframe"))
+                    continue   # a pozíció zárva → ne kezeljük tovább ebben a körben
         else:
             # ── off/risky: költség-tudatos breakeven (VÁLTOZATLAN) ──
             # A tényleges SL nem pontos BE, hanem BE + spread puffer (lásd

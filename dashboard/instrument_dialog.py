@@ -279,6 +279,20 @@ class InstrumentParamsDialog:
         omr["menu"].config(bg=BG_HEADER, fg=FG_WHITE)
         omr.pack(side="left", padx=(4, 0))
 
+        # Kiszállási jel indikátora — CSAK a „Kiszállási jel" runner-módnál él (a
+        # Pajzs/Felező maradékát ez zárja, ha nincs konkrét TP). Supertrend (10/1.7)
+        # vagy WPR-átzárás (20/100). A választás a per-pár exit-configba megy.
+        self._EXIND_NAME = {"supertrend": "Supertrend", "wpr": "WPR"}
+        _exind = _rrs.get_exit_config(self.symbol).get("indicator", "supertrend")
+        tk.Label(rrbar, text="Exit:", bg=BG, fg=FG_GRAY, font=self._sf).pack(side="left", padx=(10, 0))
+        self._exit_ind_name = tk.StringVar(value=self._EXIND_NAME.get(_exind, "Supertrend"))
+        ome = tk.OptionMenu(rrbar, self._exit_ind_name,
+                            *self._EXIND_NAME.values(), command=self._on_exit_ind_change)
+        ome.config(bg=BG_HEADER, fg=FG_WHITE, font=self._sf, relief="flat",
+                   highlightthickness=0, activebackground=BG_HEADER)
+        ome["menu"].config(bg=BG_HEADER, fg=FG_WHITE)
+        ome.pack(side="left", padx=(4, 0))
+
         # Lot-létra tipp (a részleges záráshoz ≥2× min_lot kell)
         _ml = (self.cfg.get("pairs", {}).get(self.symbol, {}) or {}).get("min_lot", 0.01)
         tk.Label(popup, text=f"(A Felező/Pajzs részleges záráshoz ≥2× min_lot ({_ml}) "
@@ -760,16 +774,24 @@ class InstrumentParamsDialog:
     def _on_runner_change(self, name: str):
         self._rrs.set_runner(self.symbol, self._runner_from_name(name))
 
+    def _on_exit_ind_change(self, name: str):
+        ind = {v: k for k, v in self._EXIND_NAME.items()}.get(name, "supertrend")
+        self._rrs.set_exit_config(self.symbol, indicator=ind)
+
     def _rr_spec_from_ui(self):
-        """A UI-ban beállított teljes spec (preset + óvatos méret + runner). None,
-        ha 'Ki' (→ a run_pair az alap OFF viselkedést futtatja)."""
+        """A UI-ban beállított teljes spec (preset + óvatos méret + runner + exit).
+        None, ha 'Ki' (→ a run_pair az alap OFF viselkedést futtatja)."""
         from core import risk_reduction as _rr
         preset = self._preset_from_name(self._rr_name.get())
         if preset == _rr.PRESET_OFF:
             return None
+        runner = self._runner_from_name(self._runner_name.get())
+        exit_cfg = self._rrs.get_exit_config(self.symbol)
+        exit_cfg["enabled"] = (runner == _rr.RUNNER_EXIT)   # a UI runner-választása dönt
         return {**_rr.default_config(), "preset": preset,
-                "runner_stop": self._runner_from_name(self._runner_name.get()),
-                "cautious": bool(self._cautious_var.get())}
+                "runner_stop": runner,
+                "cautious": bool(self._cautious_var.get()),
+                "exit": exit_cfg}
 
     # ── Backtest önálló ablak (progress + időszak + élő egyenleg) ────────────
     def _open_backtest_window(self):
