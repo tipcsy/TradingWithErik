@@ -635,6 +635,63 @@ def _write_symbol_viz(symbol, pair_cfg, strats, pair_states):
         log.debug("%s — viz írás hiba: %s", symbol, e)
 
 
+def _apply_be_and_trailing(symbol, pos, ticket, pstate, is_rf, risky,
+                           params, pip_size, sym_info, slot_mgr):
+    """Egy nyitott (off/risky) pozíció költség-tudatos BREAKEVEN + TRAILING kezelése —
+    BAR-FÜGGETLEN, ezért a no-trade (szürke) órákban is futtatható, hogy a már nyitott
+    pozíció trailingje/BE-je akkor is dolgozzon. A logika AZONOS a `process_pair` fő
+    ágának off/risky BE+trailing részével (csak kiemelve, hogy a szünet-ág is hívhassa);
+    a Felező/Pajzs részleges zárás + RUNNER_EXIT (ami bart igényel) marad a fő ágban.
+    A `pstate`-et módosítja, MT5-öt hív."""
+    # ── Költség-tudatos breakeven ──
+    be_pct = params.get("breakeven_pct", 0.5)
+    if (risky or be_pct > 0) and not is_rf:
+        if pos.type == mt5.ORDER_TYPE_BUY:
+            be_price = (pos.price_open if risky
+                        else pos.price_open + (pos.tp - pos.price_open) * be_pct)
+            trigger = pos.price_current >= be_price
+        else:
+            be_price = (pos.price_open if risky
+                        else pos.price_open - (pos.price_open - pos.tp) * be_pct)
+            trigger = pos.price_current <= be_price
+        if trigger and mt5_connector.move_to_breakeven(ticket):
+            slot_mgr.set_risk_free(ticket)
+            pstate["be_done"] = True
+            log.info("✦ %s #%d — költség-tudatos breakeven beállítva%s", symbol, ticket,
+                     " (risky)" if risky else "")
+    # ── Trailing (kockázatmentes után, ha kézzel nincs kikapcsolva) ──
+    is_rf = slot_mgr.is_risk_free(ticket)
+    if is_rf and pstate.get("trailing_enabled", True):
+        point  = sym_info.point if (sym_info and sym_info.point > 0) else pip_size
+        digits = sym_info.digits if sym_info else 5
+        override_points = pstate.get("trail_points")
+        if override_points is not None:
+            dist_price = override_points * point
+        else:
+            base_pips  = params.get("trail_distance_pips", 6)
+            dist_price = pip_to_price(base_pips, pip_size) * (0.5 if risky else 1.0)
+        min_stop_price = (sym_info.trade_stops_level * point) if sym_info else 0.0
+        eff_price = max(dist_price, min_stop_price + point)
+        act_price = 0.0 if risky else pip_to_price(
+            params.get("trail_activation_pips", 8), pip_size)
+        if pos.type == mt5.ORDER_TYPE_BUY:
+            if pos.price_current >= pos.price_open + act_price:
+                new_sl = round(pos.price_current - eff_price, digits)
+                if new_sl > pos.sl and modify_sl(ticket, new_sl):
+                    pstate["trail_moved"] = True
+                    log.info("↗ %s #%d trailing SL → %.*f (%d pont követés%s)",
+                             symbol, ticket, digits, new_sl,
+                             round(eff_price / point), ", risky" if risky else "")
+        else:
+            if pos.price_current <= pos.price_open - act_price:
+                new_sl = round(pos.price_current + eff_price, digits)
+                if new_sl < pos.sl and modify_sl(ticket, new_sl):
+                    pstate["trail_moved"] = True
+                    log.info("↘ %s #%d trailing SL → %.*f (%d pont követés%s)",
+                             symbol, ticket, digits, new_sl,
+                             round(eff_price / point), ", risky" if risky else "")
+
+
 # ---------------------------------------------------------------------------
 # Fő kereskedési ciklus
 # ---------------------------------------------------------------------------
@@ -703,12 +760,30 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         _allowed = set(range(int(sess_start), int(sess_end)))
     no_trade_set = set(range(24)) - _allowed        # a jelzés-reset ezekben az órákban
     if hour not in _allowed:
-        # No-trade (szürke) óra: NEM kereskedünk. Ha a stratégia be van kapcsolva rá
-        # (`no_trade_resets_signal`), a szünet RESETELJE az M15 jelzést — a következő
-        # tradeable ciklusban az on_bar_close MÉLY, hour-aware újra-bemelegítést végez
-        # (signal_warmed=False), így a szünet ELŐTTI ablak nem él túl a szüneten és nem
-        # lép be egy elavult szetupra. Alapból KI → az ablak túléli a szünetet (a
-        # frozen állapotból az on_bar_close inkrementális ága viszi tovább).
+        # No-trade (szürke) óra: ÚJ belépőt NEM nyitunk, de a MÁR NYITOTT pozíciókat
+        # tovább kezeljük — automatikus BE + trailing —, hogy a szünet alatt is húzzon
+        # a stop (a user kérése: nyitott pozíciót az adott órában is lehessen kezelni).
+        # A JELZÉS-ablakot NEM bántjuk (on_bar_close nem fut → befagy a szünetre). A
+        # Felező/Pajzs részleges zárás + RUNNER_EXIT (bart igényel) a tradeable ágban fut.
+        if _preset in (_rr.PRESET_OFF, _rr.PRESET_RISKY):
+            try:
+                _sinfo = mt5.symbol_info(symbol)
+                for _p in get_open_positions(magic):
+                    if _p.symbol != symbol:
+                        continue
+                    _ps = position_state.setdefault(_p.ticket, {
+                        "original_sl": _p.sl, "trailing_enabled": True,
+                        "be_done": slot_mgr.is_risk_free(_p.ticket),
+                        "trail_points": None, "trail_moved": False})
+                    _apply_be_and_trailing(
+                        symbol, _p, _p.ticket, _ps, slot_mgr.is_risk_free(_p.ticket),
+                        risky, params, pip_size, _sinfo, slot_mgr)
+            except Exception as _e:
+                log.debug("%s — no-trade pozíció-kezelés hiba: %s", symbol, _e)
+        # Ha a stratégia be van kapcsolva rá (`no_trade_resets_signal`), a szünet
+        # RESETELJE az M15 jelzést — a következő tradeable ciklusban az on_bar_close
+        # MÉLY, hour-aware újra-bemelegítést végez (signal_warmed=False), így a szünet
+        # ELŐTTI ablak nem él túl a szüneten. Alapból KI → az ablak túléli a szünetet.
         if params.get("no_trade_resets_signal", False):
             state.signal_warmed = False
             if state.strat_state is not None and hasattr(state.strat_state, "last_m15_time"):

@@ -1209,12 +1209,13 @@ POSITION_COLUMNS = [
 class PositionRow:
     def __init__(self, parent, ticket, mono_font, small_font,
                  on_be, on_trail, on_panic, on_name_click, on_trail_dist,
-                 on_build=None):
+                 on_build=None, on_build_mode=None):
         self.ticket = ticket
         self._small = small_font
         self._symbol = None
         self._on_name_click = on_name_click
         self._on_trail_dist = on_trail_dist
+        self._on_build_mode = on_build_mode
         self.frame = tk.Frame(parent, bg=BG_ROW_EVEN)
         self.labels = {}
         for key, hdr, w, anchor in POSITION_COLUMNS:
@@ -1236,6 +1237,13 @@ class PositionRow:
         self._be_tip = None
         self.btn_be.bind("<Enter>", self._be_tip_show)
         self.btn_be.bind("<Leave>", self._be_tip_hide)
+        # Építés MÓD-váltó (Ki/Kézi/Auto) — per SZIMBÓLUM (a soron állítható, nem kell
+        # az instrumentum-ablak). Kattintásra körben vált; a szín jelzi az állapotot.
+        self.btn_bmode = tk.Button(self.frame, text="Ép:—", width=7, font=small_font,
+                                   relief="flat", bg=BTN_DIS_BG, fg=FG_GRAY,
+                                   command=(lambda: self._symbol and on_build_mode(self._symbol))
+                                           if on_build_mode else None)
+        self.btn_bmode.pack(side="left", padx=1)
         # „＋" pozícióépítés (ráépítés): csak akkor aktív, ha az építés-mód Kézi és a
         # gyertyás jel szól (a pozíció kockázatmentes). Tooltip mondja meg az okot.
         self.btn_build = tk.Button(self.frame, text="＋", width=2, font=small_font,
@@ -1396,8 +1404,8 @@ class PositionRow:
             self.btn_be.config(text="BE", bg=BTN_OPT_BG, fg="#ffffff", state="normal")
             self._be_tip_text = ""
 
-        # „＋" építés gomb — a motor build_runtime-jából (per szimbólum). Csak Kézi
-        # módban és a gyertyás jelre aktív; a tooltip mondja meg az állapotot.
+        # Építés MÓD + „＋" gomb — a motor build_runtime-jából (per szimbólum). A mód
+        # a soron állítható (Ép-gomb); a „＋" csak Kézi módban + a gyertyás jelre aktív.
         sym = pos.get("symbol")
         _rt = None
         try:
@@ -1405,22 +1413,40 @@ class PositionRow:
             _rt = _br.get(sym) if sym else None
         except Exception:
             _rt = None
-        if _rt and _rt.get("mode") == "manual" and _rt.get("ready"):
+        # A tényleges mód: a build_runtime-ból, vagy közvetlenül a build_state-ből
+        # (ha a motor még nem töltötte fel — pl. épp most állítottad át).
+        _mode = (_rt or {}).get("mode")
+        if _mode is None:
+            try:
+                from core import build_state as _bst
+                _mode = _bst.get_mode(sym) if sym else "off"
+            except Exception:
+                _mode = "off"
+        _MODE_LBL = {"off": "Ép:Ki", "manual": "Ép:Kézi", "auto": "Ép:Auto"}
+        _MODE_COL = {"off": FG_GRAY, "manual": "#ffffff", "auto": FG_CYAN}
+        self.btn_bmode.config(text=_MODE_LBL.get(_mode, "Ép:Ki"),
+                              fg=_MODE_COL.get(_mode, FG_GRAY),
+                              relief="sunken" if _mode in ("manual", "auto") else "flat")
+        if _mode == "manual" and _rt and _rt.get("ready"):
             self.btn_build.config(state="normal", bg=BTN_OPT_BG, fg="#ffffff")
             self._build_tip_text = (f"Ráépítés: +{_rt.get('next_lot', 0):.2f} lot azonos "
                                     f"irányba, az összes stop az átlagárra "
                                     f"(≈{_rt.get('avg_price', 0):.5f}).")
-        elif _rt and _rt.get("mode") == "manual":
+        elif _mode == "manual":
             self.btn_build.config(state="disabled", bg=BTN_DIS_BG, fg=FG_GRAY)
-            self._build_tip_text = ("Építés (Kézi): várakozás a jelre — kockázatmentes "
-                                    "pozíció + a gyertya új csúcsra/mélyre zár.")
-        elif _rt and _rt.get("mode") == "auto":
+            self._build_tip_text = ("Építés (Kézi): a +gomb akkor aktív, ha a pozíció "
+                                    "kockázatmentes ÉS a gyertya új csúcsra/mélyre zár. "
+                                    "Ekkor a +gomb hozzáad még egy (csökkenő méretű) "
+                                    "pozíciót, és minden stopot az átlagárra húz.")
+        elif _mode == "auto":
             # Auto: a motor magától épít → a gomb tiltva, de cián jelzi, hogy aktív.
             self.btn_build.config(text="＋", state="disabled", bg=BTN_DIS_BG, fg=FG_CYAN)
             self._build_tip_text = "Építés: Auto — a motor magától ráépít a jel-gyertyán."
         else:
             self.btn_build.config(state="disabled", bg=BTN_DIS_BG, fg=FG_GRAY)
-            self._build_tip_text = ""
+            self._build_tip_text = ("Építés (pozícióépítés) kikapcsolva. Az Ép-gombbal "
+                                    "kapcsold Kézi vagy Auto módba. Kézinél a +gomb "
+                                    "hozzáad még egy pozíciót a jel-gyertyán.")
 
         # Trail gomb — 3 állapot, "benyomott" (sunken) ha be van kapcsolva:
         #   • KI:            lapos, szürke
@@ -1456,7 +1482,8 @@ class PositionsTab:
                  positions_provider, pos_state, digits_provider,
                  on_be, on_trail, on_panic, on_close_all,
                  on_name_click, on_trail_dist, trail_default_provider,
-                 point_provider, strategy_provider=None, on_build=None):
+                 point_provider, strategy_provider=None, on_build=None,
+                 on_build_mode=None):
         self.parent = parent
         self.cfg = cfg
         self._mono, self._small, self._header = mono_font, small_font, header_font
@@ -1469,6 +1496,7 @@ class PositionsTab:
         self._on_name_click = on_name_click
         self._on_trail_dist = on_trail_dist
         self._on_build = on_build
+        self._on_build_mode = on_build_mode
         self._trail_default_provider = trail_default_provider
         self._point_provider = point_provider
         self._rows: dict[int, PositionRow] = {}
@@ -1507,7 +1535,7 @@ class PositionsTab:
         for key, label, w, anchor in POSITION_COLUMNS:
             tk.Label(hdr, text=label, width=w, anchor=anchor, bg=BG_HEADER,
                      fg=FG_BLUE, font=self._header, padx=4, pady=3).pack(side="left")
-        tk.Label(hdr, text="Vezérlés (BE / Trail / táv=pont / Zár)", width=32, anchor="w",
+        tk.Label(hdr, text="Vezérlés (BE / Ép:mód / ＋ / Trail / táv=pont / Zár)", width=40, anchor="w",
                  bg=BG_HEADER, fg=FG_BLUE, font=self._header).pack(side="left")
         tk.Frame(p, bg=FG_GRAY_DIM, height=1).pack(fill="x", padx=2)
 
@@ -1525,7 +1553,8 @@ class PositionsTab:
                 row = PositionRow(self._rows_frame, tid, self._mono, self._small,
                                   self._on_be, self._on_trail, self._on_panic,
                                   self._on_name_click, self._on_trail_dist,
-                                  on_build=self._on_build)
+                                  on_build=self._on_build,
+                                  on_build_mode=self._on_build_mode)
                 self._rows[tid] = row
             trail_def = self._trail_default_provider(pos["symbol"])
             point     = self._point_provider(pos["symbol"])
@@ -1801,7 +1830,8 @@ class DashboardWindow:
             trail_default_provider=self._trail_default,
             point_provider=lambda sym: getattr(self.dashboard_ref.get(sym), "point", None),
             strategy_provider=self._strategy_by_magic,
-            on_build=self._pos_build)
+            on_build=self._pos_build,
+            on_build_mode=self._pos_build_mode)
 
         closed_frame = tk.Frame(self._notebook, bg=BG)
         self._notebook.add(closed_frame, text="  Lezárt (ma)  ")
@@ -2701,6 +2731,16 @@ class DashboardWindow:
                     "%s — ráépítés kihagyva (nincs érvényes építés-jel).", symbol)
         threading.Thread(target=_w, daemon=True, name="ManualBuild").start()
 
+    def _pos_build_mode(self, symbol: str):
+        """Az „Ép:" gomb: a SZIMBÓLUM építés-módját körbe-váltja (Ki → Kézi → Auto),
+        mint az instrumentum-ablak Építés-választója. A motor a következő ciklusban a
+        build_runtime-ot ehhez igazítja (a „＋" akkortól él Kézinél)."""
+        try:
+            from core import build_state as _bst
+            _bst.cycle_mode(symbol)
+        except Exception:
+            pass
+
     _DEFAULT_PSTATE = {"original_sl": 0.0, "trailing_enabled": True,
                        "be_done": False, "trail_points": None, "trail_moved": False}
 
@@ -2737,6 +2777,27 @@ class DashboardWindow:
         pip_size = pair_cfg.get("pip_size")
         ds = self.dashboard_ref.get(symbol)
         point = getattr(ds, "point", None) if ds else None
+        # On-demand `point`: ha a szimbólum még nem streamelt point-ot (pl. nem aktívan
+        # pollozott pár, de VAN rajta nyitott pozíció — pl. SP500), közvetlenül lekérjük
+        # az MT5-ből és cache-eljük a ds-be. Enélkül a trail-távolság mező üres marad.
+        if not point:
+            try:
+                import MetaTrader5 as _mt5
+                from core.mt5_connector import MT5_LOCK
+                with MT5_LOCK:
+                    _mt5.symbol_select(symbol, True)
+                    _info = _mt5.symbol_info(symbol)
+                if _info and _info.point > 0:
+                    point = _info.point
+                    if ds is not None:
+                        ds.point = point
+                    # pip_size hiánynál (nem konfigurált pár) heurisztikus tartalék a
+                    # digits alapján (mint a light-poll), hogy a mező akkor is kiírjon.
+                    if not pip_size and _info:
+                        d = getattr(_info, "digits", 5)
+                        pip_size = point * (10 if d in (3, 5) else 100 if d == 6 else 1)
+            except Exception:
+                pass
         if not pip_size or not point:
             return None
         return int(round(float(pips) * pip_size / point))
