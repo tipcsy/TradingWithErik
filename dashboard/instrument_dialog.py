@@ -628,12 +628,13 @@ class InstrumentParamsDialog:
             return False
         self.data = data
         self.is_new = False
-        # A chart-viz a friss JSON-paramétert olvassa → nullázzuk a viz-időzítőt,
-        # hogy a TradeForgeViz a KÖVETKEZŐ ciklusban azonnal az új paraméterekkel
-        # rajzoljon (ne kelljen a V-t ki/be kapcsolni). Csak ha fut a live loop.
+        # A chart-viz a friss JSON-paramétert olvassa → CLEAR + azonnali újrarajz,
+        # hogy a TradeForgeViz a KÖVETKEZŐ ciklusban az új paraméterekkel rajzoljon,
+        # ÉS a régi (elavult) belépő-jelzések egy atomi írásban eltűnjenek (nem kell
+        # a V-t ki/be kapcsolni). Csak ha fut a live loop.
         try:
             from trading import live_trader as _lt
-            _lt._viz_last_write.pop(self.symbol, None)
+            _lt.request_viz_clear(self.symbol)
         except Exception:
             pass
         return True
@@ -646,11 +647,11 @@ class InstrumentParamsDialog:
         sel = [h for h in range(24) if self._hour_on.get(h)]
         save_trade_hours(self.symbol, sel, self.strategy.name)
         # A live loop és a viz a stratégia óra-fájlját olvassa (feloldó) → a
-        # következő ciklusban azonnal él. A chart-vizt nullázzuk, hogy AZONNAL az
-        # új órákkal rajzoljon. Csak ha fut a live loop.
+        # következő ciklusban azonnal él. CLEAR + azonnali újrarajz, hogy AZONNAL az
+        # új órákkal rajzoljon és a régi jelzések eltűnjenek. Csak ha fut a live loop.
         try:
             from trading import live_trader as _lt
-            _lt._viz_last_write.pop(self.symbol, None)
+            _lt.request_viz_clear(self.symbol)
         except Exception:
             pass
         return len(sel)

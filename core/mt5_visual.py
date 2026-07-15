@@ -36,10 +36,16 @@ def files_dir() -> Optional[Path]:
     return Path(info.commondata_path) / "Files"
 
 
-def write_lines(symbol: str, lines: list) -> Optional[Path]:
+def write_lines(symbol: str, lines: list, clear_first: bool = False) -> Optional[Path]:
     """A `symbol` teljes pillanatképét kiírja `TFV_<symbol>.csv`-be ELŐRE
     sorosított sorokból (több-stratégiás viz: a hívó stratégiánként `tag_line`-nal
-    megjelölt sorokat ad). Atomikus (temp → replace)."""
+    megjelölt sorokat ad). Atomikus (temp → replace).
+
+    `clear_first=True` → a pillanatkép ELÉ egy `CLEAR` sort tesz. Az indikátor a
+    fájlt sorrendben dolgozza fel: előbb LETÖRLI az összes saját objektumát, majd
+    frissen kirajzolja a következő sorokat — így paraméter-váltás után a régi
+    (elavult) belépő-jelzések garantáltan eltűnnek, EGY atomi írásban (nincs
+    verseny a külön CLEAR-fájl és a rajz között)."""
     d = files_dir()
     if d is None:
         return None
@@ -47,7 +53,7 @@ def write_lines(symbol: str, lines: list) -> Optional[Path]:
     path = d / f"{PREFIX}{symbol}.csv"
     tmp  = path.with_suffix(".csv.tmp")
 
-    payload = "\n".join(lines)
+    payload = "\n".join((["CLEAR"] if clear_first else []) + list(lines))
     if payload:
         payload += "\n"
     tmp.write_text(payload, encoding="ascii", errors="replace")

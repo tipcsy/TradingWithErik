@@ -155,6 +155,20 @@ _run_slot_mgr = None
 VIZ_ENABLED:      bool  = True
 VIZ_INTERVAL_SEC: float = 15.0
 _viz_last_write:  dict[str, float] = {}
+# Per-szimbólum „a következő viz-írás CLEAR-rel kezdjen" kérés — paraméter-váltás
+# után (instrument-ablak Mentés) állítjuk, hogy a régi belépő-jelzések garantáltan
+# eltűnjenek EGY atomi írásban (a snapshot elé CLEAR sor). A _write_symbol_viz fogyasztja.
+_viz_pending_clear: dict[str, bool] = {}
+
+
+def request_viz_clear(symbol: str) -> None:
+    """A KÖVETKEZŐ viz-írás a `symbol`-hoz CLEAR-rel kezdjen (törli a régi chart-
+    objektumokat, majd frissen rajzol), és azonnal frissüljön (throttle nullázva).
+    Az instrumentum-ablak Mentése hívja, hogy az új paraméterek szerinti beszállási
+    jelzések tisztán jelenjenek meg. Biztonságos, ha nem fut a live loop (a flag
+    kitart a következő írásig)."""
+    _viz_pending_clear[symbol] = True
+    _viz_last_write.pop(symbol, None)   # a throttle megkerülése → azonnali újrarajz
 
 
 # ---------------------------------------------------------------------------
@@ -612,8 +626,11 @@ def _write_symbol_viz(symbol, pair_cfg, strats, pair_states):
             lines += pair_visual_lines(symbol, vparams, st, pip_size, pair_cfg)
         except Exception as e:
             log.debug("%s/%s — viz sor hiba: %s", symbol, st.name, e)
+    # Paraméter-váltás után egyszeri CLEAR a snapshot elé → a régi (elavult) belépő-
+    # jelzések garantáltan eltűnnek, majd az új paraméterekkel frissen rajzol.
+    clear_first = _viz_pending_clear.pop(symbol, False)
     try:
-        mt5_visual.write_lines(symbol, lines)
+        mt5_visual.write_lines(symbol, lines, clear_first=clear_first)
     except Exception as e:
         log.debug("%s — viz írás hiba: %s", symbol, e)
 
