@@ -28,7 +28,7 @@ from datetime import datetime
 
 from dashboard.theme import (
     BG, BG_HEADER,
-    FG_WHITE, FG_GREEN, FG_RED, FG_YELLOW, FG_GRAY, FG_GRAY_DIM,
+    FG_WHITE, FG_GREEN, FG_RED, FG_YELLOW, FG_GRAY, FG_GRAY_DIM, FG_BLUE,
     BTN_PLAY_BG, BTN_PLAY_FG, BTN_BT_BG, BTN_BT_FG,
     BTN_DIS_BG, BTN_DIS_FG,
     color as sem_color,
@@ -231,17 +231,60 @@ class InstrumentParamsDialog:
         form = tk.Frame(popup, bg=BG)
         form.pack(fill="both", expand=True, padx=10, pady=6)
         self.entries = {}
-        for i, k in enumerate(self._keys):
-            tk.Label(form, text=k, bg=BG, fg=FG_WHITE, font=self._sf,
-                     anchor="w", width=24).grid(row=i, column=0, sticky="w", pady=1)
-            e = tk.Entry(form, width=14, bg=BG_HEADER, fg=FG_WHITE,
-                         font=self._sf, insertbackground=FG_WHITE)
-            e.insert(0, str(self._src[k]))
-            e.grid(row=i, column=1, padx=6, pady=1)
-            # Kézi átírásnál a korábbi backtest-eredmény már nem érvényes → a Mentés
-            # (auto-backtest) újraszámol. A programozott betöltés (rank) nem KeyRelease.
-            e.bind("<KeyRelease>", lambda ev: self._invalidate_bt())
-            self.entries[k] = e
+        self._comment_entries = {}
+
+        # ── Kategóriák + megjegyzések a stratégia-configból (param_meta) ────────
+        # A 'categories' a megjelenítési SORREND; a 'params.<kulcs>' adja a kategóriát
+        # és a (szerkeszthető) megjegyzést. Ismeretlen kulcs → 'Egyéb' a végén.
+        _pm     = self.cfg.get("param_meta") or {}
+        _cat_ord = list(_pm.get("categories") or [])
+        _pmeta  = _pm.get("params") or {}
+
+        def _cat_of(k):
+            return (_pmeta.get(k, {}) or {}).get("category") or "Egyéb"
+
+        _by_cat: dict[str, list] = {}
+        for k in self._keys:                     # self._keys már ábécésorrendben
+            _by_cat.setdefault(_cat_of(k), []).append(k)
+        _ordered = [c for c in _cat_ord if c in _by_cat] + \
+                   [c for c in _by_cat if c not in _cat_ord]
+
+        # Oszlop-fejléc
+        tk.Label(form, text="Paraméter", bg=BG, fg=FG_GRAY_DIM, font=self._sf,
+                 anchor="w", width=24).grid(row=0, column=0, sticky="w")
+        tk.Label(form, text="Érték", bg=BG, fg=FG_GRAY_DIM, font=self._sf,
+                 anchor="w").grid(row=0, column=1, sticky="w", padx=6)
+        tk.Label(form, text="Megjegyzés (szerkeszthető)", bg=BG, fg=FG_GRAY_DIM,
+                 font=self._sf, anchor="w").grid(row=0, column=2, sticky="w")
+        form.grid_columnconfigure(2, weight=1)
+
+        _r = 1
+        for cat in _ordered:
+            # Kategória-elválasztó fejléc (név + vékony vonal)
+            hdr = tk.Frame(form, bg=BG)
+            hdr.grid(row=_r, column=0, columnspan=3, sticky="we", pady=(8, 1))
+            tk.Label(hdr, text=cat, bg=BG, fg=FG_BLUE, font=self._sf,
+                     anchor="w").pack(side="left")
+            tk.Frame(hdr, bg=BG_HEADER, height=1).pack(
+                side="left", fill="x", expand=True, padx=(8, 0))
+            _r += 1
+            for k in _by_cat[cat]:
+                tk.Label(form, text=k, bg=BG, fg=FG_WHITE, font=self._sf,
+                         anchor="w", width=24).grid(row=_r, column=0, sticky="w", pady=1)
+                e = tk.Entry(form, width=14, bg=BG_HEADER, fg=FG_WHITE,
+                             font=self._sf, insertbackground=FG_WHITE)
+                e.insert(0, str(self._src[k]))
+                e.grid(row=_r, column=1, padx=6, pady=1)
+                # Kézi átírásnál a korábbi backtest-eredmény elavul → a Mentés újraszámol.
+                e.bind("<KeyRelease>", lambda ev: self._invalidate_bt())
+                self.entries[k] = e
+                # Megjegyzés — szerkeszthető; a Mentés a stratégia-configba írja vissza.
+                ce = tk.Entry(form, bg=BG_HEADER, fg=FG_GRAY, font=self._sf,
+                              insertbackground=FG_WHITE, relief="flat")
+                ce.insert(0, (_pmeta.get(k, {}) or {}).get("comment", ""))
+                ce.grid(row=_r, column=2, sticky="we", padx=(0, 2), pady=1)
+                self._comment_entries[k] = ce
+                _r += 1
 
         self.lbl_err = tk.Label(popup, text="", bg=BG, fg=FG_RED, font=self._sf)
         self.lbl_err.pack(anchor="w", padx=10)
@@ -656,11 +699,25 @@ class InstrumentParamsDialog:
             pass
         return len(sel)
 
+    def _save_comments(self):
+        """A szerkesztett paraméter-megjegyzések mentése a stratégia-configba
+        (param_meta.params.<kulcs>.comment). Stratégia-szintű (minden szimbólumra közös).
+        Csak akkor ír, ha változott (a helper ellenőrzi)."""
+        if not getattr(self, "_comment_entries", None):
+            return
+        comments = {k: e.get().strip() for k, e in self._comment_entries.items()}
+        try:
+            from strategy.settings import save_param_comments
+            save_param_comments(self.strategy.name, comments)
+        except Exception as ex:
+            self.lbl_err.config(text=f"Megjegyzés-mentési hiba: {ex}", fg=FG_RED)
+
     def _save(self):
         """EGYETLEN Mentés: órák + paraméterek (aktív készlet) + trials CSV (ha a
         kombó még nincs benne), KÖTELEZŐEN backtest-eredménnyel. Ha új a kombó és
         nincs friss eredmény → előbb lefuttatja a backtestet (a _bt_done folytatja
-        a mentést); egyébként azonnal ír."""
+        a mentést); egyébként azonnal ír. A paraméter-megjegyzéseket is menti."""
+        self._save_comments()
         params = self._collect_params()
         if params is None:
             return

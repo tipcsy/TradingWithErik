@@ -24,7 +24,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 # A stratégiához tartozó, teljes egészében átmozgatott top-level szekciók.
-STRATEGY_SECTIONS = ("quality", "indicators", "sltp", "position_mgmt")
+STRATEGY_SECTIONS = ("quality", "indicators", "sltp", "position_mgmt", "param_meta")
 
 # Az `optimizer` szekció MEGOSZTOTT: a MOTOR-kulcsok a vázhoz (config.json),
 # minden más (a paramétertér-tartományok + piaci szűrők) a stratégiához tartozik.
@@ -96,6 +96,37 @@ def main_config_view(cfg: dict) -> dict:
         view["optimizer"] = {k: v for k, v in opt.items()
                              if k in OPTIMIZER_ENGINE_KEYS}
     return view
+
+
+def save_param_comments(name: str, comments: dict) -> bool:
+    """A paraméter-megjegyzések visszaírása a stratégia configba
+    (`param_meta.params.<kulcs>.comment`). A többi szekciót érintetlenül hagyja.
+    Csak akkor ír, ha VÁLTOZOTT valamelyik megjegyzés (nincs felesleges fájlírás)."""
+    p = strategy_config_path(name)
+    try:
+        with open(p, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return False
+    pm = data.setdefault("param_meta", {})
+    params = pm.setdefault("params", {})
+    changed = False
+    for k, c in comments.items():
+        entry = params.setdefault(k, {})
+        if entry.get("comment", "") != c:
+            entry["comment"] = c
+            changed = True
+    if not changed:
+        return False
+    try:
+        tmp = p.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        tmp.replace(p)
+        return True
+    except Exception as ex:
+        log.warning("param_meta mentési hiba (%s): %s", name, ex)
+        return False
 
 
 def load_config(cfg_path: Path | str) -> dict:

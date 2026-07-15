@@ -42,6 +42,40 @@
     "_comment_no_trade_reset": "no_trade_resets_signal: ha true, a no-trade (szürke) óra RESETELI az M15 jelzési ablakot (a szünet után nulláról fegyverkezik — nem visz át elavult szetupot, de M15-ön lassan áll össze új jel → sok belépő kimarad). false (alap) → a szünet előtti ablak túléli a szünetet (több belépő). Per instrumentum állítható.",
     "no_trade_resets_signal": false
   },
+  "param_meta": {
+    "_comment": "A Paraméterek ablak csoportosítása + megjegyzései. A 'categories' a megjelenítési SORREND; a 'params.<kulcs>' megadja a kategóriát és a (szerkeszthető) megjegyzést. Ismeretlen kulcs → 'Egyéb'. A megjegyzéseket a GUI-ból is lehet szerkeszteni (Mentéskor ide íródnak vissza).",
+    "categories": [
+      "Indikátor – M15",
+      "Indikátor – M1",
+      "SL / TP",
+      "Kockázatkezelés",
+      "Piac-szűrő",
+      "Egyéb"
+    ],
+    "params": {
+      "sma_period":            {"category": "Indikátor – M15", "comment": "SMA periódus — a trendirány (ár az SMA felett=BUY, alatt=SELL)"},
+      "wpr_m15_period":        {"category": "Indikátor – M15", "comment": "M15 WPR periódus"},
+      "wpr_m15_buy_extreme":   {"category": "Indikátor – M15", "comment": "M15 alsó extrém — BUY felfegyverzés e alatt"},
+      "wpr_m15_buy_trigger":   {"category": "Indikátor – M15", "comment": "M15 BUY trigger — felfelé átütve nyílik a BUY ablak"},
+      "wpr_m15_sell_extreme":  {"category": "Indikátor – M15", "comment": "M15 felső extrém — SELL felfegyverzés e fölött"},
+      "wpr_m15_sell_trigger":  {"category": "Indikátor – M15", "comment": "M15 SELL trigger — lefelé átütve nyílik a SELL ablak"},
+      "wpr_m1_period":         {"category": "Indikátor – M1",  "comment": "M1 WPR periódus (belépő időzítés)"},
+      "wpr_m1_buy_extreme":    {"category": "Indikátor – M1",  "comment": "M1 alsó extrém — BUY belépő felfegyverzés"},
+      "wpr_m1_sell_extreme":   {"category": "Indikátor – M1",  "comment": "M1 felső extrém — SELL belépő felfegyverzés"},
+      "wpr_m1_trigger":        {"category": "Indikátor – M1",  "comment": "M1 trigger — átütve tüzel a belépő"},
+      "atr_period":            {"category": "SL / TP", "comment": "ATR periódus (SL/TP méret + volatilitás)"},
+      "sl_atr_mult":           {"category": "SL / TP", "comment": "SL = ATR × ez"},
+      "tp_rr_ratio":           {"category": "SL / TP", "comment": "TP = SL × ez (kockázat/hozam arány)"},
+      "breakeven_pct":         {"category": "Kockázatkezelés", "comment": "BE: a TP hány %-ánál húzzuk az SL-t a belépőre (0 = ki)"},
+      "trail_activation_pips": {"category": "Kockázatkezelés", "comment": "Trailing ennyi pip profit UTÁN indul"},
+      "trail_distance_pips":   {"category": "Kockázatkezelés", "comment": "Trailing követési távolság (pip)"},
+      "max_open_slots":        {"category": "Kockázatkezelés", "comment": "Egyszerre nyitható pozíciók száma"},
+      "no_trade_resets_signal":{"category": "Kockázatkezelés", "comment": "A no-trade (szürke) óra resetelje-e az M15 ablakot (alap: KI)"},
+      "atr_min_pct":           {"category": "Piac-szűrő", "comment": "Min. ATR — túl csendes piac kizárása"},
+      "atr_max_pct":           {"category": "Piac-szűrő", "comment": "Max. ATR — kaotikus piac kizárása"},
+      "max_spread_atr_ratio":  {"category": "Piac-szűrő", "comment": "Spread-kapu: max spread az ATR arányában"}
+    }
+  },
   "optimizer": {
     "_comment": "AI paraméter optimalizálás tartományai",
     "sma_period": {
