@@ -1203,6 +1203,7 @@ POSITION_COLUMNS = [
     ("tp",      "TP",         10, "center"),
     ("orig_sl", "Er. SL",     10, "center"),
     ("pnl",     "P&L",         9, "center"),
+    ("r_mult",  "R",           6, "center"),   # folyó R-szorzó: (ár−belépő)/|belépő−er.SL|
 ]
 
 
@@ -1388,6 +1389,16 @@ class PositionRow:
                                       fg=FG_GRAY if moved else FG_WHITE)
         pnl = pos["profit"]
         self.labels["pnl"].config(text=f"{pnl:+.2f}$", fg=FG_GREEN if pnl >= 0 else FG_RED)
+        # Folyó R-szorzó: R = |belépő − EREDETI SL| (a kezdeti kockázat árban); a jelen
+        # állás = (ár − belépő)/R a profit irányában. Egy mércén látod, „hány R-nél"
+        # tartasz (a kockázatcsökkentés is 1R-nél lép). — üres, ha nincs eredeti SL.
+        r_price = abs(entry - orig) if orig else 0.0
+        if r_price > (point or 1e-9):
+            r_mult = (cur - entry) / r_price * dir_s
+            self.labels["r_mult"].config(text=f"{r_mult:+.2f}R",
+                                         fg=FG_GREEN if r_mult >= 0 else FG_RED)
+        else:
+            self.labels["r_mult"].config(text="—", fg=FG_GRAY)
 
         # Gombok állapota (aktív-e?). A kézi BE csak akkor engedélyezett, ha a
         # költség-tudatos BE MOST mozgatható (a profit fedezi a spread+jutalék+swap

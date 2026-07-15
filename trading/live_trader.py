@@ -541,16 +541,39 @@ def actual_trade_objects(symbol: str, since_ts: int) -> list:
             objs.append(viz.Trend(name=f"dealtp_{d.ticket}", t1=t, p1=tp, t2=t_end, p2=tp,
                                   color="green", width=1, style=1))
 
-    # ── Átlagár (null pont) vonal — ha TÖBB nyitott pozíció van a szimbólumon
-    #    (pozícióépítés fut): a volumen-súlyozott átlagár vízszintes SÁRGA vonala,
-    #    ide kerülnek a stopok (1. szabály). ──
+    # ── Átlagár (null pont) + ráépítés-küszöb — pozícióépítéskor ────────────
+    now_int = int(datetime.now(timezone.utc).timestamp())
+    # (a) ÁTLAGÁR: ha ≥2 nyitott pozíció van, a volumen-súlyozott átlagár vízszintes
+    #     vonala MAGENTA, TÖMÖR + felirat (ide kerülnek a stopok = null pont). A régi
+    #     sárga szaggatott nehezen látszott.
     if positions and len(positions) >= 2:
         _avg = _position_build.average_price([(p.price_open, p.volume) for p in positions])
         if _avg > 0:
             objs.append(viz.Trend(
                 name="build_avg", t1=int(since_ts), p1=_avg,
-                t2=int(datetime.now(timezone.utc).timestamp()), p2=_avg,
-                color="yellow", width=2, style=2))
+                t2=now_int, p2=_avg, color="magenta", width=2, style=0))
+            objs.append(viz.Text(
+                name="build_avg_lbl", t1=now_int, p1=_avg,
+                text=f"Atlagar {_avg:.6g} (null pont - ide a stopok)",
+                color="magenta", fontsize=9))
+    # (b) RÁÉPÍTÉS-KÜSZÖB: a build_runtime ref_close-a — a KÖVETKEZŐ ráépítés akkor
+    #     tüzel, ha egy ZÁRT gyertya E FÖLÉ (BUY) / E ALÁ (SELL) zár. Így LÁTOD, mehet-e
+    #     tovább, vagy még várni kell. Zöld (lime) = MEHET (ready); cián = még vár.
+    _rt = build_runtime.get(symbol)
+    if _rt and _rt.get("ref_close") and _rt.get("mode") not in (None, "off") and positions:
+        _ref   = float(_rt["ref_close"])
+        _ready = bool(_rt.get("ready"))
+        _dir   = _rt.get("direction", "BUY")
+        _col   = "lime" if _ready else "cyan"
+        objs.append(viz.Trend(
+            name="build_ref", t1=int(since_ts), p1=_ref, t2=now_int, p2=_ref,
+            color=_col, width=1, style=1))
+        _side = "fole" if _dir == "BUY" else "ala"
+        _txt  = ("Raepites: MEHET (uj gyertya atutott)" if _ready
+                 else f"Raepites-kuszob {_ref:.6g} (e {_side} zarva -> ujabb add)")
+        objs.append(viz.Text(
+            name="build_ref_lbl", t1=now_int, p1=_ref, text=_txt,
+            color=_col, fontsize=9))
     return objs
 
 
@@ -1236,7 +1259,11 @@ def manual_build(symbol: str) -> bool:
     avg = round(_position_build.average_price(
         [(p.price_open, p.volume) for p in positions]), digits)
     for p in positions:
-        modify_sl(p.ticket, avg)
+        # Minden láb SL-je az átlagárra, ÉS a TP TÖRLÉSE (tp=0): különben az induló láb
+        # a saját TP-jén ÖNÁLLÓAN zárna, otthagyva a TP nélküli adalékokat (ez okozta,
+        # hogy „lezárta a kezdeti pozíciót, és csak a veszteségesek maradtak"). Így a
+        # csomag EGYBEN fut → az átlagár-stopig / kiszállási jelig / kézi zárásig.
+        mt5_connector.modify_position_sltp(p.ticket, avg, 0.0)
         if _run_slot_mgr is not None:
             _run_slot_mgr.set_risk_free(p.ticket)
         position_state.setdefault(p.ticket, {})["be_done"] = True

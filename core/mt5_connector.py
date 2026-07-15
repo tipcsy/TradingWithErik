@@ -372,6 +372,30 @@ def modify_position_sl(ticket: int, new_sl: float) -> bool:
         return False
 
 
+def modify_position_sltp(ticket: int, new_sl: float, new_tp: float) -> bool:
+    """SL ÉS TP egyidejű beállítása (new_tp=0 → a TP TÖRLÉSE). A pozícióépítés ezzel
+    nullázza az összes láb TP-jét, hogy az induló láb ne zárjon önállóan a saját TP-jén
+    (ami a TP nélküli adalékokat védtelenül hagyná) — a csomag EGYBEN fut, az átlagár-
+    stopig / kiszállási jelig / kézi zárásig."""
+    try:
+        with MT5_LOCK:
+            pos = mt5.positions_get(ticket=ticket)
+            if not pos:
+                return False
+            p = pos[0]
+            req = {
+                "action":   mt5.TRADE_ACTION_SLTP,
+                "symbol":   p.symbol,
+                "position": ticket,
+                "sl":       new_sl,
+                "tp":       new_tp,
+            }
+            res = mt5.order_send(req)
+        return res is not None and res.retcode == mt5.TRADE_RETCODE_DONE
+    except Exception:
+        return False
+
+
 # A nyitó jutalék a pozíció élete alatt FIX (a nyitó deal(ek)ben) → position_id-re
 # cache-eljük, hogy a GUI gyakori feasibility-ellenőrzése ne kérje le újra és újra a
 # deal-history-t. (A swap ezzel szemben napról napra változik → azt sosem cache-eljük.)

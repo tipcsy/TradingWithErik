@@ -32,6 +32,8 @@ COLORS: dict[str, tuple[int, int, int]] = {
     "black":  (0, 0, 0),
     "gray":   (128, 128, 128),
     "muted":  (110, 110, 110),
+    "magenta": (230, 40, 230),   # átlagár (null pont) — erős, jól elkülönülő
+    "cyan":    (0, 220, 220),     # ráépítés-küszöb (ref_close)
 }
 
 
