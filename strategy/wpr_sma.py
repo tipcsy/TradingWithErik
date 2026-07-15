@@ -61,6 +61,30 @@ def _is_no_trade(md: MarketData, ts) -> bool:
     return bool(nt) and int(ts.hour) in nt
 
 
+def _rebuild_m1_armed(state, m1, win_open_ts, params, upto: int) -> str:
+    """A jelenlegi NYITOTT M15 ablak M1 gyertyáit visszajátssza, hogy az M1 belépő
+    állapotgép felfegyverzése (`m1_armed`) helyreálljon — különben restart/rekonstrukció
+    után a motor „nem látná", hogy az ablak eleje óta már megvolt az M1 extrém.
+
+    `state`: PairState (m15_window_open=True, direction beállítva). `win_open_ts`: az
+    ablak nyitásának ideje (csak az ennél KÉSŐBBI M1 gyertyák számítanak). `upto`: eddig
+    az M1-indexig (KIZÁRÓLAG) dolgozunk. Visszaadja az UTOLSÓ feldolgozott M1 jelet
+    (a rekonstruált kijelzés/kör ezt használhatja). A `state`-et módosítja."""
+    wl = m1["wpr"].values
+    idx = m1.index
+    prev = None
+    last_sig = "NONE"
+    for k in range(min(int(upto), len(m1))):
+        cur = wl[k]
+        if idx[k] <= win_open_ts:          # az ablak nyitása ELŐTTI gyertya → csak prev
+            prev = cur
+            continue
+        if prev is not None and not (math.isnan(prev) or math.isnan(cur)):
+            last_sig = check_m1_entry(state, float(prev), float(cur), params)
+        prev = cur
+    return last_sig
+
+
 def _clamp_wpr(v: float) -> float:
     """WPR a [-100, 0] tartományba szorítva, a -0.0 normalizálva 0.0-ra."""
     if v is None or math.isnan(v):
@@ -134,10 +158,15 @@ class WprSmaStrategy(Strategy):
         és az irányváltásig (SMA-kereszt) él. Ezért az M15 jelzés-warmupnak
         UGYANOLYAN MÉLYNEK kell lennie, mint a viznek (`visual_lookback_bars`) —
         különben a live motor/kijelzés a viztől ELTÉRŐ ablakállapotot ad (a sekély
-        warmup nem látja a régi élesítést → kimaradó belépések). Az M1 belépő
-        állapotmentes (csak prev/cur WPR) → marad a sekély indikátor-warmup."""
-        if timeframe_label == "M15":
-            return self.visual_lookback_bars(params, "M15")
+        warmup nem látja a régi élesítést → kimaradó belépések).
+
+        Az M1 belépő MÁR ÁLLAPOTGÉP (felfegyverez az M1 extrémnél → tüzel a trigger
+        átütésekor), így az M1 warmupnak is MÉLYNEK kell lennie, hogy a felfegyverzés
+        a NYITOTT ablak KEZDETÉIG visszaépíthető legyen (különben restart után a viz
+        belépőt mutat, a motor meg nem lát felfegyverzést). Ezért M1-en is a viz-mély
+        ablakot töltjük (mint az M15-nél)."""
+        if timeframe_label in ("M15", "M1"):
+            return self.visual_lookback_bars(params, timeframe_label)
         return self.warmup_bars(params, timeframe_label)
 
     def compute_display(self, md: MarketData) -> dict[str, Cell]:
@@ -164,16 +193,23 @@ class WprSmaStrategy(Strategy):
         wprs15 = m15["wpr"].values
         state  = PairState(md.symbol)
         seen_closed = False
+        win_open_ts = None                       # a JELENLEG nyitott M15 ablak nyitási ideje
         for i in range(len(m15) - 1):            # az utolsó sor a formálódó gyertya
             if _is_no_trade(md, m15.index[i]):   # no-trade óra → a jelzést reseteljük
                 state = PairState(md.symbol)
+                win_open_ts = None
                 seen_closed = True
                 continue
             s, w = smas[i], wprs15[i]
             if math.isnan(s) or math.isnan(w):
                 continue
+            _was_open = state.m15_window_open
             state = check_m15_signal(state, close=float(closes[i]), sma=float(s),
                                      wpr_m15=float(w), params=md.params)
+            if state.m15_window_open and not _was_open:
+                win_open_ts = m15.index[i]        # az ablak most nyílt
+            elif not state.m15_window_open:
+                win_open_ts = None
             seen_closed = True
         if not seen_closed:
             return empty
@@ -185,22 +221,28 @@ class WprSmaStrategy(Strategy):
         # gyertyazárás pillanatában — a jelzési ablakot egy provizórikus
         # lépéssel az élő gyertyára is kiértékeljük. A `state` (zárt) érintetlen.
         live_state = replace(state)
+        _was_open = state.m15_window_open
         s_live, w_live, c_live = smas[-1], wprs15[-1], closes[-1]
         if _is_no_trade(md, m15.index[-1]):      # a formálódó gyertya no-trade órában → reset
             live_state = PairState(md.symbol)
+            win_open_ts = None
         elif not (math.isnan(s_live) or math.isnan(w_live)):
             live_state = check_m15_signal(
                 live_state, close=float(c_live), sma=float(s_live),
                 wpr_m15=float(w_live), params=md.params)
+            if live_state.m15_window_open and not _was_open:
+                win_open_ts = m15.index[-1]       # a formálódó gyertya nyitotta az ablakot
+            elif not live_state.m15_window_open:
+                win_open_ts = None
         direction = live_state.direction
 
-        # ── M1 belépési jel az utolsó két ZÁRT M1 gyertyából, az ÉLŐ M15 ablakkal
+        # ── M1 belépési jel: a NYITOTT ablak M1 gyertyáit visszajátsszuk (állapotgép —
+        # a felfegyverzés az ablak eleje óta épül), az UTOLSÓ ZÁRT M1 jele a kör.
         m1_wprs = m1["wpr"].values
         m1_signal = "NONE"
-        if len(m1_wprs) >= 3:
-            prev_w, cur_w = m1_wprs[-3], m1_wprs[-2]   # -1 a formálódó
-            if not math.isnan(prev_w) and not math.isnan(cur_w):
-                m1_signal = check_m1_entry(live_state, float(prev_w), float(cur_w), md.params)
+        if live_state.m15_window_open and win_open_ts is not None and len(m1_wprs) >= 3:
+            m1_signal = _rebuild_m1_armed(live_state, m1, win_open_ts, md.params,
+                                          upto=len(m1) - 1)
 
         # ── Körök: SMA irány · M15 WPR jelzési ablak · M1 beszállás ─────────
         return {
@@ -243,16 +285,30 @@ class WprSmaStrategy(Strategy):
             closes = m15["close"].values
             smas   = m15["sma"].values
             wprs   = m15["wpr"].values
+            win_open_ts = None                     # a JELENLEG nyitott ablak nyitási ideje
             for i in range(len(m15) - 1):          # az utolsó sor a formálódó
                 if _is_no_trade(md, m15.index[i]): # no-trade óra → reset (szünet utáni friss)
                     state.signal = PairState(md.symbol)
+                    win_open_ts = None
                     continue
                 if math.isnan(smas[i]) or math.isnan(wprs[i]):
                     continue
+                _was_open = state.signal.m15_window_open
                 state.signal = check_m15_signal(
                     state.signal, close=float(closes[i]), sma=float(smas[i]),
                     wpr_m15=float(wprs[i]), params=md.params)
+                if state.signal.m15_window_open and not _was_open:
+                    win_open_ts = m15.index[i]     # az ablak most nyílt
+                elif not state.signal.m15_window_open:
+                    win_open_ts = None
             state.last_m15_time = m15_time
+            # Az M1 felfegyverzés (állapotgép) visszaépítése a NYITOTT ablak kezdete óta —
+            # az utolsó M1 átmenetet (prev=−3, cur=−2) az alábbi közös ág értékeli, ezért
+            # a replay az iloc[-3]-ig (upto=len-2) épít; így a felfegyverzés restart után is
+            # egyezik a vizzel/backtesttel (nem marad ki a folyamatban lévő belépő).
+            if state.signal.m15_window_open and win_open_ts is not None:
+                _rebuild_m1_armed(state.signal, m1, win_open_ts, md.params,
+                                  upto=len(m1) - 2)
             # az utolsó M1 átmenet (prev=−3, cur=−2) is kiértékelhető legyen
             state.prev_m1_wpr = float(m1_prev["wpr"])
         elif state.last_m15_time != m15_time:
@@ -418,19 +474,30 @@ class WprSmaStrategy(Strategy):
         times1   = [int(t.timestamp()) for t in m1.index]
         if tl_t:
             p = 0
+            # PERZISZTENS M1-állapot: az M1 belépő állapotgép (felfegyverez az extrémnél
+            # → tüzel a trigger átütésekor) a nyitott ablakon belül ŐRZI a felfegyverzést.
+            # A fresh-state-per-gyertya (régi) csak a szomszédos gyertyát nézte → kimaradt
+            # a fokozatos átütés; a motor/backtest is állapotgép, így ez EGYEZŐ jelet ad.
+            m1_state = PairState(md.symbol)
             for j in range(1, len(m1) - 1):          # az utolsó M1 formálódik
                 t = times1[j]
                 # Az utolsó ZÁRT M15 gyertya állapotát vesszük (mint a motor): egy
                 # M15 gyertya a NYITÁSA UTÁN m15_sec-kel zár, csak akkor él a jelzés.
                 while p + 1 < len(tl_t) and tl_t[p + 1] + m15_sec <= t:
                     p += 1
-                if tl_t[p] + m15_sec > t or not tl_win[p]:   # p még nem zárt / zárt ablak
+                if tl_t[p] + m15_sec > t:            # p még nem zárt gyertya
                     continue
                 pw, cw = m1_wprs[j - 1], m1_wprs[j]
                 if math.isnan(pw) or math.isnan(cw):
                     continue
-                st = PairState(md.symbol, direction=tl_dir[p], m15_window_open=True)
-                sig = check_m1_entry(st, float(pw), float(cw), md.params)
+                # Az aktív (zárt) M15 állapot rávetítése; irányváltás/zárt ablak nullázza
+                # a felfegyverzést (a zárt ablak candle-jét is átadjuk → az arm resetel).
+                d, win = tl_dir[p], tl_win[p]
+                if d != m1_state.direction or not win:
+                    m1_state.m1_armed = False
+                m1_state.direction = d
+                m1_state.m15_window_open = bool(win)
+                sig = check_m1_entry(m1_state, float(pw), float(cw), md.params)
                 if sig not in ("BUY", "SELL"):
                     continue
                 atr_v = tl_atr[p]
