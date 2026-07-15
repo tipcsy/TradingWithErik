@@ -2896,20 +2896,22 @@ class DashboardWindow:
         all_every  = max(1, round(self._all_refresh_sec  / price_sec))
         counter = 0
         while getattr(self, "_poll_running", False):
-            # MT5 nem thread-safe — ne fusson míg optimizer dolgozik
+            all_syms = [s for s in self.dashboard_ref
+                        if isinstance(self.cfg["pairs"].get(s), dict)]
+            # 1) Olcsó ár-frissítés MINDEN párra, MINDIG — optimalizálás alatt IS!
+            #    Ez tartja naprakészen a BID/ASK/Vált.%/Spread-et (a live kereskedéshez
+            #    kell). Biztonságos: az optimizer NEM nyúl MT5-höz (parquet/Optuna), a
+            #    hívás MT5_LOCK alatt fut, mint a live_trader (ami szintén megy közben).
+            #    KORÁBBI HIBA: az egész loop az opt-kapu alá volt zárva → opt közben
+            #    eltűnt a BID/ASK minden páron, a live DJ30-on is.
+            for sym in all_syms:
+                try:
+                    self._refresh_price(sym)
+                except Exception:
+                    pass
+            # 2) Drága indikátor-számítás: CSAK ha nincs optimizer (CPU-kímélés + az
+            #    indikátor-út bar-letöltést is végez). Minden pár ritkán, LIVE gyakrabban.
             if not self._opt_ctrl._running:
-                all_syms = [s for s in self.dashboard_ref
-                            if isinstance(self.cfg["pairs"].get(s), dict)]
-                # 1) Olcsó ár-frissítés MINDEN párra (gyakran) — ez tartja
-                #    naprakészen a BID/ASK/Vált.%/Spread-et minden instrumentumon.
-                for sym in all_syms:
-                    if self._opt_ctrl._running:
-                        break
-                    try:
-                        self._refresh_price(sym)
-                    except Exception:
-                        pass
-                # 2) Drága indikátor-számítás: minden pár ritkán, LIVE gyakrabban.
                 if counter % all_every == 0:
                     ind_targets = all_syms
                 elif counter % live_every == 0:
