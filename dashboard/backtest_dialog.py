@@ -32,10 +32,11 @@ import pandas as pd
 
 from dashboard.theme import (
     BG, BG_HEADER,
-    FG_WHITE, FG_GREEN, FG_RED, FG_YELLOW, FG_GRAY, FG_GRAY_DIM,
+    FG_WHITE, FG_GREEN, FG_RED, FG_YELLOW, FG_GRAY, FG_GRAY_DIM, FG_BLUE,
     BTN_PLAY_BG, BTN_PLAY_FG, BTN_BT_BG, BTN_BT_FG, BTN_DIS_BG, BTN_DIS_FG,
     color as sem_color,
 )
+from dashboard.instrument_dialog import _attach_tooltip, _style_om
 from core.quality import metric_colors
 from core.params_store import resolve_trade_hours
 from core import rr_state as _rrs
@@ -63,6 +64,14 @@ _EXIT_PARAM_SPEC = {
     "supertrend": [("st_period", "Per"), ("st_multiplier", "Szorzó")],
     "wpr":        [("wpr_period", "Per"), ("wpr_ma_period", "MA")],
     "divergence": [("osc", "Oszc"), ("div_period", "Per"), ("div_pivot", "Pivot")],
+}
+_EXIT_TIP = {
+    "st_period": "Supertrend periódus (az ATR-ablak hossza).",
+    "st_multiplier": "Supertrend ATR-szorzó — nagyobb = lazább sáv, később zár.",
+    "wpr_period": "WPR periódus.", "wpr_ma_period": "A WPR mozgóátlagának periódusa (ezt keresztezi).",
+    "osc": "Oszcillátor a divergenciához: rsi vagy cci.",
+    "div_period": "A divergencia-oszcillátor periódusa.",
+    "div_pivot": "Pivot-szélesség — hány gyertya erősíti meg a csúcsot/mélyet.",
 }
 
 
@@ -247,63 +256,93 @@ class BacktestDialog:
             e.pack(side="left")
             self._pentries[k] = e
 
-        # ── Kockázatcsökkentés + runner + exit + építés (FELTÁRÓ) ───────────
-        rrbar = tk.Frame(win, bg=BG)
-        rrbar.pack(anchor="w", padx=12, pady=(2, 0))
-        tk.Label(rrbar, text="Kockázatcsökkentés:", bg=BG, fg=FG_GRAY,
-                 font=self._sf).pack(side="left")
+        # ── Vezérlő-csoportok: Kockázatcsökkentés + Pozícióépítés (FELTÁRÓ) ──
+        # Ugyanaz a logikai tiltás, mint az instrumentum-ablakban: a nem releváns
+        # vezérlők ELREJTVE a preset/runner/építés szerint.
+        ctl = tk.Frame(win, bg=BG)
+        ctl.pack(anchor="w", fill="x", padx=12, pady=(2, 0))
+
+        rrg = tk.LabelFrame(ctl, text=" Kockázatcsökkentés (feltáró) ",
+                            bg=BG, fg=FG_BLUE, font=self._sf, labelanchor="nw")
+        rrg.pack(side="left", anchor="n")
+        row = tk.Frame(rrg, bg=BG)
+        row.pack(anchor="w", padx=6, pady=4)
+        tk.Label(row, text="Preset:", bg=BG, fg=FG_GRAY, font=self._sf).grid(row=0, column=0, sticky="w")
         self._rr_name = tk.StringVar(value=_rrs.NAME.get(self._init_preset, "Ki"))
-        om = tk.OptionMenu(rrbar, self._rr_name, *[_rrs.NAME[p] for p in _rrs.CYCLE])
-        om.config(bg=BG_HEADER, fg=FG_WHITE, font=self._sf, relief="flat",
-                  highlightthickness=0, activebackground=BG_HEADER)
-        om["menu"].config(bg=BG_HEADER, fg=FG_WHITE)
-        om.pack(side="left", padx=(4, 0))
+        om = tk.OptionMenu(row, self._rr_name, *[_rrs.NAME[p] for p in _rrs.CYCLE],
+                           command=self._on_rr_change_local)
+        _style_om(om, self._sf)
+        om.grid(row=0, column=1, padx=(4, 0))
+        _attach_tooltip(om, "Ki = alap kezelés (BE + trailing). Risky = felezett méret + "
+                            "azonnali BE 1R-nél. Felező/Pajzs = 1R-nél 50%/75% zárás + runner.")
+
         self._cautious_var = tk.BooleanVar(value=self._init_cautious)
-        tk.Checkbutton(rrbar, text="Óvatos méret", variable=self._cautious_var,
-                       bg=BG, fg=FG_GRAY, selectcolor=BG_HEADER, font=self._sf,
-                       activebackground=BG, activeforeground=FG_WHITE).pack(
-                       side="left", padx=(10, 0))
-        tk.Label(rrbar, text="Runner:", bg=BG, fg=FG_GRAY,
-                 font=self._sf).pack(side="left", padx=(10, 0))
+        self._cautious_cb = tk.Checkbutton(
+            row, text="Óvatos méret", variable=self._cautious_var,
+            bg=BG, fg=FG_GRAY, selectcolor=BG_HEADER, font=self._sf,
+            activebackground=BG, activeforeground=FG_WHITE)
+        self._cautious_cb.grid(row=0, column=2, padx=(10, 0))
+        _attach_tooltip(self._cautious_cb, "Felezett belépő-méret. A Risky mindig felez; "
+                                           "Felező/Pajzsnál extra óvatosságként bekapcsolható.")
+
+        self._runner_frame = tk.Frame(row, bg=BG)
+        self._runner_frame.grid(row=0, column=3, padx=(10, 0), sticky="w")
+        tk.Label(self._runner_frame, text="Runner:", bg=BG, fg=FG_GRAY,
+                 font=self._sf).pack(side="left")
         self._runner_name = tk.StringVar(
             value=_rrs.RUNNER_NAME.get(self._init_runner, "Trailing"))
-        omr = tk.OptionMenu(rrbar, self._runner_name,
-                            *[_rrs.RUNNER_NAME[r] for r in _rrs.RUNNERS])
-        omr.config(bg=BG_HEADER, fg=FG_WHITE, font=self._sf, relief="flat",
-                   highlightthickness=0, activebackground=BG_HEADER)
-        omr["menu"].config(bg=BG_HEADER, fg=FG_WHITE)
+        omr = tk.OptionMenu(self._runner_frame, self._runner_name,
+                            *[_rrs.RUNNER_NAME[r] for r in _rrs.RUNNERS],
+                            command=self._on_runner_change_local)
+        _style_om(omr, self._sf)
         omr.pack(side="left", padx=(4, 0))
+        _attach_tooltip(self._runner_frame,
+                        "A Felező/Pajzs részleges zárása UTÁN maradó darab (runner) stopja: "
+                        "Trailing / Marad távol / BE / Kiszállási jel.")
 
-        # ── Exit-indikátor + paraméterei (feltáró) + Építés ─────────────────
-        exbar = tk.Frame(win, bg=BG)
-        exbar.pack(anchor="w", padx=12, pady=(2, 0))
-        tk.Label(exbar, text="Exit:", bg=BG, fg=FG_GRAY, font=self._sf).pack(side="left")
+        self._exit_frame = tk.Frame(row, bg=BG)
+        self._exit_frame.grid(row=0, column=4, padx=(10, 0), sticky="w")
+        tk.Label(self._exit_frame, text="Exit:", bg=BG, fg=FG_GRAY,
+                 font=self._sf).pack(side="left")
         _exind = self._exit_cfg.get("indicator", "supertrend")
         self._exit_ind_name = tk.StringVar(value=_EXIND_NAME.get(_exind, "Supertrend"))
-        ome = tk.OptionMenu(exbar, self._exit_ind_name, *_EXIND_NAME.values(),
+        ome = tk.OptionMenu(self._exit_frame, self._exit_ind_name, *_EXIND_NAME.values(),
                             command=self._on_exit_ind_change)
-        ome.config(bg=BG_HEADER, fg=FG_WHITE, font=self._sf, relief="flat",
-                   highlightthickness=0, activebackground=BG_HEADER)
-        ome["menu"].config(bg=BG_HEADER, fg=FG_WHITE)
+        _style_om(ome, self._sf)
         ome.pack(side="left", padx=(4, 0))
-        self._exit_pfrm = tk.Frame(exbar, bg=BG)
+        _attach_tooltip(ome, "Melyik indikátor zárja a maradékot: Supertrend-flip / "
+                             "WPR-átzárás / Divergencia.")
+        self._exit_pfrm = tk.Frame(self._exit_frame, bg=BG)
         self._exit_pfrm.pack(side="left", padx=(6, 0))
         self._exit_param_vars = {}
         self._rebuild_exit_params()
 
-        tk.Label(exbar, text="Építés:", bg=BG, fg=FG_GRAY, font=self._sf).pack(side="left", padx=(10, 0))
+        bldg = tk.LabelFrame(ctl, text=" Pozícióépítés (feltáró) ",
+                             bg=BG, fg=FG_BLUE, font=self._sf, labelanchor="nw")
+        bldg.pack(side="left", anchor="n", padx=(12, 0))
+        brow = tk.Frame(bldg, bg=BG)
+        brow.pack(anchor="w", padx=6, pady=4)
+        tk.Label(brow, text="Építés:", bg=BG, fg=FG_GRAY, font=self._sf).pack(side="left")
         self._build_mode_name = tk.StringVar(
             value=_bst.NAME.get(self._init_build.get("mode", _bst.MODE_OFF), "Ki"))
-        omb = tk.OptionMenu(exbar, self._build_mode_name, *_bst.NAME.values())
-        omb.config(bg=BG_HEADER, fg=FG_WHITE, font=self._sf, relief="flat",
-                   highlightthickness=0, activebackground=BG_HEADER)
-        omb["menu"].config(bg=BG_HEADER, fg=FG_WHITE)
+        omb = tk.OptionMenu(brow, self._build_mode_name, *_bst.NAME.values(),
+                            command=self._on_build_mode_change_local)
+        _style_om(omb, self._sf)
         omb.pack(side="left", padx=(4, 0))
-        tk.Label(exbar, text="Faktor:", bg=BG, fg=FG_GRAY, font=self._sf).pack(side="left", padx=(6, 0))
+        _attach_tooltip(omb, "Ki / Kézi / Auto. A backtest CSAK Auto + Ki-preset mellett "
+                             "modellezi az építést (a Kézi user-vezérelt → nem modellezhető).")
+        self._build_faktor_frame = tk.Frame(brow, bg=BG)
+        self._build_faktor_frame.pack(side="left", padx=(8, 0))
+        tk.Label(self._build_faktor_frame, text="Faktor:", bg=BG, fg=FG_GRAY,
+                 font=self._sf).pack(side="left")
         self._build_sf_var = tk.StringVar(value=str(self._init_build.get("size_factor", 0.7)))
-        tk.Entry(exbar, textvariable=self._build_sf_var, width=5, bg=BG_HEADER,
-                 fg=FG_WHITE, font=self._sf, relief="flat",
+        tk.Entry(self._build_faktor_frame, textvariable=self._build_sf_var, width=5,
+                 bg=BG_HEADER, fg=FG_WHITE, font=self._sf, relief="flat",
                  insertbackground=FG_WHITE).pack(side="left", padx=(2, 0))
+        _attach_tooltip(self._build_faktor_frame,
+                        "Piramidális méret-szorzó: minden ráépítés = előző × Faktor.")
+
+        self._update_rr_visibility()
 
         tk.Label(win, text="(feltáró — nem ment; az Építés csak Auto+Ki-preset esetén "
                            "modelleződik. A főképernyőre csak az eredeti rr eredménye "
@@ -404,6 +443,35 @@ class BacktestDialog:
         self._exit_cfg["indicator"] = ind
         self._rebuild_exit_params()
 
+    # ── Vezérlők logikai tiltása (mint az instrumentum-ablakban) ──────────────
+    def _on_rr_change_local(self, _name=None):
+        # Riskyre váltva alapból óvatos méret (de a user átállíthatja).
+        if self._preset_from_name(self._rr_name.get()) == _rrx.PRESET_RISKY:
+            self._cautious_var.set(True)
+        self._update_rr_visibility()
+
+    def _on_runner_change_local(self, _name=None):
+        self._update_rr_visibility()
+
+    def _on_build_mode_change_local(self, _name=None):
+        self._update_rr_visibility()
+
+    def _update_rr_visibility(self):
+        """Óvatos csak ha van kockázatcsökkentés; Runner csak Felező/Pajzsnál; Exit
+        csak Felező/Pajzs + Runner=Kiszállási jel; Faktor csak Építés ≠ Ki."""
+        preset = self._preset_from_name(self._rr_name.get())
+        (self._cautious_cb.grid_remove if preset == _rrx.PRESET_OFF
+         else self._cautious_cb.grid)()
+        partial = preset in (_rrx.PRESET_HALVING, _rrx.PRESET_SHIELD)
+        (self._runner_frame.grid if partial else self._runner_frame.grid_remove)()
+        runner = self._runner_from_name(self._runner_name.get())
+        show_exit = partial and runner == _rrx.RUNNER_EXIT
+        (self._exit_frame.grid if show_exit else self._exit_frame.grid_remove)()
+        if self._build_mode_name.get() != _bst.NAME[_bst.MODE_OFF]:
+            self._build_faktor_frame.pack(side="left", padx=(8, 0))
+        else:
+            self._build_faktor_frame.pack_forget()
+
     def _rebuild_exit_params(self):
         """Az exit-indikátor SZERKESZTHETŐ mezőinek újraépítése (a kiválasztott
         indikátor szerint), a LOKÁLIS exit-configból feltöltve."""
@@ -413,8 +481,9 @@ class BacktestDialog:
         ind = {v: k for k, v in _EXIND_NAME.items()}.get(
             self._exit_ind_name.get(), "supertrend")
         for key, label in _EXIT_PARAM_SPEC.get(ind, []):
-            tk.Label(self._exit_pfrm, text=f"{label}:", bg=BG, fg=FG_GRAY,
-                     font=self._sf).pack(side="left")
+            lbl = tk.Label(self._exit_pfrm, text=f"{label}:", bg=BG, fg=FG_GRAY,
+                           font=self._sf)
+            lbl.pack(side="left")
             var = tk.StringVar(value=str(self._exit_cfg.get(key, "")))
             e = tk.Entry(self._exit_pfrm, textvariable=var,
                          width=(5 if key == "osc" else 4), bg=BG_HEADER,
@@ -423,6 +492,9 @@ class BacktestDialog:
             e.pack(side="left", padx=(2, 6))
             e.bind("<FocusOut>", lambda ev, k=key: self._save_exit_param(k))
             e.bind("<Return>",   lambda ev, k=key: self._save_exit_param(k))
+            _tip = _EXIT_TIP.get(key, "")
+            _attach_tooltip(lbl, _tip)
+            _attach_tooltip(e, _tip)
             self._exit_param_vars[key] = var
 
     def _save_exit_param(self, key: str):
