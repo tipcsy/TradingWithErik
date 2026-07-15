@@ -50,7 +50,13 @@ def _is_no_trade(md: MarketData, ts) -> bool:
     """Igaz, ha az adott gyertya-idő (`ts`) a keret által megadott no-trade órába
     esik → a jelzési állapotgépet ilyenkor RESETELJÜK (a szünet után nulláról). A
     `ts.hour` a SZERVER/chart idő (mint a live óra-kapu), tehát egyezik a szürke sáv
-    óráival. Üres `no_trade_hours` → sosem igaz (régi viselkedés)."""
+    óráival. Üres `no_trade_hours` → sosem igaz (régi viselkedés).
+
+    A reset CSAK akkor él, ha a `no_trade_resets_signal` paraméter be van kapcsolva
+    (alap: KI). Kikapcsolva a szünet előtti M15 ablak túléli a szünetet — M15-ön
+    lassan áll össze új jel, így a reset túl sok belépőt kihagyna."""
+    if not md.params.get("no_trade_resets_signal", False):
+        return False
     nt = getattr(md, "no_trade_hours", None)
     return bool(nt) and int(ts.hour) in nt
 

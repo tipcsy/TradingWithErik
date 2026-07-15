@@ -363,6 +363,7 @@ def run_pair(
     rr: "dict | None" = None,
     test_end: Optional[str] = None,
     progress_callback=None,
+    build: "dict | None" = None,
 ) -> BacktestResult:
     # A jelzést/indikátorokat a STRATÉGIA adja (seam); a végrehajtás (SL/TP/
     # breakeven/trailing, slot, lot) a motoré. strategy=None → config szerinti.
@@ -432,12 +433,15 @@ def run_pair(
     _exit_at = _build_exit_evaluator(m15, rr_spec)   # kiszállási-jel (None, ha nincs)
     # Pozícióépítés modellezése — CSAK AUTO módban (determinista; a Kézi user-vezérelt)
     # és CSAK OFF presetnél (nincs részleges zárás, tiszta eset). None → nincs építés.
+    # A `build` override (a Backtest-ablak FELTÁRÓ Építés-beállítása) elsőbbséget élvez
+    # a globális/live build_state fölött → az ablakban kísérletezhetünk anélkül, hogy a
+    # live-ot piszkálnánk. None → a per-pár mentett állapot (mint eddig).
     _build_cfg = None
     try:
         from core import build_state as _bstate, position_build as _posbuild
-        _bc = _bstate.get_config(symbol)
+        _bc = build if build is not None else _bstate.get_config(symbol)
         if _bc.get("mode") == _posbuild.MODE_AUTO and rr_spec.get("preset", "off") == "off":
-            _build_cfg = _bc
+            _build_cfg = {**_posbuild.default_config(), **_bc}
     except Exception:
         _build_cfg = None
 
@@ -467,11 +471,13 @@ def run_pair(
         if progress_callback is not None and i % _PROG_EVERY == 0:
             _report(i, m1_time)
         # Óra-szűrő (csak ha allowed_hours adott — preview; egyébként minden óra).
-        # A no-trade óra RESETELI a jelzés-állapotot (mint a live/viz): a szünet után
-        # nulláról fegyverkezik, nem visz át elavult M15 szetupot a szüneten.
+        # A no-trade órában nem kereskedünk. A jelzés-reset (mint a live/viz) CSAK ha a
+        # `no_trade_resets_signal` param be van kapcsolva (alap: KI) → a szünet után
+        # nulláról fegyverkezik. Kikapcsolva a szünet előtti M15 ablak túléli a szünetet.
         hour = m1_time.hour
         if allowed_hours is not None and hour not in allowed_hours:
-            state = strategy.bt_new_state(symbol)
+            if params.get("no_trade_resets_signal", False):
+                state = strategy.bt_new_state(symbol)
             prev_m1_row = m1_row
             continue
 

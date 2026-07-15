@@ -38,7 +38,9 @@
     "breakeven_pct": 0.5,
     "_comment_trail": "trail_activation_pips: ennyi pip profit UTÁN indul a trailing. trail_distance_pips: ennyivel követ",
     "trail_activation_pips": 8.0,
-    "trail_distance_pips": 6.0
+    "trail_distance_pips": 6.0,
+    "_comment_no_trade_reset": "no_trade_resets_signal: ha true, a no-trade (szürke) óra RESETELI az M15 jelzési ablakot (a szünet után nulláról fegyverkezik — nem visz át elavult szetupot, de M15-ön lassan áll össze új jel → sok belépő kimarad). false (alap) → a szünet előtti ablak túléli a szünetet (több belépő). Per instrumentum állítható.",
+    "no_trade_resets_signal": false
   },
   "optimizer": {
     "_comment": "AI paraméter optimalizálás tartományai",

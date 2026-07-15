@@ -686,13 +686,16 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         _allowed = set(range(int(sess_start), int(sess_end)))
     no_trade_set = set(range(24)) - _allowed        # a jelzés-reset ezekben az órákban
     if hour not in _allowed:
-        # No-trade (szürke) óra: NEM kereskedünk, ÉS a szünet RESETELJE az M15
-        # jelzést — a következő tradeable ciklusban az on_bar_close MÉLY, hour-aware
-        # újra-bemelegítést végez (signal_warmed=False), így a szünet ELŐTTI ablak nem
-        # él túl a szüneten és nem lép be egy elavult szetupra a szünet után.
-        state.signal_warmed = False
-        if state.strat_state is not None and hasattr(state.strat_state, "last_m15_time"):
-            state.strat_state.last_m15_time = None
+        # No-trade (szürke) óra: NEM kereskedünk. Ha a stratégia be van kapcsolva rá
+        # (`no_trade_resets_signal`), a szünet RESETELJE az M15 jelzést — a következő
+        # tradeable ciklusban az on_bar_close MÉLY, hour-aware újra-bemelegítést végez
+        # (signal_warmed=False), így a szünet ELŐTTI ablak nem él túl a szüneten és nem
+        # lép be egy elavult szetupra. Alapból KI → az ablak túléli a szünetet (a
+        # frozen állapotból az on_bar_close inkrementális ága viszi tovább).
+        if params.get("no_trade_resets_signal", False):
+            state.signal_warmed = False
+            if state.strat_state is not None and hasattr(state.strat_state, "last_m15_time"):
+                state.strat_state.last_m15_time = None
         return
 
     # Napi reset

@@ -181,12 +181,19 @@ class InstrumentParamsDialog:
     def _build(self):
         popup = tk.Toplevel(self.parent)
         self.popup = popup
-        title = f"{self.symbol} — paraméterek"
+        # A címben az instrumentum ÉS a stratégia is látszik (több stratégia esetén
+        # egyértelmű, MELYIK stratégia paraméterei jelennek meg).
+        title = f"{self.symbol} — {self.strategy.name} paraméterek"
         if self.is_new:
             title += " (új / kézi)"
         popup.title(title)
         popup.configure(bg=BG)
         popup.grab_set()
+
+        # Fejléc-sor a tartalomban is (a címsor könnyen elsiklik): instrumentum + stratégia.
+        tk.Label(popup, text=f"{self.symbol}  ·  stratégia: {self.strategy.name}",
+                 bg=BG, fg=FG_WHITE, font=self._hf, anchor="w").pack(
+                 anchor="w", padx=10, pady=(8, 0))
 
         ts = (self.data or {}).get("test_summary", {})
 
@@ -878,12 +885,29 @@ class InstrumentParamsDialog:
             self.popup, self.symbol, self.cfg, self.strategy, params, pair_cfg,
             self._rr_spec_from_ui(), self._hf, self._sf,
             on_result=self._on_bt_window_result,
-            preset_name=self._rr_name.get())
+            preset_name=self._rr_name.get(),
+            on_apply_params=self._apply_params_from_bt)
 
     def _on_bt_window_result(self, summary):
         """A Backtest-ablak végeredménye → a közös metrika-sávba + a Mentés forrása."""
         self._bt_summary = summary
         self._render_metrics(summary, "friss backtest")
+
+    def _apply_params_from_bt(self, params: dict, summary=None):
+        """A Backtest-ablak „Mentés a Paraméterekhez" gombja → a (feltáró) paraméterek
+        visszaírása EBBE az űrlapba (a lemezre mentést a Mentés gomb végzi). Ha van
+        friss backtest-eredmény, azt is átvesszük forrásként."""
+        for k, e in self.entries.items():
+            if k in params:
+                e.delete(0, "end")
+                e.insert(0, self._fmt_param(k, params[k]))
+        if summary and summary.get("trades", 0) > 0:
+            self._bt_summary = summary
+            self._render_metrics(summary, "friss backtest (a Backtest-ablakból)")
+        else:
+            self._bt_summary = None
+            self._render_metrics(
+                None, "paraméterek a Backtest-ablakból — a Mentés lefuttatja a backtestet")
 
     # ── Backtest inline (a Mentés auto-útja: gyors, ablak nélkül) ────────────
     def _run_backtest(self):
