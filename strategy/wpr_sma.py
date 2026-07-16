@@ -643,7 +643,8 @@ class WprSmaStrategy(Strategy):
             return None
         # Volatilitás-szűrő: a túl csendes/kaotikus gyertyák kizárása. Baseline az
         # ablak ATR-átlaga (atr_avg oszlop, a bt_indicators teszi rá). 0 = kikapcs.
-        # CSAK a backtest belépés-gátja (a live spread-kapuja ettől független).
+        # A backtest ÉS a live belépés-kapuja is (v1.31.0 óta a live_trader is ezt
+        # a hookot hívja) — a live spread-kapuja ettől független védőháló.
         atr_avg = hi_row.get("atr_avg", 0)
         if atr_avg and atr_avg > 0:
             atr_min_pct = float(params.get("atr_min_pct", 0.0))

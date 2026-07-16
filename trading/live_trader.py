@@ -874,11 +874,12 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
     except Exception:
         pass
 
-    # --- Pozícióterv (méretezés) a STRATÉGIÁTÓL + spread-kapu ─────────────
-    # Konvenció: az első deklarált időkeret a "fő" (magasabb). Az SL/TP-méretet a
-    # STRATÉGIA adja a `sl_tp_pips` hookban a SAJÁT indikátoraiból → a motor
-    # stratégia-független (nem ismer 'atr'-t). A stratégia indikátor-sorát a
-    # `bt_indicators`-ból vesszük (ugyanaz, amit a backtest lát).
+    # --- Pozícióterv (belépés-kapu + méretezés) a STRATÉGIÁTÓL + spread-kapu ──
+    # Konvenció: az első deklarált időkeret a "fő" (magasabb). A belépés-szűrőt
+    # (volatilitás) ÉS az SL/TP-méretet a STRATÉGIA adja a `bt_entry` hookban a
+    # SAJÁT indikátoraiból → a motor stratégia-független (nem ismer 'atr'-t), és
+    # a live UGYANAZT a kaput járja, amit a backtest modellez. A stratégia
+    # indikátor-sorát a `bt_indicators`-ból vesszük (ugyanaz, amit a backtest lát).
     primary = strategy.timeframes()[0].label
     df_primary = bars[primary]
     tfs = strategy.timeframes()
@@ -1208,12 +1209,23 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
                 ctf = {**ctf, "account_risk_pct": ctf["account_risk_pct"] * 0.5}
                 log.info("K: %s fél mérettel (azonos kitettség: %s)",
                          symbol, ", ".join(conflict))
-            # A méretezést a STRATÉGIA adja (SL/TP pip) — None → nincs érvényes
-            # méret, kihagyjuk a belépőt.
-            plan = strategy.sl_tp_pips(hi_row, params, pip_size) if hi_row is not None else None
+            # A belépés-kaput ÉS a méretezést a STRATÉGIA adja (bt_entry:
+            # volatilitás-szűrő + SL/TP pip) — UGYANAZ a hook, amit a backtest
+            # modellez, így az élő viselkedés egyezik az optimalizált/minősített
+            # eredménnyel (atr_min_pct/atr_max_pct per instrumentum). None →
+            # kihagyás. Diagnosztika: ha a TISZTA méretező (sl_tp_pips) adott
+            # volna tervet, akkor a volatilitás-kapu blokkolt — írjuk ki külön.
+            plan = strategy.bt_entry(hi_row, params, pip_size) if hi_row is not None else None
             if plan is None:
-                log.info("⏭ %s %s jel — belépő KIHAGYVA: a stratégia nem adott "
-                         "érvényes SL/TP méretet (hi_row/indikátor hiány).", symbol, signal)
+                _sizing = (strategy.sl_tp_pips(hi_row, params, pip_size)
+                           if hi_row is not None else None)
+                if _sizing is not None:
+                    log.info("⏭ %s %s jel — belépő KIHAGYVA: volatilitás-kapu "
+                             "(ATR a megengedett sávon kívül — atr_min_pct/atr_max_pct).",
+                             symbol, signal)
+                else:
+                    log.info("⏭ %s %s jel — belépő KIHAGYVA: a stratégia nem adott "
+                             "érvényes SL/TP méretet (hi_row/indikátor hiány).", symbol, signal)
                 return
             sl_pips, tp_pips = plan
             eff_slots = calc_effective_slots(balance, sl_pips, pair_cfg, ctf)

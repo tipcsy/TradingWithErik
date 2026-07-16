@@ -292,10 +292,12 @@ class Strategy(ABC):
         raise NotImplementedError
 
     def bt_entry(self, hi_row, params, pip_size):
-        """BACKTEST pozícióterv: belépés-szűrő + méretezés egyben. `(sl_pips,
+        """Pozícióterv: belépés-szűrő + méretezés egyben. `(sl_pips,
         tp_pips)` VAGY `None` (kihagyás — szűrő elbukott / nincs méret).
 
         Alap: nincs extra szűrő → csak a méretezés (`sl_tp_pips`). A stratégia
-        felülírhatja, hogy a SAJÁT belépés-szűrőit (pl. volatilitás) is alkalmazza
-        — ezt CSAK a backtest hívja (a live piaci szűrői külön kapuk)."""
+        felülírhatja, hogy a SAJÁT belépés-szűrőit (pl. volatilitás) is alkalmazza.
+        A backtest ÉS a live_trader is EZT hívja a belépőnél (v1.31.0 óta) → az
+        élő viselkedés egyezik a modellezettel; a live spread-kapuja külön
+        (keretrendszer-szintű) védőháló marad."""
         return self.sl_tp_pips(hi_row, params, pip_size)
