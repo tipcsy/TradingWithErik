@@ -194,6 +194,18 @@ class PairRow:
                     cell.config(cursor="hand2")
                     cell.bind("<Button-1>",
                               lambda e, sn=col.strategy_name: on_marker_click(symbol, sn))
+                # Halvány │ határolók a körcsoport két szélén → a stratégiák
+                # jelölői vizuálisan elkülönülnek egymástól: │● ● ●│ │● ●│
+                def _sep():
+                    s = tk.Label(cell, text="│", bg=self._bg, fg=FG_GRAY_DIM,
+                                 font=mono_font, padx=0)
+                    if on_marker_click is not None:
+                        s.config(cursor="hand2")
+                        s.bind("<Button-1>",
+                               lambda e, sn=col.strategy_name: on_marker_click(symbol, sn))
+                    s.pack(side="left")
+                    return s
+                _sep()
                 circles = []
                 for skey, _slabel in col.stages:
                     c = tk.Label(cell, text="●", bg=self._bg, fg=FG_GRAY,
@@ -204,6 +216,7 @@ class PairRow:
                                lambda e, sn=col.strategy_name: on_marker_click(symbol, sn))
                     c.pack(side="left", expand=True)
                     circles.append((skey, c))
+                _sep()
                 self.markers[col.key] = (cell, circles)
                 continue
             if col.key == "opt":
@@ -357,8 +370,9 @@ class PairRow:
             lbl.config(bg=bg)
         for frame, circles in self.markers.values():
             frame.config(bg=bg)
-            for _skey, c in circles:
-                c.config(bg=bg)
+            # A keret MINDEN gyereke (körök + │ határolók) kövesse a sor-hátteret.
+            for child in frame.winfo_children():
+                child.config(bg=bg)
 
         sym_lbl = self.labels["symbol"]
 
