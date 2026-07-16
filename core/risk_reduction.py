@@ -67,7 +67,9 @@ def default_config() -> dict:
         "thirds_base_R":    1.0,
         # Pajzs↔Fibo auto: e szorzó FÖLÖTT számít „nagy mozgásnak" a piac
         # (belépéskori ATR > big_move_atr_mult × ATR-átlag) → Fibo; alatta Pajzs.
-        "big_move_atr_mult": 2.0,
+        # 2.0-val a nagy mozgás RITKA volt (az atr_max_pct vol-szűrő is vágja a
+        # kaotikus belépőket) → 1.5, hogy a Fibo-ág érdemben szerephez jusson.
+        "big_move_atr_mult": 1.5,
         # Cost-cut (tananyag 2.6): IDŐ-STOP, bármely presettel kombinálható.
         # Ha a nyitás után cost_cut_bars fő-timeframe gyertyával a pozíció még
         # VESZTESÉGES → piaci áron zárjuk (a kanóc/zaj korai levágása töredék-R
