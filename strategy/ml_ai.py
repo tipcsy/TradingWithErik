@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import math
 import pickle
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -32,6 +33,10 @@ import numpy as np
 import pandas as pd
 
 log = logging.getLogger(__name__)
+
+# A scaler/modell ndarray-jal dolgozik (szándékosan — a live/backtest/tanítás
+# egységesen oszlopsorrend-alapú); a sklearn feature-név figyelmeztetése zaj.
+warnings.filterwarnings("ignore", message="X does not have valid feature names")
 
 from strategy.base import (
     Strategy, Column, StrategyColumn, MarkerColumn,
@@ -337,9 +342,19 @@ class MlAiStrategy(Strategy):
     def param_space(self, cfg: dict, base_params: dict, method: str,
                     max_trials: int) -> list[dict]:
         # Az ML-stratégiánál nincs paraméter-rács: az „optimalizálás" a modell
-        # tanítása (Fázis 2, strategy.fit). Egyetlen alap-kombináció, hogy a
-        # meglévő optimizer-életciklus (teszt-backtest, minősítés) lefuthasson.
+        # tanítása (fit). Egyetlen alap-kombináció, hogy a meglévő optimizer-
+        # életciklus (teszt-backtest, minősítés) lefuthasson.
         return [dict(base_params)]
+
+    def fit(self, symbol: str, df_m15, cfg: dict, pair_cfg: dict,
+            test_start: str, progress_callback=None) -> dict:
+        """Modell-tanítás — az optimizer fit-dispatch-e hívja (az Opt gomb az
+        ml_ai-nál TANÍT). A test_start UTÁNI adat nem kerül tanításba; az
+        out-of-sample mérést az optimizer közös run_pair-teszt végzi a frissen
+        mentett modellel."""
+        from strategy.ml_train import train_symbol
+        return train_symbol(symbol, df_m15, cfg, pair_cfg, test_start,
+                            progress_callback)
 
     # --- Azonosítás: MT5 magic ---------------------------------------------
 

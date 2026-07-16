@@ -98,6 +98,21 @@ def main_config_view(cfg: dict) -> dict:
     return view
 
 
+def config_for_strategy(cfg: dict, name: str) -> dict:
+    """A futásidejű cfg átképezése EGY ADOTT stratégia nézetére.
+
+    A futásidejű cfg az AKTÍV (elsődleges) stratégia szekcióival van merge-elve;
+    ha egy MÁSIK stratégiát optimalizálunk/futtatunk (több-stratégia), annak a
+    SAJÁT szekciói kellenek. A váz-szekciók (broker, mt5, trading, data, pairs,
+    optimizer-MOTOR) maradnak, a stratégia-szekciók a `name` saját fájljából
+    jönnek. Az elsődleges stratégiára identitás (ugyanazt adja, mint a cfg)."""
+    view = main_config_view(cfg)
+    strat = load_strategy_config(name)
+    if strat:
+        _deep_merge(view, {k: v for k, v in strat.items() if not k.startswith("_")})
+    return view
+
+
 def save_param_comments(name: str, comments: dict) -> bool:
     """A paraméter-megjegyzések visszaírása a stratégia configba
     (`param_meta.params.<kulcs>.comment`). A többi szekciót érintetlenül hagyja.

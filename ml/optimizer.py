@@ -777,6 +777,13 @@ def optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance, progress=None,
         from strategy import get_strategy
         strategy = get_strategy(cfg)
 
+    # A cfg átképezése a JOB stratégiájának nézetére: a futásidejű cfg az
+    # ELSŐDLEGES stratégia szekcióival van merge-elve — másodlagos stratégia
+    # optimalizálásakor annak a SAJÁT indicators/sltp/optimizer-tere kell
+    # (különben a base_params a másik stratégia kulcsait kapná).
+    from strategy.settings import config_for_strategy
+    cfg = config_for_strategy(cfg, strategy.name)
+
     # Stratégia-hatókörű tárolás: az aktív stratégiát beállítjuk (a subprocess is
     # ezt hívja) + egyszeri migráció a régi lapos elrendezésről.
     set_active_strategy(strategy.name)
@@ -790,6 +797,11 @@ def optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance, progress=None,
     trading_cfg = cfg["trading"]
     pair_cfg    = cfg["pairs"][symbol]
     base_params = strategy.base_params(cfg)
+
+    # A tanítható ág (lentebb) a TELJES előzményt kapja — a modell-tanítás a saját
+    # lookback-jét alkalmazza (optimizer.training.lookback_years), nem a
+    # train_start_date-et (több adat = jobb modell).
+    df_m15_full = df_m15
 
     # Adat szeletelése train_start-tól (idempotens, ha a hívó már szeletelt)
     ts_train = pd.Timestamp(train_start)
@@ -816,7 +828,20 @@ def optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance, progress=None,
         test_start = _fb.strftime("%Y-%m-%d")
 
     # ── Method-dispatch (EGY helyen) ─────────────────────────────────────────
-    if method == "optuna" and _OPTUNA_AVAILABLE:
+    if callable(getattr(strategy, "fit", None)):
+        # Tanítható stratégia (pl. ml_ai): az „optimalizálás" = MODELL-TANÍTÁS.
+        # A fit a teljes előzményből tanít a test_start ELŐTTI adaton, menti a
+        # modellt, és {"params","train_summary"}-t ad — az OOS teszt (lentebb)
+        # és a mentés a KÖZÖS úton megy, mint a paraméter-keresésnél.
+        log.info("  Tanítható stratégia (%s) → modell-tanítás...", strategy.name)
+        done_flag = done_marker(symbol, strategy.name)
+        done_flag.unlink(missing_ok=True)          # friss futás — friss marker
+        result = strategy.fit(symbol, df_m15_full, cfg, pair_cfg,
+                              test_start=test_start, progress_callback=progress)
+        if result is None or "error" in (result or {}):
+            return result or {"error": "a tanítás nem adott eredményt"}
+        done_flag.touch()                          # 'Utolsó opt:' címke + állapot
+    elif method == "optuna" and _OPTUNA_AVAILABLE:
         log.info("  Optuna Bayesian optimalizálás (%d trial, walk-forward)...", max_trials)
         result = optimize_pair_optuna(
             symbol, df_m15, df_m1, opt_cfg, base_params, pair_cfg, trading_cfg,
