@@ -264,6 +264,29 @@ def _manage_position(trade: "Trade", high: float, low: float, params: dict,
         _update_stops(trade, high, low, params, pip_size, risky=True)
         return
 
+    # fibo → stop-mozgatás a belépő→TP táv fibo_level (61,8%) pontján. NINCS
+    # részleges zárás (a lot-létra sem érinti). A trigger ELŐTT a stop TÁVOL
+    # marad (nincs BE/trailing — a tananyag: hagyjuk futni), a trigger UTÁN a
+    # stop a fibo_stop_level szintre áll (0 = BE) és OTT MARAD; a TP változatlan.
+    if preset == _rrm.PRESET_FIBO:
+        if not trade.reduced:
+            trig, new_stop = _rrm.fibo_levels(trade.open_price, trade.tp, rr)
+            if trig:
+                hit = (high >= trig if trade.direction == "BUY" else low <= trig)
+                if hit:
+                    trade.reduced = True
+                    trade.runner_mode = _rrm.RUNNER_KEEP
+                    trade.rr_technique = _rrm.PRESET_FIBO
+                    if trade.direction == "BUY":
+                        if new_stop > trade.sl:
+                            trade.sl = new_stop
+                        trade.risk_free = trade.sl >= trade.open_price
+                    else:
+                        if new_stop < trade.sl:
+                            trade.sl = new_stop
+                        trade.risk_free = trade.sl <= trade.open_price
+        return
+
     # halving / shield → 1R-nél részleges zárás (egyszer), utána runner-stop
     if not trade.reduced:
         one_r = trade.sl_pips * pip_size

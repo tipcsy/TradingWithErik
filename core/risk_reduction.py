@@ -27,7 +27,8 @@ PRESET_OFF     = "off"       # nincs kockázatcsökkentés
 PRESET_RISKY   = "risky"     # óvatos méret + BE-húzás (NINCS részleges zárás)
 PRESET_HALVING = "halving"   # Felező: 50% zár 1R-nél
 PRESET_SHIELD  = "shield"    # Pajzs: 75% zár 1R-nél
-PRESETS = (PRESET_OFF, PRESET_RISKY, PRESET_HALVING, PRESET_SHIELD)
+PRESET_FIBO    = "fibo"      # Fibo: stop-húzás a belépő→TP táv 61,8%-ánál (nincs zárás)
+PRESETS = (PRESET_OFF, PRESET_RISKY, PRESET_HALVING, PRESET_SHIELD, PRESET_FIBO)
 
 # ── runner-stop (2b tengely) ────────────────────────────────────────────────
 RUNNER_KEEP      = "keep"        # marad a TÁVOLI (eredeti) stop — a videó Pajzsa
@@ -47,6 +48,11 @@ def default_config() -> dict:
         # A runner alapból TRAILINGgel fut (backteszt: alacsonyabb DD, azonos hozam,
         # mint a 'keep' távoli stop). A tiszta videó-Pajzs a 'keep' — haladó opció.
         "runner_stop":      RUNNER_TRAILING,
+        # Fibo preset: a belépő→TP távra húzott Fibonacci. A trigger a fibo_level
+        # pontján (tananyag: 61,8%); a stop a fibo_stop_level szintre áll
+        # (0.0 = breakeven; variánsok: 0.236 / 0.382 — bezárt rész-profit).
+        "fibo_level":       0.618,
+        "fibo_stop_level":  0.0,
     }
 
 
@@ -64,6 +70,25 @@ def target_fraction(preset: str, cfg: dict) -> float:
     if preset == PRESET_SHIELD:
         return float(cfg.get("shield_fraction", 0.75))
     return 0.0   # off / risky → nincs részleges zárás
+
+
+def fibo_levels(open_price: float, tp_price: float, cfg: dict) -> tuple[float, float]:
+    """Fibo preset: (trigger_ár, új_stop_ár) a belépő→TP távra húzott Fibonacci
+    szerint (tananyag 2.2: NEM a hullámra, hanem a beszálló→célár távra).
+
+    A táv ELŐJELES (BUY: +, SELL: −) → mindkét irányra helyes képlet:
+      trigger  = open + táv × fibo_level      (alap 0.618)
+      új stop  = open + táv × fibo_stop_level (0.0 = breakeven; 0.236/0.382 =
+                 rész-profit bezárva, nem túl közel az árhoz → a zaj nem ver ki)
+    (0.0, 0.0), ha nincs érvényes TP (a Fibo TP-távra épül — enélkül nem értelmezhető)."""
+    if not tp_price or not open_price:
+        return (0.0, 0.0)
+    dist = tp_price - open_price
+    if dist == 0.0:
+        return (0.0, 0.0)
+    lvl  = float(cfg.get("fibo_level", 0.618))
+    slvl = float(cfg.get("fibo_stop_level", 0.0))
+    return (open_price + dist * lvl, open_price + dist * slvl)
 
 
 def closable_lot(cur_lot: float, fraction: float, min_lot: float,
@@ -114,6 +139,10 @@ def plan_at_trigger(preset: str, cfg: dict, cur_lot: float, min_lot: float,
         return Plan(0.0, RUNNER_KEEP, PRESET_OFF)
     if preset == PRESET_RISKY:
         return Plan(0.0, RUNNER_BREAKEVEN, PRESET_RISKY)
+    if preset == PRESET_FIBO:
+        # A Fibo nem 1R-alapú és nem zár részlegesen — a motor a fibo_levels()
+        # szerinti stop-húzással kezeli (ez az ág csak védelem, ha mégis idehívnák).
+        return Plan(0.0, RUNNER_KEEP, PRESET_FIBO)
 
     frac = target_fraction(preset, cfg)
     closed = closable_lot(cur_lot, frac, min_lot, lot_step)

@@ -756,6 +756,8 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
     #   • halving/shield : 1R-nél RÉSZLEGES ZÁRÁS (Felező 50% / Pajzs 75%) + runner-
     #     stop (keep|breakeven|trailing). A részleges zárás után a pozíció
     #     kockázatmentes (a lezárt profit fedezi a runner max veszteségét).
+    #   • fibo   : stop-húzás a belépő→TP táv 61,8%-ánál a fibo_stop_level szintre
+    #     (0 = BE); nincs részleges zárás, nincs trailing (a stop ott marad).
     from core import rr_state, risk_reduction as _rr
     _spec    = rr_state.spec_for(symbol)
     _preset  = _spec.get("preset", _rr.PRESET_OFF)
@@ -798,7 +800,8 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         # tovább kezeljük — automatikus BE + trailing —, hogy a szünet alatt is húzzon
         # a stop (a user kérése: nyitott pozíciót az adott órában is lehessen kezelni).
         # A JELZÉS-ablakot NEM bántjuk (on_bar_close nem fut → befagy a szünetre). A
-        # Felező/Pajzs részleges zárás + RUNNER_EXIT (bart igényel) a tradeable ágban fut.
+        # Felező/Pajzs részleges zárás + RUNNER_EXIT (bart igényel) és a Fibo
+        # stop-húzás a tradeable ágban fut.
         if _preset in (_rr.PRESET_OFF, _rr.PRESET_RISKY):
             try:
                 _sinfo = mt5.symbol_info(symbol)
@@ -947,6 +950,7 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
             is_rf = True
 
         _is_partial = _preset in (_rr.PRESET_HALVING, _rr.PRESET_SHIELD)
+        _is_fibo    = _preset == _rr.PRESET_FIBO
 
         # Restart-védelem: ha a bot újraindult egy MÁR részlegesen zárt (Felező/
         # Pajzs) pozíció közben, a pstate elveszett → az MT5 history-ból derítsük ki,
@@ -1001,6 +1005,35 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
                     log.info("⎗ %s #%d — runner lezárva KISZÁLLÁSI JELRE (%s/%s)",
                              symbol, ticket, _ex.get("indicator"), _ex.get("timeframe"))
                     continue   # a pozíció zárva → ne kezeljük tovább ebben a körben
+        elif _is_fibo:
+            # ── Fibo: stop-mozgatás a belépő→TP táv fibo_level (61,8%) pontján ──
+            # A trigger ELŐTT a stop TÁVOL marad (nincs BE/trailing — hagyjuk
+            # futni); a trigger UTÁN a stop a fibo_stop_level szintre áll
+            # (0 = BE) és OTT MARAD. Nincs részleges zárás. Restart-biztos:
+            # ha a stop már a cél-szinten (vagy jobb) van, csak megjelöljük.
+            if not pstate.get("rr_fibo_done"):
+                _trig, _new_stop = _rr.fibo_levels(pos.price_open, pos.tp, _spec)
+                if _trig:
+                    _is_buy  = pos.type == mt5.ORDER_TYPE_BUY
+                    _digits  = sym_info.digits if sym_info else 5
+                    _already = (pos.sl > 0 and
+                                (pos.sl >= _new_stop if _is_buy else pos.sl <= _new_stop))
+                    _reached = (pos.price_current >= _trig if _is_buy
+                                else pos.price_current <= _trig)
+                    if _already or (_reached and
+                                    modify_sl(ticket, round(_new_stop, _digits))):
+                        pstate["rr_fibo_done"] = True
+                        # BE-n vagy fölötte a stop → kockázatmentes (slot felszabadul)
+                        _rf_now = (pos.sl if _already else _new_stop)
+                        if ((_is_buy and _rf_now >= pos.price_open) or
+                                (not _is_buy and _rf_now <= pos.price_open)):
+                            slot_mgr.set_risk_free(ticket)
+                            pstate["be_done"] = True
+                        if not _already:
+                            log.info("𝜑 %s #%d — Fibo: stop a %.5f szintre húzva "
+                                     "(trigger: a belépő→TP táv %.1f%%-a)",
+                                     symbol, ticket, _new_stop,
+                                     float(_spec.get("fibo_level", 0.618)) * 100)
         else:
             # ── off/risky: költség-tudatos breakeven (VÁLTOZATLAN) ──
             # A tényleges SL nem pontos BE, hanem BE + spread puffer (lásd
@@ -1025,8 +1058,9 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         # MINDEN számítás PONTBAN (bróker-egység), hogy a kijelzés és a motor
         # egyértelmű legyen (a "pip" félreérthető volt).
         is_rf = slot_mgr.is_risk_free(ticket)
-        # Trailing: off/risky mint eddig; Felező/Pajzsnál CSAK ha a runner-mód trailing.
-        _do_trailing = (is_rf and pstate.get("trailing_enabled", True) and
+        # Trailing: off/risky mint eddig; Felező/Pajzsnál CSAK ha a runner-mód trailing;
+        # Fibónál SOHA (a stop a fibo_stop_level szinten marad — tiszta stop-mozgatás).
+        _do_trailing = (is_rf and pstate.get("trailing_enabled", True) and not _is_fibo and
                         (not _is_partial or pstate.get("runner_mode") == _rr.RUNNER_TRAILING))
         if _do_trailing:
             point  = sym_info.point if (sym_info and sym_info.point > 0) else pip_size

@@ -371,7 +371,9 @@ class InstrumentParamsDialog:
         om.grid(row=0, column=1, padx=(4, 0))
         _attach_tooltip(om, "Ki = alap kezelés (BE a breakeven_pct-nél + trailing). "
                             "Risky = felezett méret + azonnali BE 1R-nél. "
-                            "Felező/Pajzs = 1R-nél 50%/75% zárás + a maradék (runner) külön kezelése.")
+                            "Felező/Pajzs = 1R-nél 50%/75% zárás + a maradék (runner) külön kezelése. "
+                            "Fibo = a belépő→TP táv 61,8%-ánál a stop BE-re (nincs zárás, "
+                            "nincs trailing — a stop ott marad, a TP fut).")
 
         # Óvatos méret — Ki-nél elrejtve; Riskynél alapból pipa (de átállítható)
         _c0 = _rrs.get_cautious(self.symbol)
@@ -1273,7 +1275,8 @@ class InstrumentParamsDialog:
         # A metrikák a KÖZÖS sávba kerülnek (nincs külön backtest-metrikasor). Az
         # lbl_bt már csak a ténylegesen alkalmazott kockázati technikát mutatja.
         tech = (summary or {}).pop("_rr_tech", None) or {}
-        _names = {"shield": "Pajzs", "halving": "Felező", "risky": "Risky"}
+        _names = {"shield": "Pajzs", "halving": "Felező", "risky": "Risky",
+                  "fibo": "Fibo"}
         tech_s = (", ".join(f"{_names.get(k, k)}×{v}" for k, v in tech.items())) if tech else ""
         self._bt_summary = summary or {"trades": 0}
         self._bt_from_saved = False   # ez valódi friss backtest

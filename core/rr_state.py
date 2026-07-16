@@ -18,7 +18,7 @@ from pathlib import Path
 
 from core import risky_mode
 from core.risk_reduction import (
-    PRESET_OFF, PRESET_RISKY, PRESET_HALVING, PRESET_SHIELD, PRESETS,
+    PRESET_OFF, PRESET_RISKY, PRESET_HALVING, PRESET_SHIELD, PRESET_FIBO, PRESETS,
     RUNNER_KEEP, RUNNER_BREAKEVEN, RUNNER_TRAILING, RUNNER_EXIT,
     default_config, wants_cautious_size,
 )
@@ -26,10 +26,11 @@ from core import exit_signal
 
 PATH = Path(__file__).resolve().parents[1] / "data" / "risk_mode.json"
 
-CYCLE = (PRESET_OFF, PRESET_RISKY, PRESET_HALVING, PRESET_SHIELD)
-LABEL = {PRESET_OFF: "—", PRESET_RISKY: "R", PRESET_HALVING: "F", PRESET_SHIELD: "P"}
+CYCLE = (PRESET_OFF, PRESET_RISKY, PRESET_HALVING, PRESET_SHIELD, PRESET_FIBO)
+LABEL = {PRESET_OFF: "—", PRESET_RISKY: "R", PRESET_HALVING: "F", PRESET_SHIELD: "P",
+         PRESET_FIBO: "Fi"}
 NAME  = {PRESET_OFF: "Ki", PRESET_RISKY: "Risky", PRESET_HALVING: "Felező",
-         PRESET_SHIELD: "Pajzs"}
+         PRESET_SHIELD: "Pajzs", PRESET_FIBO: "Fibo"}
 RUNNERS = (RUNNER_TRAILING, RUNNER_KEEP, RUNNER_BREAKEVEN, RUNNER_EXIT)
 RUNNER_NAME = {RUNNER_TRAILING: "Trailing", RUNNER_KEEP: "Marad távol",
                RUNNER_BREAKEVEN: "BE", RUNNER_EXIT: "Kiszállási jel"}
@@ -45,7 +46,8 @@ _state: dict[str, dict] = {}
 # Numerikus kalibrációs override-ok (az optimalizáló írhatja): ha jelen vannak, a
 # spec_for felülírja velük a default_config() megfelelő kulcsait. Hiányukban a
 # default_config érvényes (visszafelé kompatibilis: a régi fájlokban nincsenek).
-_CALIB_KEYS = ("trigger_R", "halving_fraction", "shield_fraction")
+_CALIB_KEYS = ("trigger_R", "halving_fraction", "shield_fraction",
+               "fibo_level", "fibo_stop_level")
 
 
 def _norm(v) -> dict:

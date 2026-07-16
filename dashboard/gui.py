@@ -361,10 +361,11 @@ class PairRow:
         sym_lbl = self.labels["symbol"]
 
         # „R" gomb = kockázatcsökkentő PRESET (kattintásra körbe-vált). A gomb a
-        # ténylegesen érvényes presetet mutatja: — Ki | R Risky | F Felező | P Pajzs.
+        # ténylegesen érvényes presetet mutatja: — Ki | R Risky | F Felező | P Pajzs
+        # | Fi Fibo.
         _rp = getattr(ds, "rr_preset", "off")
         _rrmap = {"risky": ("R", FG_ORANGE), "halving": ("F", FG_CYAN),
-                  "shield": ("P", FG_GREEN)}
+                  "shield": ("P", FG_GREEN), "fibo": ("Fi", FG_YELLOW)}
         if _rp in _rrmap:
             _txt, _col = _rrmap[_rp]
             self.btn_risky.config(text=_txt, bg=_col, fg="#1e1e2e", state="normal")
@@ -915,7 +916,7 @@ class PortfolioBacktestTab:
             ctrl, textvariable=self._rr_var, width=16, state="readonly",
             font=self._small,
             values=["Auto (jelenlegi)", "Ki (mind)", "Risky (mind)",
-                    "Felező (mind)", "Pajzs (mind)"])
+                    "Felező (mind)", "Pajzs (mind)", "Fibo (mind)"])
         self._rr_combo.grid(row=date_row+1, column=3, padx=4, sticky="w")
 
         btn_row = date_row + 2
@@ -1033,7 +1034,8 @@ class PortfolioBacktestTab:
         from core import risk_reduction as _rr
         preset = {"Ki (mind)": _rr.PRESET_OFF, "Risky (mind)": _rr.PRESET_RISKY,
                   "Felező (mind)": _rr.PRESET_HALVING,
-                  "Pajzs (mind)": _rr.PRESET_SHIELD}.get(self._rr_var.get())
+                  "Pajzs (mind)": _rr.PRESET_SHIELD,
+                  "Fibo (mind)": _rr.PRESET_FIBO}.get(self._rr_var.get())
         if preset is None:
             return None
         return {**_rr.default_config(), "preset": preset}
@@ -1936,6 +1938,7 @@ class DashboardWindow:
             ("■ Optimalizálás", FG_YELLOW), ("✦ Kockázatmentes", FG_CYAN),
             ("Kockázatcsökk. (kattints):", FG_GRAY),
             ("R Risky", FG_ORANGE), ("F Felező", FG_CYAN), ("P Pajzs", FG_GREEN),
+            ("Fi Fibo", FG_YELLOW),
         ]:
             tk.Label(legend, text=text, bg=BG, fg=col, font=small_font, padx=6).pack(side="left")
 
@@ -2655,7 +2658,7 @@ class DashboardWindow:
 
     def _handle_risky(self, symbol: str):
         """Az „R" gomb: a kockázatcsökkentő PRESET körbe-váltása
-        (Ki → Risky → Felező → Pajzs), per-pár mentve (data/risk_mode.json).
+        (Ki → Risky → Felező → Pajzs → Fibo), per-pár mentve (data/risk_mode.json).
         A régi risky_mode-ot szinkronban tartjuk (preset==risky), hogy az azt
         olvasó live/backtest változatlanul működjön."""
         from core import rr_state, risky_mode, risk_reduction as _rr

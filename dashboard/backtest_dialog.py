@@ -45,7 +45,8 @@ from core import build_state as _bst
 from core import position_build as _pb
 
 # A technika-kulcsok magyar nevei (a rr_technique / progress tech dict-hez)
-_TECH_NAMES = {"shield": "Pajzs", "halving": "Felező", "risky": "Risky"}
+_TECH_NAMES = {"shield": "Pajzs", "halving": "Felező", "risky": "Risky",
+               "fibo": "Fibo"}
 
 # A metrika-sáv egységes sorrendje (mint a Stratégia Paraméterek ablakban)
 _METRIC_ORDER = [
@@ -283,7 +284,8 @@ class BacktestDialog:
         _style_om(om, self._sf)
         om.grid(row=0, column=1, padx=(4, 0))
         _attach_tooltip(om, "Ki = alap kezelés (BE + trailing). Risky = felezett méret + "
-                            "azonnali BE 1R-nél. Felező/Pajzs = 1R-nél 50%/75% zárás + runner.")
+                            "azonnali BE 1R-nél. Felező/Pajzs = 1R-nél 50%/75% zárás + runner. "
+                            "Fibo = a belépő→TP táv 61,8%-ánál a stop BE-re (nincs zárás/trailing).")
 
         self._cautious_var = tk.BooleanVar(value=self._init_cautious)
         self._cautious_cb = tk.Checkbutton(
