@@ -468,6 +468,14 @@ def run_pair(
     # (off/risky) → a meglévő hívók BITAZONOSAK maradnak.
     if strategy is None:
         strategy = get_strategy({})
+    # A stratégia-hookok pár-azonosító adatai (pl. az ml_ai modell-betöltése és
+    # feature-normalizálása): a params-ba injektáljuk a pair config tényadatait.
+    # A symbol/pip_size a pair config-ból AUTORITATÍV; a session default-olható
+    # (a per-pár optimalizált params felülírhatja). A wpr_sma ezeket nem olvassa
+    # → a meglévő viselkedés bitazonos.
+    params = {**params, "symbol": symbol, "pip_size": pair_cfg["pip_size"]}
+    params.setdefault("sess_start", pair_cfg.get("sess_start", 0))
+    params.setdefault("sess_end",   pair_cfg.get("sess_end", 24))
     from core import risk_reduction as _rrm
     rr_spec    = _rr_spec(rr, risky)
     # Óvatos (felezett) méret? A spec `cautious` felülbírálja, különben a preset
@@ -1089,6 +1097,12 @@ def run_portfolio_backtest(
         if df_m15 is None:
             log.warning("Portfolio BT: %s — nincs adat, kihagyva.", sym)
             continue
+
+        # Pár-azonosító injektálás a stratégia-hookoknak (mint a run_pair-ben).
+        _pcfg = cfg["pairs"][sym]
+        params = {**params, "symbol": sym, "pip_size": _pcfg["pip_size"]}
+        params.setdefault("sess_start", _pcfg.get("sess_start", 0))
+        params.setdefault("sess_end",   _pcfg.get("sess_end", 24))
 
         m15, m1 = strategy.bt_indicators(df_m15, df_m1, params)
 

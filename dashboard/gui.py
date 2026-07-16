@@ -3285,6 +3285,12 @@ class DashboardWindow:
                         _f = params_file(symbol, sn)
                         sp = (json.load(open(_f, encoding="utf-8")).get("params", {})
                               if _f.exists() else st.base_params(self.cfg))
+                    # Pár-azonosító injektálás (mint a motoroknál): pl. az ml_ai
+                    # feature-számítása/modell-betöltése igényli.
+                    sp = {**sp, "symbol": symbol,
+                          "pip_size": _pcfg.get("pip_size", 0.0001)}
+                    sp.setdefault("sess_start", _pcfg.get("sess_start", 0))
+                    sp.setdefault("sess_end",   _pcfg.get("sess_end", 24))
                     smd = MarketData(symbol=symbol, params=sp, bars=bars)
                     cells = st.compute_display(smd)
                     ds.strategy_cells[sn] = {k: (c.text, c.color)

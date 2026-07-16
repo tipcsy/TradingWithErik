@@ -1499,6 +1499,12 @@ def run(cfg: dict, slot_mgr: SlotManager):
         _params = load_pair_params(symbol, strat.name)
         if _params is None:
             return None
+        # Pár-azonosító injektálás a stratégia-hookoknak (mint a backtest
+        # run_pair-ben): symbol/pip_size autoritatív a pair configból, a session
+        # default-olható. A wpr_sma ezeket nem olvassa → viselkedése változatlan.
+        _params = {**_params, "symbol": symbol, "pip_size": pair_cfg["pip_size"]}
+        _params.setdefault("sess_start", pair_cfg.get("sess_start", 0))
+        _params.setdefault("sess_end",   pair_cfg.get("sess_end", 24))
         return LivePairState(
             symbol=symbol, pair_cfg=pair_cfg, params=_params,
             trading_cfg=trading_cfg, magic=strat.magic(cfg),

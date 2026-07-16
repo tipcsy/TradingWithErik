@@ -20,7 +20,7 @@ from strategy.base import (
 # A regisztrált (ismert) stratégiák nevei — a dashboard ezekből képez EGY-EGY
 # jelölő-oszlopot (fejléc = stratégia neve). Új stratégia = egy név ide + egy ág a
 # get_strategy_by_name-ben + egy modul a strategy/-ben.
-_REGISTERED = ("wpr_sma",)
+_REGISTERED = ("wpr_sma", "ml_ai")
 
 
 def registered_strategy_names() -> list[str]:
@@ -40,6 +40,9 @@ def get_strategy_by_name(name: str) -> Strategy:
         if name == "wpr_sma":
             from strategy.wpr_sma import WprSmaStrategy
             _INSTANCES[name] = WprSmaStrategy()
+        elif name == "ml_ai":
+            from strategy.ml_ai import MlAiStrategy
+            _INSTANCES[name] = MlAiStrategy()
         else:
             raise ValueError(f"Ismeretlen stratégia: {name!r}")
     return _INSTANCES[name]

@@ -1,0 +1,70 @@
+{
+  "_comment": "Az ml_ai (Trading-with-AI port) stratégia SAJÁT beállításai. A modell páronként tanított (data/models/ml_ai/<SYMBOL>.pkl); az Optimalizálás gomb ennél a stratégiánál TANÍTÁST futtat.",
+  "quality": {
+    "_comment": "Tanított instrumentum minősítési küszöbei (Minőség oszlop) — a teszt-időszaki backtest összegzőjére.",
+    "min_trades": 15,
+    "maxdd_mid": 0.18,
+    "maxdd_weak": 0.25,
+    "maxdd_bad": 0.35,
+    "pf_mid": 1.4,
+    "pf_weak": 1.2,
+    "pf_bad": 1.0,
+    "winrate_weak": 0.35,
+    "winrate_good": 0.45
+  },
+  "indicators": {
+    "_comment": "A feature-motor fix (strategy/ml_features.py — a modell bemenete nem paraméterezhető át tanítás nélkül). Itt csak a futásidejű ablak-méret él.",
+    "ml_warmup_bars": 900
+  },
+  "sltp": {
+    "_comment": "dynamic_sltp: true = SL = ATR14 × sl_atr_mult, TP = SL × tp_rr_ratio. false = fix sl_pips/tp_pips (páronként a tanítás írja). A címkézés (tanítás) UGYANEZT a sémát használja.",
+    "dynamic_sltp": true,
+    "sl_atr_mult": 1.5,
+    "tp_rr_ratio": 2.0,
+    "sl_pips": 0,
+    "tp_pips": 0,
+    "atr_period": 14
+  },
+  "position_mgmt": {
+    "_comment": "Kockázatmentesítés és trailing — a keretrendszer végrehajtási presetjeihez (mint a wpr_sma-nál).",
+    "breakeven_pct": 0.5,
+    "trail_activation_pips": 8.0,
+    "trail_distance_pips": 6.0,
+    "no_trade_resets_signal": false
+  },
+  "param_meta": {
+    "_comment": "A Paraméterek ablak csoportosítása + megjegyzései.",
+    "categories": [
+      "ML modell",
+      "SL / TP",
+      "Kockázatkezelés",
+      "Egyéb"
+    ],
+    "params": {
+      "ml_warmup_bars":         {"category": "ML modell", "comment": "Élő feature-ablak mélysége (M15 gyertya) — min. ~700 kell az indikátor-bemelegítéshez"},
+      "dynamic_sltp":           {"category": "SL / TP", "comment": "true: SL = ATR14 × szorzó; false: fix sl_pips/tp_pips"},
+      "sl_atr_mult":            {"category": "SL / TP", "comment": "SL = ATR14 × ez (dynamic_sltp esetén)"},
+      "tp_rr_ratio":            {"category": "SL / TP", "comment": "TP = SL × ez (kockázat/hozam arány)"},
+      "sl_pips":                {"category": "SL / TP", "comment": "Fix SL pipben (dynamic_sltp=false esetén; a tanítás írja páronként)"},
+      "tp_pips":                {"category": "SL / TP", "comment": "Fix TP pipben (dynamic_sltp=false esetén)"},
+      "atr_period":             {"category": "SL / TP", "comment": "ATR periódus a keretrendszer spread-kapujához"},
+      "breakeven_pct":          {"category": "Kockázatkezelés", "comment": "BE: a TP hány %-ánál húzzuk az SL-t a belépőre (0 = ki)"},
+      "trail_activation_pips":  {"category": "Kockázatkezelés", "comment": "Trailing ennyi pip profit UTÁN indul"},
+      "trail_distance_pips":    {"category": "Kockázatkezelés", "comment": "Trailing követési távolság (pip)"},
+      "no_trade_resets_signal": {"category": "Kockázatkezelés", "comment": "A no-trade (szürke) óra resetelje-e a jelzést (ML-nél nincs mély állapot — hatástalan)"}
+    }
+  },
+  "optimizer": {
+    "_comment": "Az ml_ai-nál az optimalizálás = TANÍTÁS. Itt a tanítás beállításai élnek (nem paraméter-tartományok); a train/test határ a config.json optimizer.test_start_date-je.",
+    "training": {
+      "_comment_label": "Hány gyertyát néz előre a címkézés: nyert volna-e a trade? (32 × 15 perc = 8 óra)",
+      "label_lookahead_bars": 32,
+      "_comment_wr": "Ha a modell találati aránya (win rate) a kalibráción ennél kisebb → az irány kikapcsolva (küszöb=1.01)",
+      "min_model_win_rate": 0.4,
+      "_comment_cov": "A session gyertyáinak max ekkora hányada kaphat jelzést (~2 trade/nap) — overfitting-védelem",
+      "max_signal_coverage": 0.08,
+      "_comment_lookback": "Tanításnál csak az utolsó N év adata (0 = minden)",
+      "lookback_years": 3
+    }
+  }
+}
