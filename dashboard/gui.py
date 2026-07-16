@@ -2963,6 +2963,10 @@ class DashboardWindow:
         höz: a params az ATR/spread-számításhoz, a test_summary a Minőség-grade-hez.
         Throttle-olva hívjuk, ezért a JSON-olvasás elenyésző. Üres dict, ha nincs/hiba."""
         try:
+            # FONTOS: lokális import — modul-szinten nincs params_file; enélkül
+            # NameError keletkezett, amit a except lenyelt → a Minőség-grade
+            # optimalizálás alatt SOSEM jelent meg (v1.30.3 regresszió).
+            from core.params_store import params_file
             pf = params_file(symbol, self.strategy.name)
             if pf.exists():
                 return json.load(open(pf, encoding="utf-8")) or {}

@@ -800,6 +800,21 @@ def optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance, progress=None,
     if len(df_m15) < 200 or len(df_m1) < 200:
         return {"error": "túl kevés adat a train_start után"}
 
+    # OOS-kapu: ha a test_start_date az adat végén túl van (pl. jövőbeli dátum a
+    # configban), az out-of-sample szelet ÜRES lenne → az optimizer némán 0-trade
+    # test_summary-t mentene (nincs Minőség, a param-ablak "0 trade"-et mutat).
+    # Ilyenkor az utolsó wf_test_months hónapra esünk vissza, és naplózzuk.
+    ts_test = pd.Timestamp(test_start)
+    if df_m15.index.tzinfo is not None:
+        ts_test = ts_test.tz_localize("UTC")
+    data_end = df_m15.index[-1]
+    if ts_test >= data_end:
+        _fb = data_end - pd.DateOffset(months=int(opt_cfg.get("wf_test_months", 2)))
+        log.warning("  %s — test_start_date (%s) az adat vége (%s) UTÁN van → "
+                    "OOS fallback: %s", symbol, test_start,
+                    data_end.date(), _fb.date())
+        test_start = _fb.strftime("%Y-%m-%d")
+
     # ── Method-dispatch (EGY helyen) ─────────────────────────────────────────
     if method == "optuna" and _OPTUNA_AVAILABLE:
         log.info("  Optuna Bayesian optimalizálás (%d trial, walk-forward)...", max_trials)

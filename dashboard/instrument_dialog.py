@@ -171,6 +171,9 @@ class InstrumentParamsDialog:
         # így a minősítés megjelenik a soron). None = még nem futott backtest.
         self._bt_summary = None
         self._bt_running = False
+        # True, ha a _bt_summary a MENTETT test_summary újrafelhasználása
+        # (változatlan készlet) — ilyenkor a backtested_at nem frissül.
+        self._bt_from_saved = False
         # Az egyetlen Mentés gomb új kombónál auto-backtestet futtat; ez a flag
         # jelzi a _bt_done-nak, hogy a backtest UTÁN folytassa a mentést.
         self._save_after_bt = False
@@ -781,10 +784,13 @@ class InstrumentParamsDialog:
         if self.is_new and "source" not in data:
             data["source"] = "manual"
         # Ha futott Backtest, a friss összegzés kerül a JSON-ba → a soron
-        # megjelenik a minősítés (Win/MaxDD/P&L a test_summary-ből).
+        # megjelenik a minősítés (Win/MaxDD/P&L a test_summary-ből). Ha az
+        # eredmény a MENTETT summary újrafelhasználása (változatlan készlet),
+        # a backtested_at időbélyeg NEM frissül (nem futott új backtest).
         if self._bt_summary is not None:
             data["test_summary"] = self._bt_summary
-            data["backtested_at"] = datetime.utcnow().isoformat()
+            if not getattr(self, "_bt_from_saved", False):
+                data["backtested_at"] = datetime.utcnow().isoformat()
         if extra:
             data.update(extra)
         try:
@@ -849,12 +855,40 @@ class InstrumentParamsDialog:
             return
         dup = self._find_matching_rank(params) if self._rank_rows else None
         if dup is None and self._bt_summary is None:
-            # Új kombó, nincs eredmény → kötelező backtest, utána _persist.
-            self._save_after_bt = True
-            self.lbl_err.config(text="")
-            self._run_backtest()
-            return
+            # Ha a készlet megegyezik a MENTETT paraméterekkel és van érvényes
+            # mentett eredmény (már minősítve van), NEM futtatunk újra backtestet
+            # — a mentett metrikával perzisztálunk (pl. csak óra/megjegyzés változott).
+            saved_ts = (self.data or {}).get("test_summary") or {}
+            if saved_ts.get("trades", 0) > 0 and self._matches_saved_params(params):
+                self._bt_summary = dict(saved_ts)
+                self._bt_from_saved = True
+            else:
+                # Új kombó, nincs eredmény → kötelező backtest, utána _persist.
+                self._save_after_bt = True
+                self.lbl_err.config(text="")
+                self._run_backtest()
+                return
         self._persist(params, dup)
+
+    def _matches_saved_params(self, params: dict) -> bool:
+        """A szerkesztett készlet numerikusan megegyezik-e a MENTETT (JSON)
+        paraméterekkel. Csak az űrlap-mezőket veti össze (mint a
+        _find_matching_rank a CSV-sorokat)."""
+        import math
+        saved = (self.data or {}).get("params") or {}
+        if not saved:
+            return False
+        for k in self.entries:
+            sv, pv = saved.get(k), params.get(k)
+            if sv is None or pv is None:
+                return False
+            try:
+                if not math.isclose(float(sv), float(pv), rel_tol=1e-9, abs_tol=1e-6):
+                    return False
+            except (TypeError, ValueError):
+                if str(sv) != str(pv):
+                    return False
+        return True
 
     def _persist(self, params: dict, dup):
         """A tényleges kiírás: órák + JSON (aktív készlet) + trials CSV (ha új kombó
@@ -1242,6 +1276,7 @@ class InstrumentParamsDialog:
         _names = {"shield": "Pajzs", "halving": "Felező", "risky": "Risky"}
         tech_s = (", ".join(f"{_names.get(k, k)}×{v}" for k, v in tech.items())) if tech else ""
         self._bt_summary = summary or {"trades": 0}
+        self._bt_from_saved = False   # ez valódi friss backtest
         self._render_metrics(self._bt_summary, "friss backtest")
         self.lbl_bt.config(
             text=(f"Ténylegesen alkalmazott technika: {tech_s}" if tech_s else ""),
