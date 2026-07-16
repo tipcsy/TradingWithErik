@@ -2907,6 +2907,7 @@ class DashboardWindow:
             for sym in all_syms:
                 try:
                     self._refresh_price(sym)
+                    self._refresh_light_extras(sym)   # napi nyitóár + max spread (opt közben is)
                 except Exception:
                     pass
             # 2) Drága indikátor-számítás: CSAK ha nincs optimizer (CPU-kímélés + az
@@ -2955,6 +2956,71 @@ class DashboardWindow:
         ref = ds.bid if ds.bid is not None else ds.ask
         if ref is not None and ds.day_open:
             ds.change_pct = (ref - ds.day_open) / ds.day_open * 100.0
+
+    def _light_params(self, symbol: str) -> dict:
+        """Az extra-frissítőhöz szükséges pár paraméter (atr_period / max_spread_atr_ratio
+        / min_spread_pips) — az optimalizált JSON-ból, különben alap. Throttle-olva
+        hívjuk, ezért a JSON-olvasás elenyésző."""
+        try:
+            pf = params_file(symbol, self.strategy.name)
+            if pf.exists():
+                p = json.load(open(pf, encoding="utf-8")).get("params", {})
+                if p:
+                    return p
+        except Exception:
+            pass
+        try:
+            return self.strategy.base_params(self.cfg)
+        except Exception:
+            return {}
+
+    def _refresh_light_extras(self, symbol: str):
+        """Olcsó 'extrák', amikhez PÁR GYERTYA kell (nem tick): NAPI NYITÓÁR (Vált.%-hoz)
+        + MAX SPREAD (ATR-alapú, a Spread 'kereskedhető?' zöld/piros jelzéséhez). A DRÁGA
+        indikátor-úttól FÜGGETLENÜL fut — így optimalizálás alatt sem tűnik el a Vált.%
+        és a kereskedhető-spread. Ritkán (throttle), mert lassan változnak."""
+        ds = self.dashboard_ref.get(symbol)
+        if ds is None:
+            return
+        import time as _t
+        if _t.time() - getattr(ds, "_extras_ts", 0.0) < 15.0:
+            return
+        ds._extras_ts = _t.time()
+        try:
+            import MetaTrader5 as _mt5
+            import pandas as _pd
+            from core.mt5_connector import MT5_LOCK
+            from core.indicator_engine import atr as _atr
+        except Exception:
+            return
+        prm = self._light_params(symbol)
+        atr_period = int(prm.get("atr_period", 14))
+        with MT5_LOCK:
+            _mt5.symbol_select(symbol, True)
+            d1  = _mt5.copy_rates_from_pos(symbol, _mt5.TIMEFRAME_D1, 0, 1)
+            m15 = _mt5.copy_rates_from_pos(symbol, _mt5.TIMEFRAME_M15, 0, atr_period + 6)
+        # Napi nyitóár → Vált.% (a legfrissebb bid-del arányosítva)
+        if d1 is not None and len(d1):
+            ds.day_open = float(d1[-1]["open"])
+            ref = ds.bid if ds.bid is not None else ds.ask
+            if ref is not None and ds.day_open:
+                ds.change_pct = (ref - ds.day_open) / ds.day_open * 100.0
+        # Max spread (ATR × ratio, min-padlóval) → a Spread cella zöld/piros jelzése
+        point = getattr(ds, "point", None)
+        if m15 is not None and len(m15) > 2 and point:
+            try:
+                df = _pd.DataFrame(m15)
+                atr_val = _atr(df["high"], df["low"], df["close"], atr_period).iloc[-2]
+                if atr_val == atr_val:   # not NaN
+                    atr_pts  = int(atr_val / point)
+                    ratio    = float(prm.get("max_spread_atr_ratio", 0.20))
+                    pair_pip = float(self.cfg["pairs"].get(symbol, {}).get(
+                                     "pip_size", point * 10))
+                    pip_to_pt = max(1, round(pair_pip / point))
+                    min_pts  = max(1, int(float(prm.get("min_spread_pips", 2.0)) * pip_to_pt))
+                    ds.max_spread_pts = max(min_pts, int(atr_pts * ratio))
+            except Exception:
+                pass
 
     # MT5 timeframe leképezés perc → konstans (lazán, futásidőben)
     @staticmethod
