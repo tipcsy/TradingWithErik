@@ -219,29 +219,33 @@ class PairRow:
         self.labels["symbol"].config(cursor="hand2")
         self.labels["symbol"].bind("<Button-1>", lambda e: on_name_click(symbol))
 
-        # Egy gomb a futtatáshoz (Play↔Stop morph) és egy az OPT-hoz (OPT↔STOP morph)
-        self.btn_run = tk.Button(self.frame, text="▶", width=3,
+        # Egy gomb a futtatáshoz (Play↔Stop morph) és egy az OPT-hoz (OPT↔STOP morph).
+        # A gombok egy KERETBEN ülnek → a keret tényleges pixel-szélessége adja a
+        # fejléc "Vezérlés" cellájának szélességét (pontos oszlop-igazítás).
+        self.ctrl_frame = tk.Frame(self.frame, bg=self._bg)
+        self.ctrl_frame.pack(side="left")
+        self.btn_run = tk.Button(self.ctrl_frame, text="▶", width=3,
                                  bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
                                  relief="flat", command=lambda: on_run(symbol))
         self.btn_run.pack(side="left", padx=1)
-        self.btn_risky = tk.Button(self.frame, text="R", width=2,
+        self.btn_risky = tk.Button(self.ctrl_frame, text="R", width=2,
                                    bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
                                    relief="flat", command=lambda: on_risky(symbol))
         self.btn_risky.pack(side="left", padx=1)
         # Vizualizáció ki/be az adott instrumentumhoz (MT5 chart-rajz)
-        self.btn_viz = tk.Button(self.frame, text="V", width=2,
+        self.btn_viz = tk.Button(self.ctrl_frame, text="V", width=2,
                                  bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
                                  relief="flat",
                                  command=(lambda: on_viz(symbol)) if on_viz else None)
         self.btn_viz.pack(side="left", padx=1)
-        self.btn_opt = tk.Button(self.frame, text="OPT", width=4,
+        self.btn_opt = tk.Button(self.ctrl_frame, text="OPT", width=4,
                                  bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
                                  relief="flat", command=lambda: on_opt(symbol))
         self.btn_opt.pack(side="left", padx=1)
         # JOBB-klikk az OPT-on → konkrét stratégia választása (több-stratégiás eset)
         if on_opt_menu is not None:
             self.btn_opt.bind("<Button-3>", lambda e: on_opt_menu(symbol, e))
-        self.btn_del = tk.Button(self.frame, text="✕", width=2,
+        self.btn_del = tk.Button(self.ctrl_frame, text="✕", width=2,
                                  bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
                                  relief="flat", command=lambda: on_delete(symbol))
         self.btn_del.pack(side="left", padx=(1, 4))
@@ -346,6 +350,7 @@ class PairRow:
         else:
             bg = self._bg
         self.frame.config(bg=bg)
+        self.ctrl_frame.config(bg=bg)
         for lbl in self.labels.values():
             lbl.config(bg=bg)
         for frame, circles in self.markers.values():
@@ -457,12 +462,22 @@ class HeaderRow:
         self.frame = tk.Frame(parent, bg=BG_HEADER)
         self.frame.pack(fill="x", padx=2, pady=(4, 0))
         self._lbls: list[tk.Label] = []
+        self._ctrl_hdr = None
         for i, col in enumerate(columns):
             # A Vezérlés fejléc az Opt státusz ELÉ kerül (a sorokban is a gombok
             # előzik meg a státuszt); az Opt státusz a maradék szélességet kapja.
+            # A Vezérlés cella fix PIXEL-szélességű keret: a sorok gombsorának
+            # tényleges szélességét a sync_ctrl_width() tükrözi rá (pontos igazítás).
             if col.key == "opt":
-                tk.Label(self.frame, text="Vezérlés", width=16,
-                         bg=BG_HEADER, fg=FG_BLUE, font=header_font).pack(side="left")
+                self._ctrl_hdr = tk.Frame(self.frame, bg=BG_HEADER)
+                _cl = tk.Label(self._ctrl_hdr, text="Vezérlés", anchor="w",
+                               bg=BG_HEADER, fg=FG_BLUE, font=header_font,
+                               padx=4, pady=3)
+                _cl.pack(fill="both", expand=True)
+                self._ctrl_hdr.config(width=_cl.winfo_reqwidth(),
+                                      height=_cl.winfo_reqheight())
+                self._ctrl_hdr.pack_propagate(False)
+                self._ctrl_hdr.pack(side="left")
             lbl = tk.Label(
                 self.frame, text=col.header, width=col.width, anchor=col.anchor,
                 bg=BG_HEADER, fg=FG_BLUE, font=header_font,
@@ -474,6 +489,12 @@ class HeaderRow:
                      expand=(col.key == "opt"))
             self._lbls.append(lbl)
         tk.Frame(parent, bg=FG_GRAY_DIM, height=1).pack(fill="x", padx=2)
+
+    def sync_ctrl_width(self, px: int):
+        """A Vezérlés fejléc-cella szélessége = a sorok gombsorának TÉNYLEGES
+        pixel-szélessége (a PairRow ctrl_frame <Configure>-je hívja)."""
+        if self._ctrl_hdr is not None and px > 1:
+            self._ctrl_hdr.config(width=px)
 
     def set_sort(self, col_idx: Optional[int], direction: int):
         for i, lbl in enumerate(self._lbls):
@@ -1991,6 +2012,7 @@ class DashboardWindow:
                 on_status_click=self._show_opt_log, on_viz=self._handle_viz,
                 on_marker_click=self._show_strategy_params,
                 on_opt_menu=self._handle_opt_menu)
+            self._bind_ctrl_width_sync(self.rows[symbol])
 
         self._apply_filter_sort()
 
@@ -2044,6 +2066,14 @@ class DashboardWindow:
             return self._sortable(ds.timeframe_remaining.get(col.timeframe_min, 0))
         cell = ds.strategy_cells.get(key)
         return self._sortable(cell[0] if cell else "—")
+
+    def _bind_ctrl_width_sync(self, row):
+        """A sor gombsor-keretének TÉNYLEGES pixel-szélességét a fejléc Vezérlés
+        cellájára tükrözi (fix karakter-szélesség helyett pontos igazítás).
+        Minden sor ugyanakkora gombsort kap, így bármelyik sor jó forrás."""
+        row.ctrl_frame.bind(
+            "<Configure>",
+            lambda e: self._header_row.sync_ctrl_width(e.width))
 
     def _apply_filter_sort(self):
         search = self._search_var.get().upper().strip() if hasattr(self, "_search_var") else ""
@@ -2226,6 +2256,7 @@ class DashboardWindow:
             on_status_click=self._show_opt_log, on_viz=self._handle_viz,
             on_marker_click=self._show_strategy_params,
             on_opt_menu=self._handle_opt_menu)
+        self._bind_ctrl_width_sync(self.rows[symbol])
         self._apply_filter_sort()
 
     # ── JSON szintaxis-színezés (Text widgethez) ─────────────────────────
