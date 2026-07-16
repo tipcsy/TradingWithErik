@@ -29,8 +29,11 @@ PRESET_HALVING = "halving"   # Felező: 50% zár 1R-nél
 PRESET_SHIELD  = "shield"    # Pajzs: 75% zár 1R-nél
 PRESET_FIBO    = "fibo"      # Fibo: stop-húzás a belépő→TP táv 61,8%-ánál (nincs zárás)
 PRESET_THIRDS  = "thirds"    # Harmados (1/3–2/3): R-alapú stop-létra (nincs zárás)
+# Pajzs↔Fibo auto (tananyag 3. pont): alaphelyzetben PAJZS; NAGY mozgásnál
+# (ATR >> átlag a belépéskor) FIBO — hagyjuk futni, később húzunk stopot.
+PRESET_SHIELD_FIBO = "shield_fibo"
 PRESETS = (PRESET_OFF, PRESET_RISKY, PRESET_HALVING, PRESET_SHIELD, PRESET_FIBO,
-           PRESET_THIRDS)
+           PRESET_THIRDS, PRESET_SHIELD_FIBO)
 
 # ── runner-stop (2b tengely) ────────────────────────────────────────────────
 RUNNER_KEEP      = "keep"        # marad a TÁVOLI (eredeti) stop — a videó Pajzsa
@@ -62,6 +65,9 @@ def default_config() -> dict:
         # 2. lépcső: az ár a célárnál → stop a 2/3-ra (hard TP-nél ritkán él —
         # akkor számít, ha a TP-t kézzel kivetted/kitoltad).
         "thirds_base_R":    1.0,
+        # Pajzs↔Fibo auto: e szorzó FÖLÖTT számít „nagy mozgásnak" a piac
+        # (belépéskori ATR > big_move_atr_mult × ATR-átlag) → Fibo; alatta Pajzs.
+        "big_move_atr_mult": 2.0,
         # Cost-cut (tananyag 2.6): IDŐ-STOP, bármely presettel kombinálható.
         # Ha a nyitás után cost_cut_bars fő-timeframe gyertyával a pozíció még
         # VESZTESÉGES → piaci áron zárjuk (a kanóc/zaj korai levágása töredék-R
@@ -104,6 +110,15 @@ def fibo_levels(open_price: float, tp_price: float, cfg: dict) -> tuple[float, f
     lvl  = float(cfg.get("fibo_level", 0.618))
     slvl = float(cfg.get("fibo_stop_level", 0.0))
     return (open_price + dist * lvl, open_price + dist * slvl)
+
+
+def big_move(atr_now: float, atr_avg: float, cfg: dict) -> bool:
+    """Pajzs↔Fibo auto: „nagy mozgás"-e a piac a belépéskor? (ATR a szokásos
+    átlag big_move_atr_mult-szorosa fölött.) Érvénytelen inputnál False (→ Pajzs,
+    a konzervatív alaphelyzet)."""
+    if not atr_now or not atr_avg or atr_avg <= 0:
+        return False
+    return atr_now > float(cfg.get("big_move_atr_mult", 2.0)) * atr_avg
 
 
 def thirds_levels(open_price: float, risk_dist: float, is_buy: bool,
@@ -179,6 +194,10 @@ def plan_at_trigger(preset: str, cfg: dict, cur_lot: float, min_lot: float,
         # A Harmados sem zár részlegesen — a motor a thirds_levels() szerinti
         # stop-létrával kezeli (ez az ág csak védelem).
         return Plan(0.0, RUNNER_KEEP, PRESET_THIRDS)
+    if preset == PRESET_SHIELD_FIBO:
+        # A Pajzs↔Fibo autót a motor belépéskor HATÁSOS presetre oldja fel
+        # (shield vagy fibo) — ide már nem juthat el; védelemként Pajzsként kezeljük.
+        preset = PRESET_SHIELD
 
     frac = target_fraction(preset, cfg)
     closed = closable_lot(cur_lot, frac, min_lot, lot_step)

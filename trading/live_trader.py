@@ -760,6 +760,8 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
     #     (0 = BE); nincs részleges zárás, nincs trailing (a stop ott marad).
     #   • thirds : Harmados (1/3–2/3) — az alap-táv (thirds_base_R×R) megtételekor
     #     a stop az 1/3-ra, a célár érintésekor a 2/3-ra; nincs zárás/trailing.
+    #   • shield_fibo : Pajzs↔Fibo auto — pozíciónként dől el (nagy mozgásnál
+    #     Fibo, különben Pajzs; ATR vs átlag, big_move_atr_mult).
     from core import rr_state, risk_reduction as _rr
     _spec    = rr_state.spec_for(symbol)
     _preset  = _spec.get("preset", _rr.PRESET_OFF)
@@ -930,6 +932,18 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
     _cc_secs = (int(_spec.get("cost_cut_bars", 12))
                 * strategy.timeframes()[0].minutes * 60)
 
+    # Pajzs↔Fibo auto: „nagy mozgás"-e MOST a piac? A generikus (keretrendszer-
+    # szintű) ATR-ből (ugyanaz, mint a spread-kapué): aktuális ATR vs a betöltött
+    # ablak átlaga. A döntés pozíciónként EGYSZER születik (első kezeléskor,
+    # a nyitáshoz közel) és a pstate-ben cache-elődik.
+    _big_move_now = False
+    if _preset == _rr.PRESET_SHIELD_FIBO:
+        try:
+            _atr_avg_now = float(atr_ser.iloc[-100:].mean())
+            _big_move_now = _rr.big_move(atr_val, _atr_avg_now, _spec)
+        except Exception:
+            _big_move_now = False
+
     for pos in symbol_positions:
         ticket = pos.ticket
         pnl    = pos.profit
@@ -967,9 +981,27 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
             slot_mgr.set_risk_free(ticket)
             is_rf = True
 
-        _is_partial = _preset in (_rr.PRESET_HALVING, _rr.PRESET_SHIELD)
-        _is_fibo    = _preset == _rr.PRESET_FIBO
-        _is_thirds  = _preset == _rr.PRESET_THIRDS
+        # Pajzs↔Fibo auto: a HATÁSOS preset pozíciónként dől el (első kezeléskor,
+        # a nyitás pillanatához közel) és a pstate-ben cache-elt. Restart után:
+        # ha már volt részleges zárás (history), az Pajzs volt → azt visszük tovább.
+        _p_eff = _preset
+        if _preset == _rr.PRESET_SHIELD_FIBO:
+            _m = pstate.get("sf_mode")
+            if _m not in (_rr.PRESET_SHIELD, _rr.PRESET_FIBO):
+                try:
+                    _m = (_rr.PRESET_SHIELD if mt5_connector.has_partial_close(ticket)
+                          else (_rr.PRESET_FIBO if _big_move_now else _rr.PRESET_SHIELD))
+                except Exception:
+                    _m = _rr.PRESET_FIBO if _big_move_now else _rr.PRESET_SHIELD
+                pstate["sf_mode"] = _m
+                log.info("⇄ %s #%d — Pajzs↔Fibo auto: %s (nagy mozgás: %s)",
+                         symbol, ticket, "Fibo" if _m == _rr.PRESET_FIBO else "Pajzs",
+                         "igen" if _big_move_now else "nem")
+            _p_eff = _m
+
+        _is_partial = _p_eff in (_rr.PRESET_HALVING, _rr.PRESET_SHIELD)
+        _is_fibo    = _p_eff == _rr.PRESET_FIBO
+        _is_thirds  = _p_eff == _rr.PRESET_THIRDS
 
         # Restart-védelem: ha a bot újraindult egy MÁR részlegesen zárt (Felező/
         # Pajzs) pozíció közben, a pstate elveszett → az MT5 history-ból derítsük ki,
@@ -991,7 +1023,7 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
                            if pos.type == mt5.ORDER_TYPE_BUY
                            else pos.price_current <= pos.price_open - one_r)
                 if one_r > 0 and reached:
-                    _plan = _rr.plan_at_trigger(_preset, _spec, pos.volume, _minlot, _lotstep)
+                    _plan = _rr.plan_at_trigger(_p_eff, _spec, pos.volume, _minlot, _lotstep)
                     if _plan.close_lot > 0.0 and mt5_connector.close_position_partial(
                             ticket, _plan.close_lot):
                         pstate["rr_reduced"]  = True

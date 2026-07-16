@@ -70,6 +70,7 @@ class Trade:
     reduced: bool = False       # megtörtént-e a részleges zárás (1R-nél, egyszer)
     runner_mode: str = "keep"   # a maradék stopja: keep|breakeven|trailing
     rr_technique: str = ""      # a ténylegesen alkalmazott technika (log/CSV)
+    rr_preset_eff: str = ""     # Pajzs↔Fibo auto: a belépéskor eldöntött hatásos preset
     # ── Pozícióépítés (AUTO) — több „láb" (ráépítés) egy átlagárral ──
     legs: list = field(default_factory=list)   # [(price, lot), …]; üres → egyleges
     build_ref: float = 0.0      # a következő ráépítés referencia-záróára
@@ -255,6 +256,10 @@ def _manage_position(trade: "Trade", high: float, low: float, params: dict,
     részleges zárás a beszálló és a stop KÖZÖTTI mozgásnál történik, 1R-nél."""
     from core import risk_reduction as _rrm
     preset = rr.get("preset", _rrm.PRESET_OFF)
+    if preset == _rrm.PRESET_SHIELD_FIBO:
+        # Pajzs↔Fibo auto: a belépéskor eldöntött hatásos preset (a Trade-en
+        # tárolva) — nagy mozgásnál fibo, különben shield.
+        preset = trade.rr_preset_eff or _rrm.PRESET_SHIELD
 
     # off / risky → a régi stop-menedzsment (BITAZONOS a korábbival)
     if preset == _rrm.PRESET_OFF:
@@ -348,6 +353,31 @@ def _manage_position(trade: "Trade", high: float, low: float, params: dict,
             trade.risk_free = True
             _update_stops(trade, high, low, params, pip_size, risky=False)
         # RUNNER_KEEP → a stop marad az EREDETI (távol) helyén — a videó Pajzsa
+
+
+def _build_bigmove_evaluator(m15: pd.DataFrame, rr_spec: dict):
+    """Pajzs↔Fibo auto: „nagy mozgás"-e a piac az i-edik M15 gyertyán?
+
+    Visszaad egy `fn(i) -> bool`-t, vagy None-t, ha a preset nem shield_fibo.
+    KERETRENDSZER-szintű, generikus ATR (mint a live spread-kapué, NEM a
+    stratégia indikátora): ATR(14) vs a 100-gyertyás gördülő átlaga — az arány
+    a spec `big_move_atr_mult` (alap 2.0) fölött = nagy mozgás → Fibo."""
+    from core import risk_reduction as _rrm
+    if rr_spec.get("preset") != _rrm.PRESET_SHIELD_FIBO:
+        return None
+    from core.indicator_engine import atr as _atrf
+    a  = _atrf(m15["high"], m15["low"], m15["close"], 14)
+    av = a.rolling(100, min_periods=20).mean()
+    an, avn = a.to_numpy(), av.to_numpy()
+    mult = float(rr_spec.get("big_move_atr_mult", 2.0))
+    def _at(i):
+        if i < 0 or i >= len(an):
+            return False
+        x, y = an[i], avn[i]
+        if np.isnan(x) or np.isnan(y) or y <= 0:
+            return False
+        return bool(x > mult * y)
+    return _at
 
 
 def _build_exit_evaluator(m15: pd.DataFrame, rr_spec: dict):
@@ -485,6 +515,7 @@ def run_pair(
     m15_times = m15.index.to_list()
     m15_ptr = 0  # melyik M15 gyertya az aktuális
     _exit_at = _build_exit_evaluator(m15, rr_spec)   # kiszállási-jel (None, ha nincs)
+    _bigmove_at = _build_bigmove_evaluator(m15, rr_spec)  # Pajzs↔Fibo auto (None, ha nem az)
     # Cost-cut (idő-stop, tananyag 2.6): a nyitás után N fő-tf gyertyával még
     # VESZTESÉGES trade-et piaci áron zárjuk (kanóc/zaj korai levágása töredék-R
     # veszteséggel). Bármely presettel kombinálható; default KI.
@@ -729,6 +760,11 @@ def run_pair(
                     )
                     trade.legs = [(open_price, lot)]     # 1. láb; a build a listát bővíti
                     trade.build_ref = open_price         # az első ráépítés innen figyel
+                    if _bigmove_at is not None:
+                        # Pajzs↔Fibo auto: BELÉPÉSKOR dől el — nagy mozgásnál Fibo
+                        # (hagyjuk futni, később stop), különben Pajzs (alaphelyzet).
+                        trade.rr_preset_eff = (_rrm.PRESET_FIBO if _bigmove_at(m15_ptr)
+                                               else _rrm.PRESET_SHIELD)
                     open_trades.append(trade)
 
         prev_m1_row = m1_row
@@ -1057,6 +1093,9 @@ def run_portfolio_backtest(
             log.warning("Portfolio BT: %s — túl kevés adat a megadott időszakban.", sym)
             continue
 
+        # A kockázatcsökkentő spec: globális rr (mind a párra), különben a
+        # per-pár választott preset (rr_state) + gyenge-minősítés auto-risky.
+        _rr_pair = rr if rr else _pair_auto_rr(sym, pair_risky.get(sym, False))
         pair_data[sym] = {
             "m15":       m15,
             "m1":        m1,
@@ -1065,13 +1104,12 @@ def run_portfolio_backtest(
             "params":    params,
             "pair_cfg":  cfg["pairs"][sym],
             "risky":     pair_risky.get(sym, False),
-            # A kockázatcsökkentő spec: globális rr (mind a párra), különben a
-            # per-pár választott preset (rr_state) + gyenge-minősítés auto-risky.
-            "rr":        rr if rr else _pair_auto_rr(sym, pair_risky.get(sym, False)),
+            "rr":        _rr_pair,
             # Kiszállási-jel kiértékelő (None, ha a runner != exit) — a runner
             # zárásához, ugyanaz a logika, mint a run_pair-ben és az élő motorban.
-            "exit_at":   _build_exit_evaluator(
-                             m15, rr if rr else _pair_auto_rr(sym, pair_risky.get(sym, False))),
+            "exit_at":   _build_exit_evaluator(m15, _rr_pair),
+            # Pajzs↔Fibo auto kiértékelő (None, ha a preset nem shield_fibo).
+            "bigmove_at": _build_bigmove_evaluator(m15, _rr_pair),
             "state":     strategy.bt_new_state(sym),
             "prev_row":  None,
         }
@@ -1287,6 +1325,11 @@ def run_portfolio_backtest(
                                 risk_usd=risk_usd,
                                 risk_pct=risk_usd / balance * 100 if balance > 0 else 0,
                             )
+                            if info.get("bigmove_at") is not None:
+                                # Pajzs↔Fibo auto: belépéskor dől el (nagy mozgás → Fibo)
+                                trade.rr_preset_eff = (
+                                    _rrm.PRESET_FIBO if info["bigmove_at"](ptr)
+                                    else _rrm.PRESET_SHIELD)
                             open_trades[sym] = trade
                             occupied += 1
 

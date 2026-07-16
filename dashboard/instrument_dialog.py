@@ -375,7 +375,9 @@ class InstrumentParamsDialog:
                             "Fibo = a belépő→TP táv 61,8%-ánál a stop BE-re (nincs zárás, "
                             "nincs trailing — a stop ott marad, a TP fut). "
                             "Harmados = 1/3–2/3: az alap-táv (1R) megtételekor a stop az "
-                            "1/3-ra (profitban), célárnál a 2/3-ra.")
+                            "1/3-ra (profitban), célárnál a 2/3-ra. "
+                            "Pajzs↔Fibo = auto: nagy mozgásnál (ATR >> átlag) Fibo, "
+                            "különben Pajzs — belépéskor dől el.")
 
         # Óvatos méret — Ki-nél elrejtve; Riskynél alapból pipa (de átállítható)
         _c0 = _rrs.get_cautious(self.symbol)
@@ -1120,8 +1122,9 @@ class InstrumentParamsDialog:
         # Óvatos: Ki-nél elrejtve
         (self._cautious_cb.grid_remove if preset == _rr.PRESET_OFF
          else self._cautious_cb.grid)()
-        # Runner: csak Felező/Pajzs
-        partial = preset in (_rr.PRESET_HALVING, _rr.PRESET_SHIELD)
+        # Runner: csak Felező/Pajzs (+ Pajzs↔Fibo auto, mert Pajzsra oldódhat)
+        partial = preset in (_rr.PRESET_HALVING, _rr.PRESET_SHIELD,
+                             _rr.PRESET_SHIELD_FIBO)
         (self._runner_frame.grid if partial else self._runner_frame.grid_remove)()
         # Exit: csak Felező/Pajzs + Runner=Kiszállási jel
         runner = self._runner_from_name(self._runner_name.get())

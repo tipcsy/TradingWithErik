@@ -300,7 +300,8 @@ class BacktestDialog:
         _attach_tooltip(om, "Ki = alap kezelés (BE + trailing). Risky = felezett méret + "
                             "azonnali BE 1R-nél. Felező/Pajzs = 1R-nél 50%/75% zárás + runner. "
                             "Fibo = a belépő→TP táv 61,8%-ánál a stop BE-re (nincs zárás/trailing). "
-                            "Harmados = 1/3–2/3: az alap-táv (1R) után stop az 1/3-ra, célárnál a 2/3-ra.")
+                            "Harmados = 1/3–2/3: az alap-táv (1R) után stop az 1/3-ra, célárnál a 2/3-ra. "
+                            "Pajzs↔Fibo = auto: nagy mozgásnál Fibo, különben Pajzs (belépéskor dől el).")
 
         self._cautious_var = tk.BooleanVar(value=self._init_cautious)
         self._cautious_cb = tk.Checkbutton(
@@ -538,7 +539,8 @@ class BacktestDialog:
         preset = self._preset_from_name(self._rr_name.get())
         (self._cautious_cb.grid_remove if preset == _rrx.PRESET_OFF
          else self._cautious_cb.grid)()
-        partial = preset in (_rrx.PRESET_HALVING, _rrx.PRESET_SHIELD)
+        partial = preset in (_rrx.PRESET_HALVING, _rrx.PRESET_SHIELD,
+                             _rrx.PRESET_SHIELD_FIBO)
         (self._runner_frame.grid if partial else self._runner_frame.grid_remove)()
         runner = self._runner_from_name(self._runner_name.get())
         show_exit = partial and runner == _rrx.RUNNER_EXIT
