@@ -837,11 +837,19 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         state.daily_date = today
         state.daily_pnl  = 0.0
 
-    # Napi limit
-    daily_limit = balance * trading_cfg["daily_loss_limit_pct"]
-    if state.daily_pnl <= -daily_limit:
-        log.debug("%s — napi veszteség limit elérve, kihagyva.", symbol)
-        return
+    # Napi limit — MT5 HISTORY-alapú realizált napi P&L (számla-szintű), NEM a
+    # session-lokális state.daily_pnl (az újraindítás után nullázódott, így a
+    # kapu „elfelejtette" a veszteséget: a fejléc STOP-ot mutatott, de a motor
+    # tovább kereskedett). Az érték a felületről állítható (daily_loss_limit_usd,
+    # ha nincs → daily_loss_limit_pct × egyenleg). FONTOS: a limit CSAK az ÚJ
+    # belépőt tiltja — a nyitott pozíciók kezelése (BE/trailing/részleges zárás/
+    # exit/cost-cut) limit fölött is fut tovább (korábban a korai return azt is
+    # leállította volna).
+    from trading.backtest import daily_limit_usd as _dlim
+    daily_limit = _dlim(trading_cfg, balance)
+    _real_daily = mt5_connector.daily_pnl_cached()
+    _day_pnl = _real_daily if _real_daily is not None else state.daily_pnl
+    daily_limit_hit = (_day_pnl <= -daily_limit)
 
     # --- Piaci adat a stratégia időkereteire ---
     # Az ELSŐ bemelegítéskor MÉLY ablakot töltünk (signal_warmup_bars — a jelzés-
@@ -1306,14 +1314,16 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
     # pillanatnyi (az adott M1 átütés gyertyáján), ezért ez ritkán logol.
     if signal != "NONE":
         _block = ("már van nyitott pozíció ezen a páron" if already_open else
+                  f"napi veszteség-limit elérve ({_day_pnl:+.2f}$ ≤ -{daily_limit:.0f}$)"
+                  if daily_limit_hit else
                   "nincs érvényes ATR (adathiány)" if atr_val is None else
                   "nincs szabad slot" if not slot_mgr.can_open() else
                   "spread túl nagy (piac-kapu)" if not spread_ok else None)
         if _block:
             log.info("⏭ %s %s jel — belépő KIHAGYVA: %s", symbol, signal, _block)
 
-    if (signal != "NONE" and not already_open and atr_val is not None
-            and slot_mgr.can_open() and spread_ok):
+    if (signal != "NONE" and not already_open and not daily_limit_hit
+            and atr_val is not None and slot_mgr.can_open() and spread_ok):
         # ── Korreláció / devizakitettség kapu ──────────────────────────────
         cmode    = correlation.get_mode()
         conflict = []

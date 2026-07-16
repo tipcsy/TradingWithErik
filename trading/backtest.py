@@ -233,6 +233,16 @@ def _update_stops(trade: "Trade", high: float, low: float, params: dict,
                     trade.sl = new_sl
 
 
+def daily_limit_usd(trading_cfg: dict, balance: float) -> float:
+    """A napi veszteség-limit ÉRTÉKE $-ban — EGY igazságforrás (live + backtest +
+    GUI). Az abszolút `daily_loss_limit_usd` nyer, ha > 0 (a felületről állítható);
+    különben a régi `daily_loss_limit_pct` × egyenleg."""
+    usd = float(trading_cfg.get("daily_loss_limit_usd", 0) or 0)
+    if usd > 0:
+        return usd
+    return balance * float(trading_cfg.get("daily_loss_limit_pct", 0.015))
+
+
 def _rr_spec(rr: "dict | None", risky: bool) -> dict:
     """A run_pair kockázatcsökkentő specje. rr=None → a régi viselkedés a `risky`
     flagből (preset off/risky), így a meglévő hívók BITAZONOSAK maradnak."""
@@ -583,7 +593,7 @@ def run_pair(
         # Napi veszteség limit ellenőrzés
         day_key = str(m1_time.date())
         daily_loss = daily_pnl.get(day_key, 0.0)
-        daily_limit = balance * trading_cfg["daily_loss_limit_pct"]
+        daily_limit = daily_limit_usd(trading_cfg, balance)
         if daily_loss <= -daily_limit:
             prev_m1_row = m1_row
             continue
@@ -1255,7 +1265,7 @@ def run_portfolio_backtest(
 
         # ── 3. Napi limit ellenőrzés (portfólió szinten) ──────────────────
         daily_loss  = daily_pnl.get(day_key, 0.0)
-        daily_limit = balance * trading_cfg["daily_loss_limit_pct"]
+        daily_limit = daily_limit_usd(trading_cfg, balance)
         if daily_loss <= -daily_limit:
             continue   # nap leállt, nem nyitunk új pozíciót
 

@@ -34,8 +34,10 @@
   "trading": {
     "_comment_risk": "Az összes nyitott slot EGYÜTTES kockázata (nem per-trade!). 0.01 = 1%",
     "account_risk_pct": 0.01,
-    "_comment_loss": "Ha a napi veszteség eléri ezt, aznap leáll a kereskedés",
+    "_comment_loss": "Ha a napi veszteség eléri ezt, aznap nincs ÚJ belépő (a nyitott pozíciók kezelése fut tovább)",
     "daily_loss_limit_pct": 0.015,
+    "_comment_loss_usd": "Abszolút napi limit $-ban (a felület ▼/▲ gombja állítja); ha > 0, ez nyer a pct fölött",
+    "daily_loss_limit_usd": 0,
     "_comment_slots": "Egyszerre max ennyi nyitott pozíció (összes pár együtt). AI optimalizálható: 2-8",
     "max_open_slots": 4,
     "_comment_session": "Globális nyitás/zárás UTC-ben. Páronként felülírható a pairs.sess_start/sess_end-del",

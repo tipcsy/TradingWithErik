@@ -123,6 +123,27 @@ def daily_pnl() -> Optional[float]:
         return None
 
 
+# A daily_pnl TTL-cache-e a live NAPI-LIMIT kapujához: a process_pair páronként
+# másodpercenként fut, a history-lekérés viszont drága → 15 mp-ig a cache-elt
+# értéket adjuk. Hiba/lekapcsolódás esetén a legutóbbi ismert érték él tovább
+# (konzervatív: a limit-kapu nem "felejti el" a veszteséget egy hibás lekérésen).
+_daily_pnl_cache = {"t": 0.0, "v": None}
+
+
+def daily_pnl_cached(ttl: float = 15.0) -> Optional[float]:
+    """A mai realizált P&L (daily_pnl) TTL-cache-elt változata a live kapuhoz."""
+    import time as _t
+    now = _t.time()
+    if _daily_pnl_cache["v"] is not None and now - _daily_pnl_cache["t"] < ttl:
+        return _daily_pnl_cache["v"]
+    v = daily_pnl()
+    if v is not None:
+        _daily_pnl_cache["t"] = now
+        _daily_pnl_cache["v"] = v
+        return v
+    return _daily_pnl_cache["v"]
+
+
 def _pos_risk_free(p) -> bool:
     """Kockázatmentes-e a pozíció: az SL már a belépőn TÚL van a profit irányában.
     Ugyanaz az elv, mint a SlotManager induló helyreállításánál — így a kijelzés és
