@@ -50,7 +50,7 @@ log = logging.getLogger(__name__)
 # importok változatlanul működjenek. A tárolás elrendezését lásd ott.
 from core.params_store import (            # noqa: E402  (re-export)
     PARAMS_DIR, set_active_strategy, active_strategy, strategy_dir,
-    params_file, trials_file, study_db, done_marker, migrate_flat_layout,
+    params_file, trials_file, study_db, done_marker, stop_marker, migrate_flat_layout,
 )
 
 
@@ -535,6 +535,10 @@ def optimize_pair_optuna(
         # bármikor újraépíthető belőle.
         if (trial.number + 1) % 10 == 0:
             _dump_csv(study)
+        # Leállítás-kérés (GUI STOP gomb → stop-marker): trial-határon állunk le.
+        # A kezelést (státusz, takarítás) az optimize_symbol közös útja végzi.
+        if stop_marker(symbol, strategy.name).exists():
+            study.stop()
 
     # Folytatás-szemantika:
     #   • előző futás BEFEJEZŐDÖTT (marker fájl van) → FRISS optimalizálás
@@ -666,6 +670,11 @@ def optimize_pair(
     all_rows: list[dict] = []   # minden kombináció eredménye → CSV export
 
     for i, params in enumerate(params_list):
+        # Leállítás-kérés (GUI STOP gomb → stop-marker): kombináció-határon le.
+        if stop_marker(symbol, strategy.name).exists():
+            log.info("  %s — leállítás-kérés, a keresés megszakítva (%d/%d).",
+                     symbol, i, len(params_list))
+            break
         try:
             result = run_pair(
                 symbol, df_m15, df_m1,
@@ -828,6 +837,8 @@ def optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance, progress=None,
         test_start = _fb.strftime("%Y-%m-%d")
 
     # ── Method-dispatch (EGY helyen) ─────────────────────────────────────────
+    # (A stop-marker takarítása a KÉRÉSKOR történik — request_optimize / CLI —,
+    # itt nem törlünk: az adat-előkészítés alatt kért STOP-nak is élnie kell.)
     if callable(getattr(strategy, "fit", None)):
         # Tanítható stratégia (pl. ml_ai): az „optimalizálás" = MODELL-TANÍTÁS.
         # A fit a teljes előzményből tanít a test_start ELŐTTI adaton, menti a
@@ -836,11 +847,14 @@ def optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance, progress=None,
         log.info("  Tanítható stratégia (%s) → modell-tanítás...", strategy.name)
         done_flag = done_marker(symbol, strategy.name)
         done_flag.unlink(missing_ok=True)          # friss futás — friss marker
-        result = strategy.fit(symbol, df_m15_full, cfg, pair_cfg,
-                              test_start=test_start, progress_callback=progress)
-        if result is None or "error" in (result or {}):
-            return result or {"error": "a tanítás nem adott eredményt"}
-        done_flag.touch()                          # 'Utolsó opt:' címke + állapot
+        try:
+            result = strategy.fit(symbol, df_m15_full, cfg, pair_cfg,
+                                  test_start=test_start, progress_callback=progress)
+        except RuntimeError as ex:                 # tanítás megszakítva (stop marker)
+            log.info("  %s — tanítás megszakítva: %s", symbol, ex)
+            result = None
+        if result is not None and "error" not in result:
+            done_flag.touch()                      # 'Utolsó opt:' címke + állapot
     elif method == "optuna" and _OPTUNA_AVAILABLE:
         log.info("  Optuna Bayesian optimalizálás (%d trial, walk-forward)...", max_trials)
         result = optimize_pair_optuna(
@@ -864,6 +878,28 @@ def optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance, progress=None,
         result = optimize_pair(symbol, df_m15, df_m1, params_list, pair_cfg,
                                trading_cfg, initial_balance, test_start, strategy,
                                progress_callback=progress)
+
+    # ── Leállítás-kérés (GUI STOP): a futás eredményét ELDOBJUK ─────────────
+    # A user-cancel nem hiba és nem „megszakadt futás": a meglévő mentett
+    # paraméterek érintetlenek maradnak, és az induláskori auto-folytatás sem
+    # veszi fel újra (a study lezárva/törölve).
+    _stop_p = stop_marker(symbol, strategy.name)
+    if _stop_p.exists():
+        _stop_p.unlink(missing_ok=True)
+        try:
+            import gc
+            gc.collect()                      # SQLite-kapcsolat elengedése (Windows-zár)
+            study_db(symbol, strategy.name).unlink(missing_ok=True)
+        except Exception:
+            # Ha a .db zárolt, a done-marker akadályozza az auto-folytatást;
+            # a KÖVETKEZŐ Opt friss study-val indul (done+db → reset).
+            try:
+                done_marker(symbol, strategy.name).touch()
+            except Exception:
+                pass
+        log.info("  %s — optimalizálás MEGSZAKÍTVA (user stop), eredmény eldobva.",
+                 symbol)
+        return {"error": "megszakítva", "stopped": True}
 
     if result is None:
         return {"error": "nincs eredmény"}
@@ -940,6 +976,8 @@ def run_optimizer(cfg: dict, symbols: Optional[list[str]] = None):
         log.info("─" * 60)
         log.info("▶  %s optimalizálása...", symbol)
         t0 = time.time()
+        # Elavult (GUI-s) leállítás-marker törlése — a CLI-futást ne szakítsa meg.
+        stop_marker(symbol, _sn).unlink(missing_ok=True)
 
         df_m15, df_m1 = load_data(symbol)
         if df_m15 is None:

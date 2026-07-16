@@ -399,11 +399,9 @@ class PairRow:
             txt, col = _fixed_cell("opt", ds, opt_status, inst_state)
             self.labels["opt"].config(text=txt, fg=sem_color(col))
             self._morph_btn(self.btn_run, "▶", False, BTN_PLAY_BG, BTN_PLAY_FG)
-            # QUEUED → STOP (sorból törlés); OPTIMIZING (fut) → nem szakítható meg
-            if inst_state == "QUEUED":
-                self._morph_btn(self.btn_opt, "STOP", True, BTN_STOP_BG, BTN_STOP_FG)
-            else:
-                self._morph_btn(self.btn_opt, "…", False, BTN_OPT_BG, BTN_OPT_FG)
+            # QUEUED → STOP (sorból törlés); OPTIMIZING (fut) → STOP (leállítás-
+            # kérés: a szubprocessz trial-/lépés-határon áll le, eredmény eldobva).
+            self._morph_btn(self.btn_opt, "STOP", True, BTN_STOP_BG, BTN_STOP_FG)
             self._morph_btn(self.btn_del, "✕", False, BG_INACTIVE, FG_RED)
             return
 
@@ -625,6 +623,13 @@ class OptimizerController:
             job = (symbol, strategy)
             if job in self._running or job in self._queue:
                 return                       # ezt a stratégiát már kérték
+            # Elavult leállítás-marker törlése: MOST kértek friss futást — egy
+            # korábbi (már lezárt futás után maradt) STOP ne szakítsa meg azonnal.
+            try:
+                from core.params_store import stop_marker
+                stop_marker(symbol, strategy).unlink(missing_ok=True)
+            except Exception:
+                pass
             symbol_running = any(s == symbol for s, _ in self._running)
             if len(self._running) < self.max_parallel and not symbol_running:
                 self._start(job)
@@ -638,13 +643,29 @@ class OptimizerController:
 
     def cancel_queued(self, symbol: str):
         """Sorban álló (QUEUED) optimalizálás visszavonása (a szimbólum összes
-        sorban álló tétele). A MÁR FUTÓ nem szakítható meg — azt az időtúllépés-
-        védelem zárja le, ha elakad."""
+        sorban álló tétele)."""
         with self._lock:
             self._queue = [(s, st) for (s, st) in self._queue if s != symbol]
             if not self._symbol_busy(symbol):
                 self.instrument_state[symbol] = "STOPPED"
                 self.optimizer_status[symbol] = ""
+
+    def request_stop(self, symbol: str):
+        """FUTÓ optimalizálás/tanítás leállítás-kérése + a szimbólum sorban álló
+        tételeinek törlése. A stop-marker fájlt a szubprocessz trial-/lépés-
+        határon észleli (optuna: study.stop) → az eredmény ELDOBVA, a korábban
+        mentett paraméterek érintetlenek, nincs auto-folytatás."""
+        from core.params_store import stop_marker
+        with self._lock:
+            running = [j for j in self._running if j[0] == symbol]
+        for s, strat in running:
+            try:
+                stop_marker(s, strat).touch()
+            except Exception:
+                pass
+        self.cancel_queued(symbol)          # a sorban állók is törölve
+        if running:
+            self.optimizer_status[symbol] = "Leállítás kérve..."
 
     def resume_unfinished(self):
         """INDÍTÁSKOR: a fájlrendszerben talált BEFEJEZETLEN study-k (van `_study.db`,
@@ -760,6 +781,10 @@ class OptimizerController:
                 entry = optimize_job(*args, _LocalProgress(self.optimizer_status), strategy)
 
             if "error" in entry:
+                if entry.get("stopped"):
+                    # User-cancel (STOP gomb) — nem hiba: rövid státusz, nincs log.
+                    self.optimizer_status[symbol] = "Megszakítva ✋"
+                    return
                 self.optimizer_status[symbol] = f"Hiba: {entry['error']}"
                 self._log_error(
                     symbol, entry.get("traceback") or f"eredmény hiba: {entry['error']}")
@@ -2646,6 +2671,10 @@ class DashboardWindow:
                 self._opt_ctrl.request_optimize(symbol, sn)
         elif st == "QUEUED":
             self._opt_ctrl.cancel_queued(symbol)
+        elif st == "OPTIMIZING":
+            # FUTÓ optimalizálás/tanítás leállítása (stop-marker → trial-határon
+            # áll le; az eredmény eldobva, a mentett paraméterek érintetlenek).
+            self._opt_ctrl.request_stop(symbol)
         else:
             return
         self._refresh_row(symbol)

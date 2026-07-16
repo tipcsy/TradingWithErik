@@ -68,6 +68,13 @@ def done_marker(symbol: str, strategy: str | None = None) -> Path:
     return strategy_dir(strategy) / f"{symbol}_study.done"
 
 
+def stop_marker(symbol: str, strategy: str | None = None) -> Path:
+    """Leállítás-kérés marker: a GUI hozza létre, a futó optimalizáló/tanító
+    szubprocessz trial-/lépés-határon észleli és kilép (user-cancel). A futás
+    lezárásakor törlődik."""
+    return strategy_dir(strategy) / f"{symbol}_study.stop"
+
+
 def hours_file(symbol: str, strategy: str | None = None) -> Path:
     """A kereskedési órák (trade_hours) STRATÉGIA-hatókörű tárolója.
 

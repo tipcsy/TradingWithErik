@@ -189,7 +189,10 @@ class MlAiState:
 # ---------------------------------------------------------------------------
 
 _CIRCLE = "●"
-_STAGES = (("model", "Modell"), ("sess", "Session"), ("sig", "Belépő jel"))
+# Az ML-belépőnek nincs többlépcsős állapotgépe (mint a wpr_sma 3 köre): a
+# releváns állapot a modell megléte és a jel. A session-kapu a jelbe van
+# beszámítva (session-en kívül nem születik jel).
+_STAGES = (("model", "Modell betöltve"), ("sig", "ML belépő jel"))
 _MARKS_EMPTY = {k: Cell(_CIRCLE, "muted") for k, _ in _STAGES}
 
 
@@ -268,9 +271,7 @@ class MlAiStrategy(Strategy):
             p_long, p_short = _predict_frame(tail, bundle)
             thr_l, thr_s = _thresholds(bundle)
             hour = int(closed.index[-1].hour)
-            sess = _sess_ok(hour, md.params)
             sig = _evaluate(p_long[-1], p_short[-1], thr_l, thr_s, hour, md.params)
-            cells["sess"] = _stage_bool(sess)
             cells["sig"] = _stage_signal(sig)
             cells["ml_proba"] = _proba_cell(p_long[-1], p_short[-1], thr_l, thr_s)
         except Exception as ex:
@@ -327,7 +328,6 @@ class MlAiStrategy(Strategy):
     def live_cells(self, state: MlAiState, md: MarketData) -> dict[str, Cell]:
         return {
             "model": _stage_bool(state.model_ok),
-            "sess":  _stage_bool(state.sess_ok),
             "sig":   _stage_signal(state.last_signal),
             "ml_proba": _proba_cell(state.p_long, state.p_short,
                                     state.thr_long, state.thr_short),

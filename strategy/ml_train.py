@@ -211,6 +211,14 @@ def train_symbol(symbol: str, df_m15: pd.DataFrame, cfg: dict, pair_cfg: dict,
 
     def _step(label: str = ""):
         nonlocal _done
+        # Leállítás-kérés (GUI STOP → stop-marker): lépés-határon szakítunk.
+        # A RuntimeError-t az optimizer fit-dispatch-e kezeli (user-cancel út).
+        try:
+            from core.params_store import stop_marker
+            if stop_marker(symbol, "ml_ai").exists():
+                raise RuntimeError(f"leállítás-kérés a(z) {label or _done}. lépésnél")
+        except ImportError:
+            pass
         _done += 1
         if progress_callback is not None:
             try:
