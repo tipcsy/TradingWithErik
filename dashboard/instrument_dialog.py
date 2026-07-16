@@ -373,7 +373,9 @@ class InstrumentParamsDialog:
                             "Risky = felezett méret + azonnali BE 1R-nél. "
                             "Felező/Pajzs = 1R-nél 50%/75% zárás + a maradék (runner) külön kezelése. "
                             "Fibo = a belépő→TP táv 61,8%-ánál a stop BE-re (nincs zárás, "
-                            "nincs trailing — a stop ott marad, a TP fut).")
+                            "nincs trailing — a stop ott marad, a TP fut). "
+                            "Harmados = 1/3–2/3: az alap-táv (1R) megtételekor a stop az "
+                            "1/3-ra (profitban), célárnál a 2/3-ra.")
 
         # Óvatos méret — Ki-nél elrejtve; Riskynél alapból pipa (de átállítható)
         _c0 = _rrs.get_cautious(self.symbol)
@@ -1276,7 +1278,7 @@ class InstrumentParamsDialog:
         # lbl_bt már csak a ténylegesen alkalmazott kockázati technikát mutatja.
         tech = (summary or {}).pop("_rr_tech", None) or {}
         _names = {"shield": "Pajzs", "halving": "Felező", "risky": "Risky",
-                  "fibo": "Fibo"}
+                  "fibo": "Fibo", "thirds": "Harmados"}
         tech_s = (", ".join(f"{_names.get(k, k)}×{v}" for k, v in tech.items())) if tech else ""
         self._bt_summary = summary or {"trades": 0}
         self._bt_from_saved = False   # ez valódi friss backtest

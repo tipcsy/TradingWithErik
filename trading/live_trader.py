@@ -758,6 +758,8 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
     #     kockázatmentes (a lezárt profit fedezi a runner max veszteségét).
     #   • fibo   : stop-húzás a belépő→TP táv 61,8%-ánál a fibo_stop_level szintre
     #     (0 = BE); nincs részleges zárás, nincs trailing (a stop ott marad).
+    #   • thirds : Harmados (1/3–2/3) — az alap-táv (thirds_base_R×R) megtételekor
+    #     a stop az 1/3-ra, a célár érintésekor a 2/3-ra; nincs zárás/trailing.
     from core import rr_state, risk_reduction as _rr
     _spec    = rr_state.spec_for(symbol)
     _preset  = _spec.get("preset", _rr.PRESET_OFF)
@@ -951,6 +953,7 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
 
         _is_partial = _preset in (_rr.PRESET_HALVING, _rr.PRESET_SHIELD)
         _is_fibo    = _preset == _rr.PRESET_FIBO
+        _is_thirds  = _preset == _rr.PRESET_THIRDS
 
         # Restart-védelem: ha a bot újraindult egy MÁR részlegesen zárt (Felező/
         # Pajzs) pozíció közben, a pstate elveszett → az MT5 history-ból derítsük ki,
@@ -1034,6 +1037,44 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
                                      "(trigger: a belépő→TP táv %.1f%%-a)",
                                      symbol, ticket, _new_stop,
                                      float(_spec.get("fibo_level", 0.618)) * 100)
+        elif _is_thirds:
+            # ── Harmados (1/3–2/3): R-alapú stop-létra, nincs zárás/trailing ──
+            # A kezdeti R-t a TP-ből származtatjuk (|TP-open| / tp_rr_ratio) →
+            # RESTART-BIZTOS (az eredeti SL a stop-húzás után elveszne). 1. lépcső:
+            # az alap-táv megtételekor stop az 1/3-ra (profitban → slot fel).
+            # 2. lépcső: a célár érintésekor a 2/3-ra (hard TP-nél ritkán él).
+            _ratio = float(params.get("tp_rr_ratio", 0) or 0)
+            _risk  = (abs(pos.tp - pos.price_open) / _ratio
+                      if (pos.tp and _ratio > 0)
+                      else abs(pos.price_open - pstate.get("original_sl", pos.sl)))
+            if _risk > 0:
+                _is_buy = pos.type == mt5.ORDER_TYPE_BUY
+                _trig, _stop1, _stop2 = _rr.thirds_levels(
+                    pos.price_open, _risk, _is_buy, _spec)
+                _digits = sym_info.digits if sym_info else 5
+                if not pstate.get("rr_thirds1"):
+                    _already = (pos.sl > 0 and
+                                (pos.sl >= _stop1 if _is_buy else pos.sl <= _stop1))
+                    _reached = (pos.price_current >= _trig if _is_buy
+                                else pos.price_current <= _trig)
+                    if _already or (_reached and
+                                    modify_sl(ticket, round(_stop1, _digits))):
+                        pstate["rr_thirds1"] = True
+                        slot_mgr.set_risk_free(ticket)   # a stop profitban → slot fel
+                        pstate["be_done"] = True
+                        if not _already:
+                            log.info("⅓ %s #%d — Harmados: stop a %.5f szintre "
+                                     "(az alap-táv 1/3-a bezárva)",
+                                     symbol, ticket, _stop1)
+                elif not pstate.get("rr_thirds2") and pos.tp:
+                    _reached2 = (pos.price_current >= pos.tp if _is_buy
+                                 else pos.price_current <= pos.tp)
+                    _better = (_stop2 > pos.sl if _is_buy else _stop2 < pos.sl)
+                    if _reached2 and _better and \
+                            modify_sl(ticket, round(_stop2, _digits)):
+                        pstate["rr_thirds2"] = True
+                        log.info("⅔ %s #%d — Harmados: célár érintve, stop a "
+                                 "%.5f szintre (2/3 bezárva)", symbol, ticket, _stop2)
         else:
             # ── off/risky: költség-tudatos breakeven (VÁLTOZATLAN) ──
             # A tényleges SL nem pontos BE, hanem BE + spread puffer (lásd
@@ -1059,8 +1100,9 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         # egyértelmű legyen (a "pip" félreérthető volt).
         is_rf = slot_mgr.is_risk_free(ticket)
         # Trailing: off/risky mint eddig; Felező/Pajzsnál CSAK ha a runner-mód trailing;
-        # Fibónál SOHA (a stop a fibo_stop_level szinten marad — tiszta stop-mozgatás).
-        _do_trailing = (is_rf and pstate.get("trailing_enabled", True) and not _is_fibo and
+        # Fibónál/Harmadosnál SOHA (a stop a kijelölt szinten marad — tiszta stop-mozgatás).
+        _do_trailing = (is_rf and pstate.get("trailing_enabled", True)
+                        and not _is_fibo and not _is_thirds and
                         (not _is_partial or pstate.get("runner_mode") == _rr.RUNNER_TRAILING))
         if _do_trailing:
             point  = sym_info.point if (sym_info and sym_info.point > 0) else pip_size

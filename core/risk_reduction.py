@@ -28,7 +28,9 @@ PRESET_RISKY   = "risky"     # óvatos méret + BE-húzás (NINCS részleges zá
 PRESET_HALVING = "halving"   # Felező: 50% zár 1R-nél
 PRESET_SHIELD  = "shield"    # Pajzs: 75% zár 1R-nél
 PRESET_FIBO    = "fibo"      # Fibo: stop-húzás a belépő→TP táv 61,8%-ánál (nincs zárás)
-PRESETS = (PRESET_OFF, PRESET_RISKY, PRESET_HALVING, PRESET_SHIELD, PRESET_FIBO)
+PRESET_THIRDS  = "thirds"    # Harmados (1/3–2/3): R-alapú stop-létra (nincs zárás)
+PRESETS = (PRESET_OFF, PRESET_RISKY, PRESET_HALVING, PRESET_SHIELD, PRESET_FIBO,
+           PRESET_THIRDS)
 
 # ── runner-stop (2b tengely) ────────────────────────────────────────────────
 RUNNER_KEEP      = "keep"        # marad a TÁVOLI (eredeti) stop — a videó Pajzsa
@@ -53,6 +55,13 @@ def default_config() -> dict:
         # (0.0 = breakeven; variánsok: 0.236 / 0.382 — bezárt rész-profit).
         "fibo_level":       0.618,
         "fibo_stop_level":  0.0,
+        # Harmados (1/3–2/3, „Birger") preset: az alap-táv R-ben. A tananyag
+        # 1,5R-rel számol (távoli, ~3R célárnál); nálunk a TP tipikusan 1,5R-nél
+        # ül (tp_rr_ratio), ezért az alap 1,0R — így a lépcső a TP ELŐTT elsül.
+        # 1. lépcső: az ár megteszi az alap-távot → stop az alap 1/3-ára (profitban).
+        # 2. lépcső: az ár a célárnál → stop a 2/3-ra (hard TP-nél ritkán él —
+        # akkor számít, ha a TP-t kézzel kivetted/kitoltad).
+        "thirds_base_R":    1.0,
     }
 
 
@@ -89,6 +98,23 @@ def fibo_levels(open_price: float, tp_price: float, cfg: dict) -> tuple[float, f
     lvl  = float(cfg.get("fibo_level", 0.618))
     slvl = float(cfg.get("fibo_stop_level", 0.0))
     return (open_price + dist * lvl, open_price + dist * slvl)
+
+
+def thirds_levels(open_price: float, risk_dist: float, is_buy: bool,
+                  cfg: dict) -> tuple[float, float, float]:
+    """Harmados (1/3–2/3, „Birger"): (trigger_ár, stop1_ár, stop2_ár) R-alapon.
+
+    alap-táv = thirds_base_R × R (a kezdeti kockázat-távolság `risk_dist`).
+      trigger : az ár megtette az alap-távot   → stop1 = alap-táv 1/3-a (profitban)
+      célárnál: stop2 = alap-táv 2/3-a (a hívó a saját TP-érintésén ellenőrzi)
+    (0,0,0), ha nincs érvényes kockázat-táv."""
+    if risk_dist <= 0.0:
+        return (0.0, 0.0, 0.0)
+    base = float(cfg.get("thirds_base_R", 1.0)) * risk_dist
+    sgn  = 1.0 if is_buy else -1.0
+    return (open_price + sgn * base,
+            open_price + sgn * base / 3.0,
+            open_price + sgn * base * 2.0 / 3.0)
 
 
 def closable_lot(cur_lot: float, fraction: float, min_lot: float,
@@ -143,6 +169,10 @@ def plan_at_trigger(preset: str, cfg: dict, cur_lot: float, min_lot: float,
         # A Fibo nem 1R-alapú és nem zár részlegesen — a motor a fibo_levels()
         # szerinti stop-húzással kezeli (ez az ág csak védelem, ha mégis idehívnák).
         return Plan(0.0, RUNNER_KEEP, PRESET_FIBO)
+    if preset == PRESET_THIRDS:
+        # A Harmados sem zár részlegesen — a motor a thirds_levels() szerinti
+        # stop-létrával kezeli (ez az ág csak védelem).
+        return Plan(0.0, RUNNER_KEEP, PRESET_THIRDS)
 
     frac = target_fraction(preset, cfg)
     closed = closable_lot(cur_lot, frac, min_lot, lot_step)

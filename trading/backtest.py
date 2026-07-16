@@ -287,6 +287,37 @@ def _manage_position(trade: "Trade", high: float, low: float, params: dict,
                         trade.risk_free = trade.sl <= trade.open_price
         return
 
+    # thirds → Harmados (1/3–2/3, „Birger"): R-alapú stop-létra, NINCS részleges
+    # zárás. 1. lépcső: az ár megteszi a thirds_base_R×R alap-távot → a stop az
+    # alap 1/3-ára (profitban → kockázatmentes, slot fel). 2. lépcső: a célár
+    # (TP) érintésekor a stop a 2/3-ra — hard TP-nél a TP-check előbb zár, így
+    # ez élesben akkor számít, ha a TP-t kézzel kivették/kitolták.
+    if preset == _rrm.PRESET_THIRDS:
+        is_buy = trade.direction == "BUY"
+        trig, stop1, stop2 = _rrm.thirds_levels(
+            trade.open_price, trade.sl_pips * pip_size, is_buy, rr)
+        if not trig:
+            return
+        if not trade.reduced:
+            hit = (high >= trig if is_buy else low <= trig)
+            if hit:
+                trade.reduced = True
+                trade.runner_mode = _rrm.RUNNER_KEEP
+                trade.rr_technique = _rrm.PRESET_THIRDS
+                if is_buy and stop1 > trade.sl:
+                    trade.sl = stop1
+                elif not is_buy and stop1 < trade.sl:
+                    trade.sl = stop1
+                trade.risk_free = True   # a stop az alap 1/3-án: profit bezárva
+        else:
+            hit2 = (high >= trade.tp if is_buy else low <= trade.tp)
+            if hit2:
+                if is_buy and stop2 > trade.sl:
+                    trade.sl = stop2
+                elif not is_buy and stop2 < trade.sl:
+                    trade.sl = stop2
+        return
+
     # halving / shield → 1R-nél részleges zárás (egyszer), utána runner-stop
     if not trade.reduced:
         one_r = trade.sl_pips * pip_size

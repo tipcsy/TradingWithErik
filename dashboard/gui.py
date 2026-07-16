@@ -31,7 +31,7 @@ from dashboard.theme import (
     BG, BG_HEADER, BG_ROW_ODD, BG_ROW_EVEN, BG_INACTIVE, BG_UNTRAINED,
     BG_OPT_ROW, BG_BT,
     FG_WHITE, FG_GREEN, FG_RED, FG_YELLOW, FG_GRAY, FG_GRAY_DIM, FG_BLUE,
-    FG_CYAN, FG_ORANGE,
+    FG_CYAN, FG_ORANGE, FG_PURPLE,
     BTN_PLAY_BG, BTN_PLAY_FG, BTN_STOP_BG, BTN_STOP_FG, BTN_OPT_BG, BTN_OPT_FG,
     BTN_BT_BG, BTN_BT_FG, BTN_DIS_BG, BTN_DIS_FG,
     CANVAS_BG, CANVAS_LINE, CANVAS_REF,
@@ -365,7 +365,8 @@ class PairRow:
         # | Fi Fibo.
         _rp = getattr(ds, "rr_preset", "off")
         _rrmap = {"risky": ("R", FG_ORANGE), "halving": ("F", FG_CYAN),
-                  "shield": ("P", FG_GREEN), "fibo": ("Fi", FG_YELLOW)}
+                  "shield": ("P", FG_GREEN), "fibo": ("Fi", FG_YELLOW),
+                  "thirds": ("H", FG_PURPLE)}
         if _rp in _rrmap:
             _txt, _col = _rrmap[_rp]
             self.btn_risky.config(text=_txt, bg=_col, fg="#1e1e2e", state="normal")
@@ -916,7 +917,8 @@ class PortfolioBacktestTab:
             ctrl, textvariable=self._rr_var, width=16, state="readonly",
             font=self._small,
             values=["Auto (jelenlegi)", "Ki (mind)", "Risky (mind)",
-                    "Felező (mind)", "Pajzs (mind)", "Fibo (mind)"])
+                    "Felező (mind)", "Pajzs (mind)", "Fibo (mind)",
+                    "Harmados (mind)"])
         self._rr_combo.grid(row=date_row+1, column=3, padx=4, sticky="w")
 
         btn_row = date_row + 2
@@ -1035,7 +1037,8 @@ class PortfolioBacktestTab:
         preset = {"Ki (mind)": _rr.PRESET_OFF, "Risky (mind)": _rr.PRESET_RISKY,
                   "Felező (mind)": _rr.PRESET_HALVING,
                   "Pajzs (mind)": _rr.PRESET_SHIELD,
-                  "Fibo (mind)": _rr.PRESET_FIBO}.get(self._rr_var.get())
+                  "Fibo (mind)": _rr.PRESET_FIBO,
+                  "Harmados (mind)": _rr.PRESET_THIRDS}.get(self._rr_var.get())
         if preset is None:
             return None
         return {**_rr.default_config(), "preset": preset}
@@ -1938,7 +1941,7 @@ class DashboardWindow:
             ("■ Optimalizálás", FG_YELLOW), ("✦ Kockázatmentes", FG_CYAN),
             ("Kockázatcsökk. (kattints):", FG_GRAY),
             ("R Risky", FG_ORANGE), ("F Felező", FG_CYAN), ("P Pajzs", FG_GREEN),
-            ("Fi Fibo", FG_YELLOW),
+            ("Fi Fibo", FG_YELLOW), ("H Harmados", FG_PURPLE),
         ]:
             tk.Label(legend, text=text, bg=BG, fg=col, font=small_font, padx=6).pack(side="left")
 
@@ -2658,7 +2661,8 @@ class DashboardWindow:
 
     def _handle_risky(self, symbol: str):
         """Az „R" gomb: a kockázatcsökkentő PRESET körbe-váltása
-        (Ki → Risky → Felező → Pajzs → Fibo), per-pár mentve (data/risk_mode.json).
+        (Ki → Risky → Felező → Pajzs → Fibo → Harmados), per-pár mentve
+        (data/risk_mode.json).
         A régi risky_mode-ot szinkronban tartjuk (preset==risky), hogy az azt
         olvasó live/backtest változatlanul működjön."""
         from core import rr_state, risky_mode, risk_reduction as _rr

@@ -25,6 +25,7 @@ FG_GRAY_DIM  = "#45475a"
 FG_BLUE      = "#89b4fa"
 FG_CYAN      = "#89dceb"
 FG_ORANGE    = "#fab387"
+FG_PURPLE    = "#cba6f7"
 
 BTN_PLAY_BG  = "#40a02b"
 BTN_PLAY_FG  = "#ffffff"
