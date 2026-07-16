@@ -152,7 +152,7 @@ def _fixed_cell(key: str, ds, opt_status: str, inst_state: str) -> tuple[str, st
         if inst_state in ("OPTIMIZING", "QUEUED"):
             col = "yellow" if inst_state == "OPTIMIZING" else "muted"
         else:
-            col = "green" if "Kész" in txt else "muted"
+            col = "green" if ("Kész" in txt or "Utolsó opt" in txt) else "muted"
         return txt, col
     return "—", "muted"
 
@@ -747,7 +747,8 @@ class OptimizerController:
             ds = self.dashboard_ref.get(symbol)
             if ds is not None:
                 ds.trained = True
-            self.optimizer_status[symbol] = "Kész ✓"
+            # A frissen írt done-marker idejéből a perzisztens 'Utolsó opt: <dátum>' címke.
+            self.optimizer_status[symbol] = self._opt_done_label(symbol) or "Kész ✓"
 
         except Exception as e:
             import traceback
@@ -2995,22 +2996,24 @@ class DashboardWindow:
             return
         prm = self._light_params(symbol)
         atr_period = int(prm.get("atr_period", 14))
+        # ~300 M15 gyertya: fedi az ATR-t (max spread) ÉS a regime-osztályozó warmupját
+        # (atr_avg_period=100) a Piac oszlophoz. Egyetlen copy_rates hívás → olcsó.
         with MT5_LOCK:
             _mt5.symbol_select(symbol, True)
             d1  = _mt5.copy_rates_from_pos(symbol, _mt5.TIMEFRAME_D1, 0, 1)
-            m15 = _mt5.copy_rates_from_pos(symbol, _mt5.TIMEFRAME_M15, 0, atr_period + 6)
+            m15 = _mt5.copy_rates_from_pos(symbol, _mt5.TIMEFRAME_M15, 0, 300)
         # Napi nyitóár → Vált.% (a legfrissebb bid-del arányosítva)
         if d1 is not None and len(d1):
             ds.day_open = float(d1[-1]["open"])
             ref = ds.bid if ds.bid is not None else ds.ask
             if ref is not None and ds.day_open:
                 ds.change_pct = (ref - ds.day_open) / ds.day_open * 100.0
-        # Max spread (ATR × ratio, min-padlóval) → a Spread cella zöld/piros jelzése
         point = getattr(ds, "point", None)
-        if m15 is not None and len(m15) > 2 and point:
+        _df15 = _pd.DataFrame(m15) if (m15 is not None and len(m15) > 2) else None
+        # Max spread (ATR × ratio, min-padlóval) → a Spread cella zöld/piros jelzése
+        if _df15 is not None and point:
             try:
-                df = _pd.DataFrame(m15)
-                atr_val = _atr(df["high"], df["low"], df["close"], atr_period).iloc[-2]
+                atr_val = _atr(_df15["high"], _df15["low"], _df15["close"], atr_period).iloc[-2]
                 if atr_val == atr_val:   # not NaN
                     atr_pts  = int(atr_val / point)
                     ratio    = float(prm.get("max_spread_atr_ratio", 0.20))
@@ -3021,6 +3024,40 @@ class DashboardWindow:
                     ds.max_spread_pts = max(min_pts, int(atr_pts * ratio))
             except Exception:
                 pass
+        # Piac (regime) állapot → a Piac oszlop — opt közben is (a drága út opt-kapuzott)
+        if _df15 is not None:
+            try:
+                from core import market_strategy as _ms
+                _msname = _ms.market_name_of(self.cfg.get("pairs", {}).get(symbol, {}) or {})
+                ds.market_strategy = _msname
+                if _msname:
+                    _cat = _ms.latest_category(_msname, _df15)
+                    if _cat:
+                        ds.market_state_label, ds.market_state_color = _ms.display(_cat)
+            except Exception:
+                pass
+        # 'Utolsó opt' PERZISZTENS címke (a done-marker idejéből) — ha nem épp optimalizál.
+        # Így restart / opt közben sem tűnik el (nem az in-memory 'Kész ✓'-ra hagyatkozik).
+        if self.instrument_state.get(symbol) not in ("OPTIMIZING", "QUEUED"):
+            _cur = self.optimizer_status.get(symbol, "")
+            if not _cur or "Kész" in _cur or "Utolsó opt" in _cur:
+                _lbl = self._opt_done_label(symbol)
+                if _lbl:
+                    self.optimizer_status[symbol] = _lbl
+
+    def _opt_done_label(self, symbol: str) -> str:
+        """PERZISZTENS 'utolsó optimalizálás' címke a done-marker fájl idejéből
+        (`{symbol}_study.done`), pl. 'Utolsó opt: 26/07/16'. '' ha nincs marker."""
+        try:
+            from core.params_store import done_marker
+            import datetime as _dt
+            dm = done_marker(symbol, self.strategy.name)
+            if dm.exists():
+                d = _dt.datetime.fromtimestamp(dm.stat().st_mtime)
+                return f"Utolsó opt: {d.strftime('%y/%m/%d')}"
+        except Exception:
+            pass
+        return ""
 
     # MT5 timeframe leképezés perc → konstans (lazán, futásidőben)
     @staticmethod
@@ -3060,9 +3097,9 @@ class DashboardWindow:
             ds.opt_grade = (txt, col)
             ds.opt_grade_reason = reason
             # Külsőleg (más app által) optimalizált párt is "vegyük észre":
-            # ha nem épp most optimalizál, jelezzük késznek.
+            # ha nem épp most optimalizál, a perzisztens 'Utolsó opt: <dátum>' címke.
             if self.instrument_state.get(symbol) not in ("OPTIMIZING", "QUEUED"):
-                self.optimizer_status[symbol] = "Kész ✓"
+                self.optimizer_status[symbol] = self._opt_done_label(symbol) or "Kész ✓"
         else:
             params = self.strategy.base_params(self.cfg)
             ds.trained = False
