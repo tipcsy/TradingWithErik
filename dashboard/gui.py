@@ -206,6 +206,10 @@ class PairRow:
                     circles.append((skey, c))
                 self.markers[col.key] = (cell, circles)
                 continue
+            if col.key == "opt":
+                # Az Opt státusz a Vezérlés gombok UTÁN jön, és az ablak MARADÉK
+                # szélességét tölti ki (lásd lent) → a hosszú szöveg is kifér.
+                continue
             lbl = tk.Label(self.frame, text="—", width=col.width, anchor=col.anchor,
                            bg=self._bg, fg=FG_GRAY, font=mono_font, padx=4, pady=3)
             lbl.pack(side="left")
@@ -214,16 +218,6 @@ class PairRow:
         # A Symbol cellára kattintva → optimalizált paraméterek szerkesztője
         self.labels["symbol"].config(cursor="hand2")
         self.labels["symbol"].bind("<Button-1>", lambda e: on_name_click(symbol))
-
-        # Az Opt státusz cellára kattintva → részletes állapot / hibalog / trials CSV;
-        # RÁHÚZVA (hover) → a TELJES státusz-szöveg tooltipben (a cella keskeny, a
-        # "wpr_sma 112/500 45%" kifutna).
-        if "opt" in self.labels:
-            if on_status_click:
-                self.labels["opt"].config(cursor="hand2")
-                self.labels["opt"].bind("<Button-1>", lambda e: on_status_click(symbol))
-            self.labels["opt"].bind("<Enter>", self._opt_tip_show)
-            self.labels["opt"].bind("<Leave>", self._opt_tip_hide)
 
         # Egy gomb a futtatáshoz (Play↔Stop morph) és egy az OPT-hoz (OPT↔STOP morph)
         self.btn_run = tk.Button(self.frame, text="▶", width=3,
@@ -251,6 +245,24 @@ class PairRow:
                                  bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
                                  relief="flat", command=lambda: on_delete(symbol))
         self.btn_del.pack(side="left", padx=(1, 4))
+
+        # ── Opt státusz — a Vezérlés UTÁN, az ablak MARADÉK szélességében ────
+        # (fill+expand → a hosszú státusz-szöveg is kifér; a tooltip marad,
+        # hátha nagyon keskeny az ablak).
+        _opt_col = next((c for c in self.columns if c.key == "opt"), None)
+        if _opt_col is not None:
+            lbl = tk.Label(self.frame, text="—", width=_opt_col.width,
+                           anchor=_opt_col.anchor, bg=self._bg, fg=FG_GRAY,
+                           font=mono_font, padx=4, pady=3)
+            lbl.pack(side="left", fill="x", expand=True)
+            self.labels["opt"] = lbl
+            # Kattintás → részletes állapot / hibalog / trials CSV; hover → teljes
+            # szöveg tooltipben.
+            if on_status_click:
+                lbl.config(cursor="hand2")
+                lbl.bind("<Button-1>", lambda e: on_status_click(symbol))
+            lbl.bind("<Enter>", self._opt_tip_show)
+            lbl.bind("<Leave>", self._opt_tip_hide)
 
     def _morph_btn(self, btn, text, enabled, active_bg, active_fg):
         if enabled:
@@ -446,6 +458,11 @@ class HeaderRow:
         self.frame.pack(fill="x", padx=2, pady=(4, 0))
         self._lbls: list[tk.Label] = []
         for i, col in enumerate(columns):
+            # A Vezérlés fejléc az Opt státusz ELÉ kerül (a sorokban is a gombok
+            # előzik meg a státuszt); az Opt státusz a maradék szélességet kapja.
+            if col.key == "opt":
+                tk.Label(self.frame, text="Vezérlés", width=16,
+                         bg=BG_HEADER, fg=FG_BLUE, font=header_font).pack(side="left")
             lbl = tk.Label(
                 self.frame, text=col.header, width=col.width, anchor=col.anchor,
                 bg=BG_HEADER, fg=FG_BLUE, font=header_font,
@@ -453,10 +470,9 @@ class HeaderRow:
             )
             if on_col_click:
                 lbl.bind("<Button-1>", lambda e, idx=i: on_col_click(idx))
-            lbl.pack(side="left")
+            lbl.pack(side="left", fill="x" if col.key == "opt" else "none",
+                     expand=(col.key == "opt"))
             self._lbls.append(lbl)
-        tk.Label(self.frame, text="Vezérlés", width=16,
-                 bg=BG_HEADER, fg=FG_BLUE, font=header_font).pack(side="left")
         tk.Frame(parent, bg=FG_GRAY_DIM, height=1).pack(fill="x", padx=2)
 
     def set_sort(self, col_idx: Optional[int], direction: int):
