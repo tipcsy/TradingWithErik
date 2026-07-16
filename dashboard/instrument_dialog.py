@@ -121,7 +121,13 @@ class InstrumentParamsDialog:
                  header_font, small_font, save_main_config):
         self.parent  = parent
         self.symbol  = symbol
-        self.cfg     = cfg
+        # A cfg átképezése ENNEK a stratégiának a nézetére: a futásidejű cfg az
+        # ELSŐDLEGES stratégia szekcióival (indicators/sltp/param_meta/quality/
+        # optimizer-tér) van merge-elve — egy MÁSIK stratégia ablaka különben a
+        # primary paraméterlistáját/minősítés-küszöbeit mutatná (pl. az ml_ai a
+        # wpr_sma-ét). A váz-szekciók (pairs, trading, ml) változatlanok.
+        from strategy.settings import config_for_strategy
+        self.cfg     = config_for_strategy(cfg, strategy.name)
         self.strategy = strategy
         self._hf     = header_font
         self._sf     = small_font

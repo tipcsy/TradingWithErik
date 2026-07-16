@@ -322,7 +322,9 @@ class PairRow:
         cells = ds.strategy_cells.get(sname, {}) if (trained and strat_enabled) else {}
         for idx, (skey, c) in enumerate(circles):
             if not strat_enabled:
-                c.config(text="●", fg=FG_GRAY_DIM, bg=bg)   # kikapcsolt stratégia
+                # Kikapcsolt stratégia ezen az instrumentumon: apró pont (nem kör)
+                # → ránézésre elválik, melyik stratégia él az adott soron.
+                c.config(text="·", fg=FG_GRAY_DIM, bg=bg)
                 continue
             if no_trade and idx == 0:
                 c.config(text="⏸", fg=FG_GRAY, bg=bg)
@@ -2624,13 +2626,23 @@ class DashboardWindow:
         return enabled_strategy_names(self.cfg, symbol) or [self.strategy.name]
 
     def _handle_opt(self, symbol: str):
-        """OPT↔STOP morph. STOPPED → az instrumentum ÖSSZES engedélyezett stratégiájának
-        optimalizálása (mindegyik saját (symbol, strategy) tétel, egyszerre egy fut, a
-        többi sorba). QUEUED → a szimbólum sorban álló tételeinek törlése. Egy KONKRÉT
-        stratégia optimalizálásához: JOBB-klikk az OPT gombon (menü)."""
+        """OPT↔STOP morph. STOPPED → EGY stratégiánál azonnal indít; TÖBB engedélyezett
+        stratégiánál VÁLASZTÓ-MENÜ nyílik (melyiket — vagy mindet), hogy egyértelmű
+        legyen, mi fog futni (az ml_ai-nál az Opt = tanítás!). QUEUED → a szimbólum
+        sorban álló tételeinek törlése."""
         st = self.instrument_state.get(symbol)
         if st == "STOPPED":
-            for sn in self._opt_strategies_for(symbol):
+            names = self._opt_strategies_for(symbol)
+            if len(names) > 1:
+                # A menü az OPT gomb alá nyílik (gomb-kattintásnál nincs event-koordináta)
+                row = self.rows.get(symbol)
+                btn = getattr(row, "btn_opt", None)
+                x = btn.winfo_rootx() if btn else self.root.winfo_pointerx()
+                y = (btn.winfo_rooty() + btn.winfo_height()) if btn \
+                    else self.root.winfo_pointery()
+                self._show_opt_menu(symbol, names, x, y)
+                return
+            for sn in names:
                 self._opt_ctrl.request_optimize(symbol, sn)
         elif st == "QUEUED":
             self._opt_ctrl.cancel_queued(symbol)
@@ -2638,17 +2650,18 @@ class DashboardWindow:
             return
         self._refresh_row(symbol)
 
-    def _handle_opt_menu(self, symbol: str, event):
-        """JOBB-klikk az OPT gombon: egy KONKRÉT stratégia optimalizálásának indítása
-        (a többstratégiás eset kezelése). LIVE szimbólumnál nem teszünk semmit."""
-        if self.instrument_state.get(symbol) == "LIVE":
-            return
-        names = self._opt_strategies_for(symbol)
+    def _show_opt_menu(self, symbol: str, names: list, x: int, y: int):
+        """Stratégiaválasztó menü az optimalizáláshoz (bal-klikk több stratégiánál
+        és jobb-klikk is ezt használja). Az ml_ai-féle tanítható stratégiát a
+        felirat is jelzi (Opt = tanítás)."""
+        from strategy import get_strategy_by_name
         menu = tk.Menu(self.root, tearoff=0)
         menu.add_command(label=f"— {symbol} optimalizálása —", state="disabled")
         for sn in names:
+            trainable = callable(getattr(get_strategy_by_name(sn), "fit", None))
+            label = f"▶ {sn} (tanítás)" if trainable else f"▶ {sn}"
             menu.add_command(
-                label=f"▶ {sn}",
+                label=label,
                 command=lambda s=sn: (self._opt_ctrl.request_optimize(symbol, s),
                                       self._refresh_row(symbol)))
         if len(names) > 1:
@@ -2658,9 +2671,17 @@ class DashboardWindow:
                 command=lambda: ([self._opt_ctrl.request_optimize(symbol, s)
                                   for s in names], self._refresh_row(symbol)))
         try:
-            menu.tk_popup(event.x_root, event.y_root)
+            menu.tk_popup(int(x), int(y))
         finally:
             menu.grab_release()
+
+    def _handle_opt_menu(self, symbol: str, event):
+        """JOBB-klikk az OPT gombon: stratégiaválasztó menü (ugyanaz, mint a
+        bal-klikk több stratégiánál). LIVE szimbólumnál nem teszünk semmit."""
+        if self.instrument_state.get(symbol) == "LIVE":
+            return
+        self._show_opt_menu(symbol, self._opt_strategies_for(symbol),
+                            event.x_root, event.y_root)
 
     def _refresh_row(self, symbol: str):
         row = self.rows.get(symbol)
@@ -3283,8 +3304,13 @@ class DashboardWindow:
                         sp = params                    # már betöltve fent
                     else:
                         _f = params_file(symbol, sn)
-                        sp = (json.load(open(_f, encoding="utf-8")).get("params", {})
-                              if _f.exists() else st.base_params(self.cfg))
+                        if _f.exists():
+                            sp = json.load(open(_f, encoding="utf-8")).get("params", {})
+                        else:
+                            # A stratégia SAJÁT config-nézetéből (a cfg a primary
+                            # szekcióival van merge-elve — az nem az övé).
+                            from strategy.settings import config_for_strategy
+                            sp = st.base_params(config_for_strategy(self.cfg, sn))
                     # Pár-azonosító injektálás (mint a motoroknál): pl. az ml_ai
                     # feature-számítása/modell-betöltése igényli.
                     sp = {**sp, "symbol": symbol,
@@ -3606,7 +3632,8 @@ def _demo_dashboard(cfg: dict):
     random.shuffle(states_pool)
 
     db, inst_state, opt_status = {}, {}, {}
-    from strategy import registered_strategy_names, get_strategy_by_name
+    from strategy import (registered_strategy_names, get_strategy_by_name,
+                          enabled_strategy_names as _enabled_names)
     reg_strats = [get_strategy_by_name(n) for n in registered_strategy_names()]
     # Per-stratégia stádium-kulcsok a demó köreihez {strat_név: [stádium_kulcs,…]}
     stages_by_strat = {st.name: [sk for c in st.columns() if c.kind == "marker"
@@ -3638,7 +3665,9 @@ def _demo_dashboard(cfg: dict):
             position_pnl=None, risk_free=False, daily_pnl=0.0,
             opt_grade=grade_cell, opt_grade_reason=grade_reason,
             viz_enabled=cfg["pairs"][symbol].get("viz_enabled", True),
-            enabled_strategies=[st_.name for st_ in reg_strats],
+            # Per-pár engedélyezett stratégiák (mint az éles induláskor) — a
+            # jelölő-oszlop a nem engedélyezettet apró ponttal különbözteti meg.
+            enabled_strategies=_enabled_names(cfg, symbol),
         )
         # Stratégia-cellák szimulálása per stratégia (csak LIVE pároknál)
         if st == "LIVE":
