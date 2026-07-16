@@ -42,6 +42,7 @@ from core.params_store import resolve_trade_hours
 from core import rr_state as _rrs
 from core import risk_reduction as _rrx
 from core import build_state as _bst
+from core import position_build as _pb
 
 # A technika-kulcsok magyar nevei (a rr_technique / progress tech dict-hez)
 _TECH_NAMES = {"shield": "Pajzs", "halving": "Felező", "risky": "Risky"}
@@ -183,11 +184,19 @@ class BacktestDialog:
                          int(self.pair_cfg.get("sess_end", 24))))
 
     def _current_build_cfg(self):
-        """Az ablakban BEÁLLÍTOTT építés-config (feltáró) — {mode, size_factor}."""
+        """Az ablakban BEÁLLÍTOTT építés-config (feltáró) — mode + size_factor + trigger
+        + R-paraméterek (a run_pair `build` override-jához)."""
         mode = {v: k for k, v in _bst.NAME.items()}.get(
             self._build_mode_name.get(), _bst.MODE_OFF)
         sf = _num(self._build_sf_var.get())
-        return {"mode": mode, "size_factor": sf if sf and sf > 0 else 0.7}
+        trig = {v: k for k, v in _pb.TRIGGER_NAME.items()}.get(
+            self._build_trig_name.get(), _pb.TRIGGER_CANDLE)
+        rstep = _num(self._build_rstep_var.get())
+        rshrink = _num(self._build_rshrink_var.get())
+        return {"mode": mode, "size_factor": sf if sf and sf > 0 else 0.7,
+                "trigger": trig,
+                "r_step": rstep if rstep and rstep > 0 else 1.0,
+                "r_shrink": rshrink if rshrink and 0 < rshrink < 1 else 0.5}
 
     # ── UI ──────────────────────────────────────────────────────────────────
     def _build(self):
@@ -329,10 +338,10 @@ class BacktestDialog:
                             command=self._on_build_mode_change_local)
         _style_om(omb, self._sf)
         omb.pack(side="left", padx=(4, 0))
-        _attach_tooltip(omb, "Ki / Kézi / Auto. A backtest CSAK Auto + Ki-preset mellett "
-                             "modellezi az építést (a Kézi user-vezérelt → nem modellezhető).")
+        _attach_tooltip(omb, "Ki / Kézi / Auto (Ki-preset mellett modellez). Auto: mindig; "
+                             "Kézi: CSAK R-alapú triggernél (determinisztikus). Gyertyás Kézi "
+                             "→ nem modellezhető.")
         self._build_faktor_frame = tk.Frame(brow, bg=BG)
-        self._build_faktor_frame.pack(side="left", padx=(8, 0))
         tk.Label(self._build_faktor_frame, text="Faktor:", bg=BG, fg=FG_GRAY,
                  font=self._sf).pack(side="left")
         self._build_sf_var = tk.StringVar(value=str(self._init_build.get("size_factor", 0.7)))
@@ -340,7 +349,36 @@ class BacktestDialog:
                  bg=BG_HEADER, fg=FG_WHITE, font=self._sf, relief="flat",
                  insertbackground=FG_WHITE).pack(side="left", padx=(2, 0))
         _attach_tooltip(self._build_faktor_frame,
-                        "Piramidális méret-szorzó: minden ráépítés = előző × Faktor.")
+                        "Piramidális méret-szorzó: minden ráépítés = előző × Faktor (MENNYIT).")
+        # Trigger + R-paraméterek (MIKOR) — az instrumentum-ablakkal egyezően
+        self._build_trig_frame = tk.Frame(brow, bg=BG)
+        tk.Label(self._build_trig_frame, text="Trigger:", bg=BG, fg=FG_GRAY,
+                 font=self._sf).pack(side="left")
+        self._build_trig_name = tk.StringVar(
+            value=_pb.TRIGGER_NAME.get(self._init_build.get("trigger", _pb.TRIGGER_CANDLE), "Gyertyás"))
+        omt = tk.OptionMenu(self._build_trig_frame, self._build_trig_name,
+                            *_pb.TRIGGER_NAME.values(), command=self._on_build_trigger_change_local)
+        _style_om(omt, self._sf)
+        omt.pack(side="left", padx=(4, 0))
+        _attach_tooltip(omt, "Gyertyás = trendkövető. Fix R = +1R,+2R… (állandó lépés). "
+                             "R-felező = a lépés zsugorodik → sűrűsödik.")
+        self._build_rstep_frame = tk.Frame(brow, bg=BG)
+        tk.Label(self._build_rstep_frame, text="R-lépés:", bg=BG, fg=FG_GRAY,
+                 font=self._sf).pack(side="left")
+        self._build_rstep_var = tk.StringVar(value=str(self._init_build.get("r_step", 1.0)))
+        tk.Entry(self._build_rstep_frame, textvariable=self._build_rstep_var, width=4,
+                 bg=BG_HEADER, fg=FG_WHITE, font=self._sf, relief="flat",
+                 insertbackground=FG_WHITE).pack(side="left", padx=(2, 0))
+        _attach_tooltip(self._build_rstep_frame, "Az (első) lépés R-ben (alap 1R).")
+        self._build_rshrink_frame = tk.Frame(brow, bg=BG)
+        tk.Label(self._build_rshrink_frame, text="Zsug:", bg=BG, fg=FG_GRAY,
+                 font=self._sf).pack(side="left")
+        self._build_rshrink_var = tk.StringVar(value=str(self._init_build.get("r_shrink", 0.5)))
+        tk.Entry(self._build_rshrink_frame, textvariable=self._build_rshrink_var, width=4,
+                 bg=BG_HEADER, fg=FG_WHITE, font=self._sf, relief="flat",
+                 insertbackground=FG_WHITE).pack(side="left", padx=(2, 0))
+        _attach_tooltip(self._build_rshrink_frame,
+                        "A lépés szorzója add-onként (0.5 = felező; 2/3; 3/4…).")
 
         self._update_rr_visibility()
 
@@ -456,9 +494,13 @@ class BacktestDialog:
     def _on_build_mode_change_local(self, _name=None):
         self._update_rr_visibility()
 
+    def _on_build_trigger_change_local(self, _name=None):
+        self._update_rr_visibility()
+
     def _update_rr_visibility(self):
-        """Óvatos csak ha van kockázatcsökkentés; Runner csak Felező/Pajzsnál; Exit
-        csak Felező/Pajzs + Runner=Kiszállási jel; Faktor csak Építés ≠ Ki."""
+        """Óvatos csak ha van kockázatcsökkentés; Runner csak Felező/Pajzsnál; Exit csak
+        Felező/Pajzs + Runner=Kiszállási jel; Építésnél: Faktor+Trigger csak ha ≠ Ki,
+        R-lépés csak R-alapú triggernél, Zsug csak R-felezőnél."""
         preset = self._preset_from_name(self._rr_name.get())
         (self._cautious_cb.grid_remove if preset == _rrx.PRESET_OFF
          else self._cautious_cb.grid)()
@@ -467,10 +509,20 @@ class BacktestDialog:
         runner = self._runner_from_name(self._runner_name.get())
         show_exit = partial and runner == _rrx.RUNNER_EXIT
         (self._exit_frame.grid if show_exit else self._exit_frame.grid_remove)()
-        if self._build_mode_name.get() != _bst.NAME[_bst.MODE_OFF]:
+        # Építés-vezérlők (sorrend-tartó)
+        for f in (self._build_faktor_frame, self._build_trig_frame,
+                  self._build_rstep_frame, self._build_rshrink_frame):
+            f.pack_forget()
+        build_on = self._build_mode_name.get() != _bst.NAME[_bst.MODE_OFF]
+        trig = {v: k for k, v in _pb.TRIGGER_NAME.items()}.get(
+            self._build_trig_name.get(), _pb.TRIGGER_CANDLE)
+        if build_on:
             self._build_faktor_frame.pack(side="left", padx=(8, 0))
-        else:
-            self._build_faktor_frame.pack_forget()
+            self._build_trig_frame.pack(side="left", padx=(10, 0))
+            if trig in (_pb.TRIGGER_R_FIXED, _pb.TRIGGER_R_CONVERGE):
+                self._build_rstep_frame.pack(side="left", padx=(8, 0))
+            if trig == _pb.TRIGGER_R_CONVERGE:
+                self._build_rshrink_frame.pack(side="left", padx=(8, 0))
 
     def _rebuild_exit_params(self):
         """Az exit-indikátor SZERKESZTHETŐ mezőinek újraépítése (a kiválasztott

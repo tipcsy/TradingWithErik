@@ -440,7 +440,15 @@ def run_pair(
     try:
         from core import build_state as _bstate, position_build as _posbuild
         _bc = build if build is not None else _bstate.get_config(symbol)
-        if _bc.get("mode") == _posbuild.MODE_AUTO and rr_spec.get("preset", "off") == "off":
+        _bmode = _bc.get("mode")
+        _btrig = _bc.get("trigger", _posbuild.TRIGGER_CANDLE)
+        _r_based = _btrig in (_posbuild.TRIGGER_R_FIXED, _posbuild.TRIGGER_R_CONVERGE)
+        # Modellezés CSAK OFF presetnél (nincs részleges zárás), ÉS: Auto módban MINDIG,
+        # Kézi módban CSAK R-alapú triggernél (az determinisztikus → backtestelhető; a
+        # gyertyás Kézi user-kattintás, azt nem modellezzük).
+        if (rr_spec.get("preset", "off") == "off"
+                and (_bmode == _posbuild.MODE_AUTO
+                     or (_bmode == _posbuild.MODE_MANUAL and _r_based))):
             _build_cfg = {**_posbuild.default_config(), **_bc}
     except Exception:
         _build_cfg = None
@@ -563,10 +571,21 @@ def run_pair(
             # legfeljebb egyszer épít. Az m15_ptr ugyanaz az index, amit a belépő is
             # használ (nincs plusz look-ahead).
             if (not closed and _build_cfg is not None and trade.risk_free
-                    and 0 <= m15_ptr < len(m15)):
+                    and 0 <= m15_ptr < len(m15)
+                    and len(trade.legs) <= _posbuild.HARD_MAX_ADDS):
                 _bc_close = float(m15["close"].iloc[m15_ptr])
-                _fired = ((_bc_close > trade.build_ref) if trade.direction == "BUY"
-                          else (_bc_close < trade.build_ref))
+                _btrig = _build_cfg.get("trigger", _posbuild.TRIGGER_CANDLE)
+                if _btrig == _posbuild.TRIGGER_CANDLE:
+                    _fired = ((_bc_close > trade.build_ref) if trade.direction == "BUY"
+                              else (_bc_close < trade.build_ref))
+                else:
+                    # R-alapú: R = a kezdeti SL-távolság árban (sl_pips×pip); az n_add-adik
+                    # (= len(legs)) R-szintet éri-e el a gyertyazáró. Determinisztikus.
+                    _rp  = trade.sl_pips * pip_size
+                    _lvl = _posbuild.r_level(trade.open_price, _rp, trade.direction,
+                                             len(trade.legs), _build_cfg)
+                    _fired = _lvl is not None and (
+                        _bc_close >= _lvl if trade.direction == "BUY" else _bc_close <= _lvl)
                 if _fired:
                     _last = min(l[1] for l in trade.legs) if trade.legs else trade.lot
                     _add  = _posbuild.next_lot(_last, _build_cfg["size_factor"],

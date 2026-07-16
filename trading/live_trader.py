@@ -560,19 +560,30 @@ def actual_trade_objects(symbol: str, since_ts: int) -> list:
     #     tüzel, ha egy ZÁRT gyertya E FÖLÉ (BUY) / E ALÁ (SELL) zár. Így LÁTOD, mehet-e
     #     tovább, vagy még várni kell. Zöld (lime) = MEHET (ready); cián = még vár.
     _rt = build_runtime.get(symbol)
-    if _rt and _rt.get("ref_close") and _rt.get("mode") not in (None, "off") and positions:
-        _ref   = float(_rt["ref_close"])
+    _lvl = _rt.get("next_level") if _rt else None
+    if _rt and _lvl and _rt.get("mode") not in (None, "off") and positions:
+        _lvl   = float(_lvl)
         _ready = bool(_rt.get("ready"))
         _dir   = _rt.get("direction", "BUY")
+        _trig  = _rt.get("trigger", "candle")
         _col   = "lime" if _ready else "cyan"
         objs.append(viz.Trend(
-            name="build_ref", t1=int(since_ts), p1=_ref, t2=now_int, p2=_ref,
+            name="build_ref", t1=int(since_ts), p1=_lvl, t2=now_int, p2=_lvl,
             color=_col, width=1, style=1))
         _side = "fole" if _dir == "BUY" else "ala"
-        _txt  = ("Raepites: MEHET (uj gyertya atutott)" if _ready
-                 else f"Raepites-kuszob {_ref:.6g} (e {_side} zarva -> ujabb add)")
+        # A felirat a trigger-mód szerint: gyertyás = ref-küszöb; R-alapú = a következő
+        # R-szint (mennyi R-nél jön a következő adalék).
+        if _ready:
+            _txt = "Raepites: MEHET (trigger atutve)"
+        elif _trig == "candle":
+            _txt = f"Raepites-kuszob {_lvl:.6g} (e {_side} zarva -> ujabb add)"
+        else:
+            _rp = _rt.get("r_price") or 0.0
+            _ie = _rt.get("initial_entry") or _lvl
+            _rmul = (abs(_lvl - _ie) / _rp) if _rp else 0.0
+            _txt = f"Kov. raepites: +{_rmul:.2g}R @ {_lvl:.6g}"
         objs.append(viz.Text(
-            name="build_ref_lbl", t1=now_int, p1=_ref, text=_txt,
+            name="build_ref_lbl", t1=now_int, p1=_lvl, text=_txt,
             color=_col, fontsize=9))
     return objs
 
@@ -1080,16 +1091,35 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
                     else max(p.price_open for p in symbol_positions))
         _bbars = bars.get(_bcfg.get("timeframe", "M15"))
         _last_lot = min(p.volume for p in symbol_positions)   # a legkisebb = az utolsó add
+        # R-referencia az R-alapú triggerekhez: az INDULÓ (legkorábbi) láb kockázata =
+        # |belépő − EREDETI SL| (a pstate őrzi az eredetit, mert a build a stopot az
+        # átlagárra húzza). n_add = a KÖVETKEZŐ adalék sorszáma (= a nyitott lábak száma).
+        _init  = min(symbol_positions, key=lambda p: p.time)
+        _init_entry = float(_init.price_open)
+        _init_osl   = position_state.get(_init.ticket, {}).get("original_sl", _init.sl)
+        _r_price = abs(_init_entry - float(_init_osl)) if _init_osl else 0.0
+        _n_add   = len(symbol_positions)
+        _trig    = _bcfg.get("trigger", _pb.TRIGGER_CANDLE)
+        # A KÖVETKEZŐ trigger árszintje (a viz + a „mehet-e tovább" ehhez mér):
+        # gyertyás → a ref_close; R-alapú → az n_add-adik R-szint.
+        _next_level = (_ref if _trig == _pb.TRIGGER_CANDLE
+                       else _pb.r_level(_init_entry, _r_price, _bdir, _n_add, _bcfg))
         _rt.update({
-            "mode":        _bmode,
-            "direction":   _bdir,
-            "avg_price":   _avg,
-            "ref_close":   _ref,
-            "size_factor": _bcfg["size_factor"],
-            "ready":       _pb.build_signal(_bbars, _bdir, _ref),
-            "next_lot":    _pb.next_lot(_last_lot, _bcfg["size_factor"],
-                                        pair_cfg.get("min_lot", 0.01),
-                                        pair_cfg.get("lot_step", 0.01)),
+            "mode":         _bmode,
+            "direction":    _bdir,
+            "avg_price":    _avg,
+            "ref_close":    _ref,
+            "trigger":      _trig,
+            "r_price":      _r_price,
+            "initial_entry": _init_entry,
+            "next_level":   _next_level,
+            "size_factor":  _bcfg["size_factor"],
+            "ready":        _pb.build_fires(_bbars, _bdir, _bcfg, ref_close=_ref,
+                                            initial_entry=_init_entry, r_price=_r_price,
+                                            n_add=_n_add),
+            "next_lot":     _pb.next_lot(_last_lot, _bcfg["size_factor"],
+                                         pair_cfg.get("min_lot", 0.01),
+                                         pair_cfg.get("lot_step", 0.01)),
         })
         # ── AUTO mód: a motor magától ráépít a jel-gyertyán — de gyertyánként
         # LEGFELJEBB EGYSZER (last_build_bar őr), hogy egy cikluson belül / azonos

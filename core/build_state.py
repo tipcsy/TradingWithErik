@@ -9,7 +9,9 @@ import json
 import threading
 from pathlib import Path
 
-from core.position_build import default_config, MODES, MODE_OFF, MODE_MANUAL, MODE_AUTO
+from core.position_build import (
+    default_config, MODES, MODE_OFF, MODE_MANUAL, MODE_AUTO, TRIGGERS, TRIGGER_CANDLE,
+)
 
 PATH = Path(__file__).resolve().parents[1] / "data" / "build_mode.json"
 
@@ -19,7 +21,7 @@ NAME = {MODE_OFF: "Ki", MODE_MANUAL: "Kézi", MODE_AUTO: "Auto"}
 _lock = threading.Lock()
 _state: dict[str, dict] = {}
 
-_KEYS = ("mode", "size_factor")
+_KEYS = ("mode", "size_factor", "trigger", "r_step", "r_shrink")
 
 
 def _norm(v) -> dict:
@@ -29,6 +31,11 @@ def _norm(v) -> dict:
         d["mode"] = m if m in MODES else MODE_OFF
         if isinstance(v.get("size_factor"), (int, float)):
             d["size_factor"] = float(v["size_factor"])
+        if v.get("trigger") in TRIGGERS:
+            d["trigger"] = v["trigger"]
+        for k in ("r_step", "r_shrink"):
+            if isinstance(v.get(k), (int, float)):
+                d[k] = float(v[k])
     else:
         d["mode"] = MODE_OFF
     return d
