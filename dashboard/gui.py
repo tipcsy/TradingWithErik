@@ -66,6 +66,23 @@ TRAILING_COLUMNS = [
 ]
 
 
+def opt_done_label(symbol: str, strategy_name: str) -> str:
+    """PERZISZTENS 'utolsó optimalizálás' címke a done-marker fájl idejéből
+    (`{symbol}_study.done`, az ADOTT stratégia mappájában), pl.
+    'Utolsó opt: 26/07/16'. '' ha nincs marker. Modul-szintű (a vezérlő és az
+    ablak is használja — az OptimizerController-nek nincs `strategy` tagja)."""
+    try:
+        from core.params_store import done_marker
+        import datetime as _dt
+        dm = done_marker(symbol, strategy_name)
+        if dm.exists():
+            d = _dt.datetime.fromtimestamp(dm.stat().st_mtime)
+            return f"Utolsó opt: {d.strftime('%y/%m/%d')}"
+    except Exception:
+        pass
+    return ""
+
+
 def build_columns(strategies) -> list[Column]:
     """A teljes oszloplista: fix elöl + stratégiánként a középső oszlopok + fix hátul.
 
@@ -827,8 +844,9 @@ class OptimizerController:
             ds = self.dashboard_ref.get(symbol)
             if ds is not None:
                 ds.trained = True
-            # A frissen írt done-marker idejéből a perzisztens 'Utolsó opt: <dátum>' címke.
-            self.optimizer_status[symbol] = self._opt_done_label(symbol) or "Kész ✓"
+            # A frissen írt done-marker idejéből a perzisztens 'Utolsó opt: <dátum>'
+            # címke — a MOST futtatott stratégia markeréből (pl. ml_ai tanítás).
+            self.optimizer_status[symbol] = opt_done_label(symbol, strategy) or "Kész ✓"
 
         except Exception as e:
             import traceback
@@ -3222,18 +3240,16 @@ class DashboardWindow:
                     self.optimizer_status[symbol] = _lbl
 
     def _opt_done_label(self, symbol: str) -> str:
-        """PERZISZTENS 'utolsó optimalizálás' címke a done-marker fájl idejéből
-        (`{symbol}_study.done`), pl. 'Utolsó opt: 26/07/16'. '' ha nincs marker."""
+        """'Utolsó opt' címke a perzisztens frissítéshez: az instrumentumon
+        ENGEDÉLYEZETT stratégiák közül a LEGFRISSEBB done-marker (több stratégia
+        esetén nem csak az elsődlegesét — az ml_ai tanítása is látszódjon)."""
         try:
-            from core.params_store import done_marker
-            import datetime as _dt
-            dm = done_marker(symbol, self.strategy.name)
-            if dm.exists():
-                d = _dt.datetime.fromtimestamp(dm.stat().st_mtime)
-                return f"Utolsó opt: {d.strftime('%y/%m/%d')}"
+            from strategy import enabled_strategy_names
+            names = enabled_strategy_names(self.cfg, symbol)
         except Exception:
-            pass
-        return ""
+            names = [self.strategy.name]
+        labels = [l for l in (opt_done_label(symbol, n) for n in names) if l]
+        return max(labels) if labels else ""
 
     # MT5 timeframe leképezés perc → konstans (lazán, futásidőben)
     @staticmethod
