@@ -49,7 +49,7 @@ _state: dict[str, dict] = {}
 # spec_for felülírja velük a default_config() megfelelő kulcsait. Hiányukban a
 # default_config érvényes (visszafelé kompatibilis: a régi fájlokban nincsenek).
 _CALIB_KEYS = ("trigger_R", "halving_fraction", "shield_fraction",
-               "fibo_level", "fibo_stop_level", "thirds_base_R")
+               "fibo_level", "fibo_stop_level", "thirds_base_R", "cost_cut_bars")
 
 
 def _norm(v) -> dict:
@@ -62,6 +62,8 @@ def _norm(v) -> dict:
             d["preset"] = PRESET_OFF
         if v.get("cautious") is not None:
             d["cautious"] = bool(v["cautious"])
+        if v.get("cost_cut") is not None:
+            d["cost_cut"] = bool(v["cost_cut"])
         if v.get("runner") in RUNNERS:
             d["runner"] = v["runner"]
         for k in _CALIB_KEYS:
@@ -166,6 +168,28 @@ def set_cautious(symbol: str, value):
     _set(symbol, cautious=(None if value is None else bool(value)))
 
 
+def get_cost_cut(symbol: str) -> bool:
+    """Cost-cut (idő-stop) be van-e kapcsolva a párra. Default: ki."""
+    with _lock:
+        return bool(_entry(symbol).get("cost_cut", False))
+
+
+def set_cost_cut(symbol: str, value: bool):
+    _set(symbol, cost_cut=bool(value))
+
+
+def get_cost_cut_bars(symbol: str) -> int:
+    """Hány fő-timeframe gyertya után vágjuk le a veszteséges pozíciót."""
+    with _lock:
+        v = _entry(symbol).get("cost_cut_bars")
+    return int(v) if isinstance(v, (int, float)) else int(default_config()["cost_cut_bars"])
+
+
+def set_cost_cut_bars(symbol: str, bars: int):
+    if bars > 0:
+        _set(symbol, cost_cut_bars=float(int(bars)))
+
+
 def set_from_optimizer(symbol: str, rr: dict):
     """Az optimalizáló nyertes rr-jét a per-pár állapotba írja: preset + runner +
     cautious + numerikus kalibráció (trigger_R/frakciók). A live/GUI ezt veszi át."""
@@ -209,6 +233,8 @@ def spec_for(symbol: str) -> dict:
     spec.update(get_calibration(symbol))
     c = get_cautious(symbol)
     spec["cautious"] = wants_cautious_size(preset) if c is None else bool(c)
+    # Cost-cut (idő-stop): per-pár kapcsoló — bármely presettel kombinálható.
+    spec["cost_cut"] = get_cost_cut(symbol)
     # A kiszállási-modul beállítása (enabled = runner==exit) — a motor/backtest ezt
     # adja tovább az exit_signal.exit_triggered-nek a runner zárásához.
     spec["exit"] = get_exit_config(symbol)

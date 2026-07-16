@@ -116,6 +116,9 @@ class BacktestDialog:
         self._init_preset   = _s0.get("preset", _rrx.PRESET_OFF)
         self._init_runner   = _s0.get("runner_stop", _rrx.RUNNER_TRAILING)
         self._init_cautious = bool(_s0.get("cautious", False))
+        self._init_cc       = bool(_s0.get("cost_cut", False))
+        self._init_cc_bars  = int(_s0.get("cost_cut_bars",
+                                          _rrx.default_config()["cost_cut_bars"]))
         # Exit-config (FELTÁRÓ, LOKÁLIS — nem írjuk a per-pár állapotba). A megnyitáskori
         # rr-spec exitjéből indul, különben a per-pár mentett exit-configból.
         _ex0 = dict((_s0.get("exit") or _rrs.get_exit_config(symbol)))
@@ -157,18 +160,29 @@ class BacktestDialog:
             name, _rrx.RUNNER_TRAILING)
 
     def _current_rr_spec(self):
-        """Az ablakban BEÁLLÍTOTT rr-spec (feltáró). None, ha 'Ki'.
-        Tartalmazza az Exit-configot is (a Runner=Kiszállási jel dönti, aktív-e)."""
+        """Az ablakban BEÁLLÍTOTT rr-spec (feltáró). None, ha 'Ki' ÉS a cost-cut
+        is ki. Tartalmazza az Exit-configot (Runner=Kiszállási jel dönti) és a
+        cost-cutot (Ki preset mellett is élhet — önálló idő-stop)."""
         preset = self._preset_from_name(self._rr_name.get())
-        if preset == _rrx.PRESET_OFF:
+        cc_on  = bool(self._cc_var.get())
+        if preset == _rrx.PRESET_OFF and not cc_on:
             return None
         runner = self._runner_from_name(self._runner_name.get())
         exit_cfg = dict(self._exit_cfg)
         exit_cfg["enabled"] = (runner == _rrx.RUNNER_EXIT)
-        return {**_rrx.default_config(), "preset": preset,
+        spec = {**_rrx.default_config(), "preset": preset,
                 "runner_stop": runner,
-                "cautious": bool(self._cautious_var.get()),
-                "exit": exit_cfg}
+                "cautious": (bool(self._cautious_var.get())
+                             if preset != _rrx.PRESET_OFF else False),
+                "exit": exit_cfg,
+                "cost_cut": cc_on}
+        try:
+            _b = int(float(self._cc_bars_var.get().strip().replace(",", ".")))
+            if _b > 0:
+                spec["cost_cut_bars"] = _b
+        except ValueError:
+            pass
+        return spec
 
     def _allowed_hours(self):
         """A backtest óra-kapuja. None → minden óra (a checkbox KI). Bekapcsolva a
@@ -311,6 +325,23 @@ class BacktestDialog:
         _attach_tooltip(self._runner_frame,
                         "A Felező/Pajzs részleges zárása UTÁN maradó darab (runner) stopja: "
                         "Trailing / Marad távol / BE / Kiszállási jel.")
+
+        # Cost-cut — idő-stop (feltáró, lokális); bármely presettel kombinálható
+        self._cc_frame = tk.Frame(row, bg=BG)
+        self._cc_frame.grid(row=0, column=5, padx=(10, 0), sticky="w")
+        self._cc_var = tk.BooleanVar(value=self._init_cc)
+        _ccb = tk.Checkbutton(self._cc_frame, text="Cost-cut", variable=self._cc_var,
+                              bg=BG, fg=FG_GRAY, selectcolor=BG_HEADER, font=self._sf,
+                              activebackground=BG, activeforeground=FG_WHITE)
+        _ccb.pack(side="left")
+        self._cc_bars_var = tk.StringVar(value=str(self._init_cc_bars))
+        _cce = tk.Entry(self._cc_frame, textvariable=self._cc_bars_var, width=4,
+                        bg=BG_HEADER, fg=FG_WHITE, font=self._sf, relief="flat",
+                        insertbackground=FG_WHITE)
+        _cce.pack(side="left", padx=(4, 0))
+        _attach_tooltip(self._cc_frame,
+                        "Idő-stop: ha ennyi fő-gyertya (M15) után a pozíció még "
+                        "veszteséges, piaci áron zárjuk. Bármely presettel kombinálható.")
 
         self._exit_frame = tk.Frame(row, bg=BG)
         self._exit_frame.grid(row=0, column=4, padx=(10, 0), sticky="w")

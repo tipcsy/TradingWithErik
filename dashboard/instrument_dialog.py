@@ -408,6 +408,27 @@ class InstrumentParamsDialog:
                         "Trailing (követ) / Marad távol (eredeti stop) / BE (belépőre) / "
                         "Kiszállási jel (indikátorra zár).")
 
+        # Cost-cut — idő-stop, bármely presettel kombinálható (Ki-vel is)
+        self._cc_frame = tk.Frame(row, bg=BG)
+        self._cc_frame.grid(row=0, column=5, padx=(10, 0), sticky="w")
+        self._cc_var = tk.BooleanVar(value=_rrs.get_cost_cut(self.symbol))
+        _ccb = tk.Checkbutton(self._cc_frame, text="Cost-cut", variable=self._cc_var,
+                              bg=BG, fg=FG_GRAY, selectcolor=BG_HEADER, font=self._sf,
+                              activebackground=BG, activeforeground=FG_WHITE,
+                              command=self._on_cost_cut_change)
+        _ccb.pack(side="left")
+        self._cc_bars_var = tk.StringVar(value=str(_rrs.get_cost_cut_bars(self.symbol)))
+        _cce = tk.Entry(self._cc_frame, textvariable=self._cc_bars_var, width=4,
+                        bg=BG_HEADER, fg=FG_WHITE, font=self._sf, relief="flat",
+                        insertbackground=FG_WHITE)
+        _cce.pack(side="left", padx=(4, 0))
+        _cce.bind("<FocusOut>", self._on_cost_cut_bars_save)
+        _cce.bind("<Return>",   self._on_cost_cut_bars_save)
+        _attach_tooltip(self._cc_frame,
+                        "Idő-stop (tananyag): ha ennyi fő-gyertya (M15) után a pozíció "
+                        "még veszteséges, piaci áron zárjuk — a kanóc/zaj korai levágása "
+                        "töredék-R veszteséggel. Bármely presettel kombinálható.")
+
         # Exit — csak Felező/Pajzs + Runner=Kiszállási jel (a maradékot indikátor zárja)
         self._exit_frame = tk.Frame(row, bg=BG)
         self._exit_frame.grid(row=0, column=4, padx=(10, 0), sticky="w")
@@ -1031,6 +1052,18 @@ class InstrumentParamsDialog:
     def _on_cautious_change(self):
         self._rrs.set_cautious(self.symbol, bool(self._cautious_var.get()))
 
+    def _on_cost_cut_change(self):
+        self._rrs.set_cost_cut(self.symbol, bool(self._cc_var.get()))
+
+    def _on_cost_cut_bars_save(self, _event=None):
+        raw = self._cc_bars_var.get().strip().replace(",", ".")
+        try:
+            v = int(float(raw))
+        except ValueError:
+            return
+        if v > 0:
+            self._rrs.set_cost_cut_bars(self.symbol, v)
+
     def _on_runner_change(self, name: str):
         self._rrs.set_runner(self.symbol, self._runner_from_name(name))
         self._update_rr_visibility()   # Exit csak Runner=Kiszállási jelnél látszik
@@ -1152,19 +1185,31 @@ class InstrumentParamsDialog:
         self._rrs.set_exit_config(self.symbol, **{key: val})
 
     def _rr_spec_from_ui(self):
-        """A UI-ban beállított teljes spec (preset + óvatos méret + runner + exit).
-        None, ha 'Ki' (→ a run_pair az alap OFF viselkedést futtatja)."""
+        """A UI-ban beállított teljes spec (preset + óvatos méret + runner + exit +
+        cost-cut). None, ha 'Ki' ÉS a cost-cut is ki (→ a run_pair az alap OFF
+        viselkedést futtatja). A cost-cut Ki preset mellett is élhet (idő-stop)."""
         from core import risk_reduction as _rr
         preset = self._preset_from_name(self._rr_name.get())
-        if preset == _rr.PRESET_OFF:
+        cc_on  = bool(self._cc_var.get())
+        if preset == _rr.PRESET_OFF and not cc_on:
             return None
         runner = self._runner_from_name(self._runner_name.get())
         exit_cfg = self._rrs.get_exit_config(self.symbol)
         exit_cfg["enabled"] = (runner == _rr.RUNNER_EXIT)   # a UI runner-választása dönt
-        return {**_rr.default_config(), "preset": preset,
+        spec = {**_rr.default_config(), "preset": preset,
                 "runner_stop": runner,
-                "cautious": bool(self._cautious_var.get()),
-                "exit": exit_cfg}
+                # Ki presetnél az Óvatos pipa rejtett → ne hasson a méretezésre.
+                "cautious": (bool(self._cautious_var.get())
+                             if preset != _rr.PRESET_OFF else False),
+                "exit": exit_cfg,
+                "cost_cut": cc_on}
+        try:
+            _b = int(float(self._cc_bars_var.get().strip().replace(",", ".")))
+            if _b > 0:
+                spec["cost_cut_bars"] = _b
+        except ValueError:
+            pass
+        return spec
 
     # ── Backtest önálló ablak (progress + időszak + élő egyenleg) ────────────
     def _open_backtest_window(self):

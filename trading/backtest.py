@@ -485,6 +485,12 @@ def run_pair(
     m15_times = m15.index.to_list()
     m15_ptr = 0  # melyik M15 gyertya az aktuális
     _exit_at = _build_exit_evaluator(m15, rr_spec)   # kiszállási-jel (None, ha nincs)
+    # Cost-cut (idő-stop, tananyag 2.6): a nyitás után N fő-tf gyertyával még
+    # VESZTESÉGES trade-et piaci áron zárjuk (kanóc/zaj korai levágása töredék-R
+    # veszteséggel). Bármely presettel kombinálható; default KI.
+    _cc_on    = bool(rr_spec.get("cost_cut"))
+    _cc_delta = pd.Timedelta(minutes=strategy.timeframes()[0].minutes *
+                             int(rr_spec.get("cost_cut_bars", 12)))
     # Pozícióépítés modellezése — CSAK AUTO módban (determinista; a Kézi user-vezérelt)
     # és CSAK OFF presetnél (nincs részleges zárás, tiszta eset). None → nincs építés.
     # A `build` override (a Backtest-ablak FELTÁRÓ Építés-beállítása) elsőbbséget élvez
@@ -618,6 +624,19 @@ def run_pair(
                 trade.pnl_usd     = calc_pnl(trade, trade.close_price)
                 trade.status      = "exit"
                 closed = True
+
+            # ── Cost-cut (idő-stop): N fő-tf gyertya után még veszteséges →
+            # korai zárás a gyertyazáró áron (a teljes SL kivárása helyett).
+            if (not closed and _cc_on
+                    and (m1_time - trade.open_time) >= _cc_delta):
+                _px = float(m1_row["close"])
+                if (_px < trade.open_price if trade.direction == "BUY"
+                        else _px > trade.open_price):
+                    trade.close_price = _px
+                    trade.close_time  = m1_time
+                    trade.pnl_usd     = calc_pnl(trade, _px)
+                    trade.status      = "cut"
+                    closed = True
 
             # ── Pozícióépítés (AUTO, off preset): risk-free trade + gyertyás jel
             # (az M15 zárás túllép a build_ref-en) → piramidális ráépítés (új láb),
@@ -1170,6 +1189,24 @@ def run_portfolio_backtest(
                                      else (trade.open_price - trade.close_price)) / pip_size - sp
                 trade.status      = "exit"
                 closed = True
+
+            # Cost-cut (idő-stop, mint a run_pair-ben): N fő-tf gyertya után még
+            # veszteséges → korai zárás a gyertyazáró áron. (A portfólió-motor
+            # M15-centrikus — lásd m15_ptr —, ezért itt fixen 15 perc/gyertya.)
+            if (not closed and rr_spec.get("cost_cut")
+                    and (m1_time - trade.open_time) >= pd.Timedelta(
+                        minutes=15 * int(rr_spec.get("cost_cut_bars", 12)))):
+                _px = float(row["close"])
+                if (_px < trade.open_price if trade.direction == "BUY"
+                        else _px > trade.open_price):
+                    trade.close_price = _px
+                    trade.close_time  = m1_time
+                    trade.pnl_usd     = calc_pnl(trade, _px)
+                    trade.pnl_pips    = ((_px - trade.open_price)
+                                         if trade.direction == "BUY"
+                                         else (trade.open_price - _px)) / pip_size - sp
+                    trade.status      = "cut"
+                    closed = True
 
             if closed:
                 trade.pnl_usd += trade.booked_pnl   # a részleges zárás(ok) realizált P&L-je

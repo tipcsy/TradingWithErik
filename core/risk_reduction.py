@@ -62,6 +62,12 @@ def default_config() -> dict:
         # 2. lépcső: az ár a célárnál → stop a 2/3-ra (hard TP-nél ritkán él —
         # akkor számít, ha a TP-t kézzel kivetted/kitoltad).
         "thirds_base_R":    1.0,
+        # Cost-cut (tananyag 2.6): IDŐ-STOP, bármely presettel kombinálható.
+        # Ha a nyitás után cost_cut_bars fő-timeframe gyertyával a pozíció még
+        # VESZTESÉGES → piaci áron zárjuk (a kanóc/zaj korai levágása töredék-R
+        # veszteséggel, a teljes SL kivárása helyett). False = kikapcsolva.
+        "cost_cut":         False,
+        "cost_cut_bars":    12,
     }
 
 

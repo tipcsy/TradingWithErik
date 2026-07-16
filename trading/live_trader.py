@@ -922,10 +922,26 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
     open_positions = get_open_positions(magic)
     symbol_positions = [p for p in open_positions if p.symbol == symbol]
 
+    # Cost-cut (idő-stop, tananyag 2.6): ha bekapcsolt, a nyitás után N fő-tf
+    # gyertyányi idővel még VESZTESÉGES pozíciót piaci áron zárjuk (kanóc/zaj
+    # korai levágása). Bármely presettel kombinálható. Az idő SZERVER-epoch
+    # (pos.time és tick.time egyaránt) → nincs időzóna-csúszás.
+    _cc_on   = bool(_spec.get("cost_cut"))
+    _cc_secs = (int(_spec.get("cost_cut_bars", 12))
+                * strategy.timeframes()[0].minutes * 60)
+
     for pos in symbol_positions:
         ticket = pos.ticket
         pnl    = pos.profit
         is_rf  = slot_mgr.is_risk_free(ticket)
+
+        if _cc_on and pnl < 0 and _tick is not None \
+                and (_tick.time - pos.time) >= _cc_secs:
+            if mt5_connector.close_position(ticket):
+                log.info("✂ %s #%d — Cost-cut: %d fő-gyertya után még veszteséges "
+                         "(%.2f$) → korai zárás", symbol, ticket,
+                         int(_spec.get("cost_cut_bars", 12)), pnl)
+                continue
 
         # Megosztott pozíció-állapot (GUI ↔ motor): eredeti SL, trailing toggle, BE,
         # trail_points (None = az optimalizált paramétert használjuk; egész = kézi
