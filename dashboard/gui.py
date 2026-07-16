@@ -1954,9 +1954,18 @@ class DashboardWindow:
         canvas.pack(side="left", fill="both", expand=True)
 
         self._table_frame = tk.Frame(canvas, bg=BG)   # ide kerülnek a sorok
-        canvas.create_window((0, 0), window=self._table_frame, anchor="nw")
+        _win = canvas.create_window((0, 0), window=self._table_frame, anchor="nw")
         self._table_frame.bind(
             "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        # A canvas-ba ágyazott frame NEM veszi fel magától a canvas szélességét
+        # (a create_window a kért méretet használja) → átméretezéskor ráhúzzuk,
+        # így a sorok fill="x"-e tényleg az ablak széléig ér (az Opt státusz
+        # expand-ja a maradék szélességet kapja). Kis ablaknál a természetes
+        # (kért) szélesség marad, hogy a cellák ne nyomódjanak össze.
+        canvas.bind(
+            "<Configure>",
+            lambda e: canvas.itemconfigure(
+                _win, width=max(e.width, self._table_frame.winfo_reqwidth())))
 
         # Egérgörgő csak akkor görget, ha a kurzor a tábla fölött van
         def _on_wheel(e):
