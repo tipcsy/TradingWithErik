@@ -211,30 +211,33 @@ class PairRow:
                     cell.config(cursor="hand2")
                     cell.bind("<Button-1>",
                               lambda e, sn=col.strategy_name: on_marker_click(symbol, sn))
-                # Halvány │ határolók a körcsoport két szélén → a stratégiák
-                # jelölői vizuálisan elkülönülnek egymástól: │● ● ●│ │● ●│
-                def _sep():
-                    s = tk.Label(cell, text="│", bg=self._bg, fg=FG_GRAY_DIM,
+                # „Lego-kocka" keret: vékony szegély KÖRBEN (fent/lent is), benne
+                # a stratégia körei → a stratégiák jelölő-csoportjai dobozokként
+                # különülnek el: ▢● ● ●▢ ▢● ●▢
+                inner = tk.Frame(cell, bg=self._bg, highlightthickness=1,
+                                 highlightbackground=FG_GRAY_DIM,
+                                 highlightcolor=FG_GRAY_DIM)
+                inner.pack(expand=True, pady=2)
+                _click = (lambda e, sn=col.strategy_name:
+                          on_marker_click(symbol, sn)) if on_marker_click else None
+                if _click is not None:
+                    inner.config(cursor="hand2")
+                    inner.bind("<Button-1>", _click)
+                # No-trade (⏸) jel KÜLÖN helyen — nem az első kört cseréli le,
+                # így az irány-szín (zöld/piros pötty) a szünet alatt is látszik.
+                pause = tk.Label(inner, text="", bg=self._bg, fg=FG_GRAY,
                                  font=mono_font, padx=0)
-                    if on_marker_click is not None:
-                        s.config(cursor="hand2")
-                        s.bind("<Button-1>",
-                               lambda e, sn=col.strategy_name: on_marker_click(symbol, sn))
-                    s.pack(side="left")
-                    return s
-                _sep()
+                pause.pack(side="left")
                 circles = []
                 for skey, _slabel in col.stages:
-                    c = tk.Label(cell, text="●", bg=self._bg, fg=FG_GRAY,
-                                 font=mono_font, padx=0)
-                    if on_marker_click is not None:
+                    c = tk.Label(inner, text="●", bg=self._bg, fg=FG_GRAY,
+                                 font=mono_font, padx=1)
+                    if _click is not None:
                         c.config(cursor="hand2")
-                        c.bind("<Button-1>",
-                               lambda e, sn=col.strategy_name: on_marker_click(symbol, sn))
+                        c.bind("<Button-1>", _click)
                     c.pack(side="left", expand=True)
                     circles.append((skey, c))
-                _sep()
-                self.markers[col.key] = (cell, circles)
+                self.markers[col.key] = (cell, circles, pause, inner)
                 continue
             if col.key == "opt":
                 # Az Opt státusz a Vezérlés gombok UTÁN jön, és az ablak MARADÉK
@@ -334,7 +337,9 @@ class PairRow:
             if col.key == "symbol" or col.key in except_keys:
                 continue
             if col.kind == "marker":
-                for _skey, c in self.markers[col.key][1]:
+                _c, circles, pause, _i = self.markers[col.key]
+                pause.config(text="")
+                for _skey, c in circles:
                     c.config(text="●", fg=fg)
                 continue
             self.labels[col.key].config(text="—", fg=fg)
@@ -342,22 +347,21 @@ class PairRow:
     def _render_marker(self, col, ds, trained, no_trade, bg):
         """A jelölő-oszlop köreinek frissítése egy STRATÉGIÁHOZ (col.strategy_name):
         stádiumonként egy kör a strategy_cells[strat][stádium] cellából (glifa+szín).
-        Ha a stratégia ezen az instrumentumon KI van kapcsolva → halvány szürke körök.
-        Az ELSŐ kör a no-trade órában ⏸ (időszakon kívüli) jelet kap."""
-        _frame, circles = self.markers[col.key]
+        Ha a stratégia ezen az instrumentumon KI van kapcsolva → halvány pontok.
+        A no-trade órát KÜLÖN ⏸ jel mutatja a doboz elején — nem az első kört
+        cseréli le, így az irány-szín (zöld/piros pötty) a szünet alatt is látszik."""
+        _frame, circles, pause, _inner = self.markers[col.key]
         sname = col.strategy_name
         enabled_list = getattr(ds, "enabled_strategies", None) or []
         # Üres lista → az egyetlen/aktív stratégia engedélyezett (visszafelé komp.).
         strat_enabled = (sname in enabled_list) if enabled_list else True
         cells = ds.strategy_cells.get(sname, {}) if (trained and strat_enabled) else {}
-        for idx, (skey, c) in enumerate(circles):
+        pause.config(text="⏸" if (no_trade and strat_enabled) else "", bg=bg)
+        for skey, c in circles:
             if not strat_enabled:
                 # Kikapcsolt stratégia ezen az instrumentumon: apró pont (nem kör)
                 # → ránézésre elválik, melyik stratégia él az adott soron.
                 c.config(text="·", fg=FG_GRAY_DIM, bg=bg)
-                continue
-            if no_trade and idx == 0:
-                c.config(text="⏸", fg=FG_GRAY, bg=bg)
                 continue
             cell = cells.get(skey)
             if cell:
@@ -385,11 +389,12 @@ class PairRow:
         self.ctrl_frame.config(bg=bg)
         for lbl in self.labels.values():
             lbl.config(bg=bg)
-        for frame, circles in self.markers.values():
+        for frame, circles, pause, inner in self.markers.values():
             frame.config(bg=bg)
-            # A keret MINDEN gyereke (körök + │ határolók) kövesse a sor-hátteret.
-            for child in frame.winfo_children():
-                child.config(bg=bg)
+            inner.config(bg=bg)
+            pause.config(bg=bg)
+            for _skey, c in circles:
+                c.config(bg=bg)
 
         sym_lbl = self.labels["symbol"]
 
