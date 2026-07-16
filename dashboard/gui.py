@@ -2958,22 +2958,17 @@ class DashboardWindow:
         if ref is not None and ds.day_open:
             ds.change_pct = (ref - ds.day_open) / ds.day_open * 100.0
 
-    def _light_params(self, symbol: str) -> dict:
-        """Az extra-frissítőhöz szükséges pár paraméter (atr_period / max_spread_atr_ratio
-        / min_spread_pips) — az optimalizált JSON-ból, különben alap. Throttle-olva
-        hívjuk, ezért a JSON-olvasás elenyésző."""
+    def _light_pair_data(self, symbol: str) -> dict:
+        """Az optimalizált JSON TELJES tartalma (params + test_summary) az extra-frissítő-
+        höz: a params az ATR/spread-számításhoz, a test_summary a Minőség-grade-hez.
+        Throttle-olva hívjuk, ezért a JSON-olvasás elenyésző. Üres dict, ha nincs/hiba."""
         try:
             pf = params_file(symbol, self.strategy.name)
             if pf.exists():
-                p = json.load(open(pf, encoding="utf-8")).get("params", {})
-                if p:
-                    return p
+                return json.load(open(pf, encoding="utf-8")) or {}
         except Exception:
             pass
-        try:
-            return self.strategy.base_params(self.cfg)
-        except Exception:
-            return {}
+        return {}
 
     def _refresh_light_extras(self, symbol: str):
         """Olcsó 'extrák', amikhez PÁR GYERTYA kell (nem tick): NAPI NYITÓÁR (Vált.%-hoz)
@@ -2994,8 +2989,23 @@ class DashboardWindow:
             from core.indicator_engine import atr as _atr
         except Exception:
             return
-        prm = self._light_params(symbol)
+        data = self._light_pair_data(symbol)
+        prm = data.get("params") or {}
+        if not prm:
+            try:
+                prm = self.strategy.base_params(self.cfg)
+            except Exception:
+                prm = {}
         atr_period = int(prm.get("atr_period", 14))
+        # Minőség (grade) a test_summary-ből — OLCSÓ (nincs gyertya) → opt közben is.
+        _ts = data.get("test_summary") or {}
+        if _ts:
+            try:
+                _gt, _gc, _gr = self.strategy.grade(_ts, self.cfg)
+                ds.opt_grade = (_gt, _gc)
+                ds.opt_grade_reason = _gr
+            except Exception:
+                pass
         # ~300 M15 gyertya: fedi az ATR-t (max spread) ÉS a regime-osztályozó warmupját
         # (atr_avg_period=100) a Piac oszlophoz. Egyetlen copy_rates hívás → olcsó.
         with MT5_LOCK:
