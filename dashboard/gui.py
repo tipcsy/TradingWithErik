@@ -1952,6 +1952,11 @@ class DashboardWindow:
         canvas.configure(yscrollcommand=vsb.set)
         vsb.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
+        # A fejléc a canvason KÍVÜL van, így alapból a scrollbar FÖLÖTT is
+        # végigérne → jobb oldalt a scrollbar tényleges szélességével behúzzuk,
+        # hogy az (expandáló) Opt státusz fejléc pontosan a sorok széléig érjen.
+        vsb.bind("<Configure>",
+                 lambda e: self._header_row.frame.pack_configure(padx=(2, 2 + e.width)))
 
         self._table_frame = tk.Frame(canvas, bg=BG)   # ide kerülnek a sorok
         _win = canvas.create_window((0, 0), window=self._table_frame, anchor="nw")
