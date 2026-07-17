@@ -10,14 +10,15 @@
   ],
   "_comment_available_strategies": "A programban ELÉRHETŐVÉ tett stratégiák (a strategy/ csomag regisztráltjainak whitelistje). A per-pár választó ezeket kínálja, a dashboard ezekből képez oszlopot. Kihagyva/üresen = az ÖSSZES regisztrált. A dashboardon a ⚙ Beállítás ablakból is állítható (oszlop-változás újraindítás után).",
   "tf_align": {
-    "_comment": "TF-együttállás figyelő (dashboard 'Együtt' oszlop): idősíkonként sign(close - SMA(sma_period)); ha a figyelt idősíkok MIND egy irányba mutatnak, erős 'S' (zöld BUY / piros SELL). Csak MEGJELENÍTŐ, nem befolyásolja a kereskedést. Globális (minden instrumentumra). enabled=false → az oszlop üres.",
+    "_comment": "TF-együttállás figyelő (dashboard 'Együtt' oszlop): idősíkonként sign(close - SMA(sma_period)); ha a figyelt idősíkok MIND egy irányba mutatnak, erős 'S' (zöld BUY / piros SELL). Ez a GLOBÁLIS alapértelmezés; instrumentumonként FELÜLÍRHATÓ a pairs.<sym>.tf_align-nal (más idősíkok/SMA). Az 'Együtt' cellára kattintva a per-pár beállítás nyílik. gate: mely stratégiák belépőjét AKADÁLYOZZA (csak a trenddel egyező jel köthet). enabled=false → az oszlop üres.",
     "enabled": true,
     "timeframes": [
       1,
       5,
       15
     ],
-    "sma_period": 50
+    "sma_period": 50,
+    "gate": []
   },
   "dashboard": {
     "_comment": "Felület frissítési ütem. price_refresh_sec: BID/ASK/spread MINDEN párra (1-5 ajánlott). live_refresh_sec: indikátor (WPR) a FUTÓ pároknál. all_refresh_sec: indikátor minden párra. watchdog_threshold_sec: ennyi mp blokkolás fölött figyelmeztet a fagyás-watchdog (data/ui_watchdog.log).",
@@ -99,7 +100,20 @@
       "sess_end": 21,
       "contract_size": 100000.0,
       "viz_enabled": false,
-      "show_trades": true
+      "show_trades": true,
+      "tf_align": {
+        "_comment": "Per-instrumentum TF-együttállás (felülírja a globálisat): itt M1/M15/H1, SMA100, és a wpr_sma belépőjét kapuzza (csak trenddel egyező jel köthet).",
+        "enabled": true,
+        "timeframes": [
+          1,
+          15,
+          60
+        ],
+        "sma_period": 100,
+        "gate": [
+          "wpr_sma"
+        ]
+      }
     },
     "GER40": {
       "_comment": "Index/CFD minta",

@@ -22,18 +22,33 @@ DEFAULT_SMA = 50
 TF_LABEL = {1: "M1", 5: "M5", 15: "M15", 30: "M30", 60: "H1", 240: "H4"}
 
 
-def config(cfg: dict) -> tuple:
-    """(enabled, timeframes, sma_period) a config.json `tf_align` szekciójából.
-    Hiányzó kulcsok → az alapértékek (bekapcsolva, M1/M5/M15, SMA50)."""
-    tc = (cfg.get("tf_align") or {})
+def _normalize(tc: dict) -> tuple:
+    """(enabled, timeframes, sma_period, gate) egy tf_align-szótárból."""
     enabled = bool(tc.get("enabled", True))
     tfs = tc.get("timeframes") or DEFAULT_TIMEFRAMES
     try:
         tfs = [int(t) for t in tfs]
     except (TypeError, ValueError):
         tfs = list(DEFAULT_TIMEFRAMES)
-    sma = int(tc.get("sma_period", DEFAULT_SMA))
-    return enabled, tfs, max(2, sma)
+    sma = max(2, int(tc.get("sma_period", DEFAULT_SMA)))
+    gate = list(tc.get("gate") or [])   # mely stratégiák belépőjét kapuzza
+    return enabled, tfs, sma, gate
+
+
+def config(cfg: dict) -> tuple:
+    """GLOBÁLIS (enabled, timeframes, sma_period) a config.json `tf_align`-jából.
+    Visszafelé kompatibilis (a `gate`-et nem adja vissza)."""
+    en, tfs, sma, _ = _normalize(cfg.get("tf_align") or {})
+    return en, tfs, sma
+
+
+def config_for(cfg: dict, symbol: str) -> tuple:
+    """(enabled, timeframes, sma_period, gate) az ADOTT instrumentumra: a per-pár
+    `pairs.<sym>.tf_align` FELÜLÍRJA a globális `tf_align`-t (kulcsonként), az pedig
+    az alapértékeket. Így minden instrumentum mást figyelhet (pl. M1/M15/H1, SMA100)."""
+    glob = cfg.get("tf_align") or {}
+    pair = ((cfg.get("pairs") or {}).get(symbol) or {}).get("tf_align") or {}
+    return _normalize({**glob, **pair})
 
 
 def _sign(closes, n: int) -> int:
@@ -59,6 +74,14 @@ def alignment(closes_by_tf: dict, timeframes: list, sma_period: int) -> tuple:
     else:
         direction = None
     return direction, signs
+
+
+def gate_ok(alignment_dir: "str | None", signal: str) -> bool:
+    """A belépő ENGEDÉLYEZETT-e a TF-együttállás kapu szempontjából: True, ha az
+    együttállás iránya EGYEZIK a jel irányával (minden figyelt idősík a trenddel).
+    Ha nincs teljes együttállás (`alignment_dir is None`) → False (blokkol). A hívó
+    csak akkor alkalmazza, ha a stratégia kapuzva van az adott instrumentumon."""
+    return alignment_dir is not None and alignment_dir == signal
 
 
 def labels(timeframes: list) -> list:

@@ -464,6 +464,23 @@ def apply_market_state(objects: list, df15, pair_cfg: dict = None) -> list:
     return objects
 
 
+def tf_align_visual_objects(symbol: str) -> list:
+    """A TF-együttállás figyelő SMA-vonalai a charton: a figyelt (bekapcsolt)
+    idősíkokra egy-egy MA(sma_period), a fő ablakba (az MQL5 iMA-val rajzolja az
+    adott idősíkon). Csak ha az instrumentumon engedélyezve van; a viz-oldalon
+    csak az MQL5 által ismert idősíkok (M1/M5/M15/M30/H1) — a H4-et a cella mutatja."""
+    _VIZ_TF = {1: "M1", 5: "M5", 15: "M15", 30: "M30", 60: "H1"}
+    try:
+        from strategy import visual as viz
+        from core import tf_align as _tfa
+        en, tfs, sma, _ = _tfa.config_for(_run_cfg, symbol)
+        if not en:
+            return []
+        return [viz.Indicator("MA", _VIZ_TF[tf], sma) for tf in tfs if tf in _VIZ_TF]
+    except Exception:
+        return []
+
+
 def actual_trade_objects(symbol: str, since_ts: int) -> list:
     """A VALÓS kötések (MT5 deal-history) rétege — a replay jel-vonalaktól eltérő:
       • belépő-NYÍL a tényleges betöltési áron (fel=BUY / le=SELL),
@@ -639,6 +656,8 @@ def pair_visual_lines(symbol: str, params: dict, strategy, pip_size: float,
     m1 = bars.get("M1")
     if m1 is not None and len(m1):
         objects = objects + actual_trade_objects(symbol, int(m1.index[0].timestamp()))
+    # + a TF-együttállás figyelő SMA-vonalai (a bekapcsolt idősíkokra) — #4.
+    objects = objects + tf_align_visual_objects(symbol)
     from strategy.visual import tag_line
     return [tag_line(o.line(), strategy.name) for o in objects]
 
@@ -1352,6 +1371,20 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
     # Egy szimbólumon EGYSZERRE csak egy pozíció lehet — soha ne halmozzon
     # ugyanarra a párra (ez okozta a 8 GBPAUD-pozíciót 4 slotra).
     already_open = len(symbol_positions) > 0
+    # ── TF-együttállás kapu (opcionális, per-instrumentum config + per-stratégia
+    # bekapcsolás): ha EZ a stratégia kapuzva van ezen az instrumentumon, csak a
+    # trenddel EGYEZŐ jel léphet (az összes figyelt idősík a jel irányába mutat).
+    tf_gate_ok = True
+    if signal != "NONE":
+        try:
+            from core import tf_align as _tfa
+            _tf_en, _tf_tfs, _tf_sma, _tf_gate = _tfa.config_for(_run_cfg, symbol)
+            if _tf_en and strategy.name in _tf_gate:
+                _tf_cl = mt5_connector.tf_closes(symbol, _tf_tfs, _tf_sma + 5)
+                _tf_dir, _ = _tfa.alignment(_tf_cl, _tf_tfs, _tf_sma)
+                tf_gate_ok = _tfa.gate_ok(_tf_dir, signal)
+        except Exception:
+            tf_gate_ok = True
     # Diagnosztika: ha a stratégia JELET adott (a viz ezt rajzolja — a NYERS
     # jelet, végrehajtási szűrők nélkül), de egy VÉGREHAJTÁSI kapu blokkol, írjuk
     # ki, MELYIK — különben úgy tűnik, "látta a jelet, mégsem lépett be". A jel
@@ -1362,12 +1395,15 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
                   if daily_limit_hit else
                   "nincs érvényes ATR (adathiány)" if atr_val is None else
                   "nincs szabad slot" if not slot_mgr.can_open() else
-                  "spread túl nagy (piac-kapu)" if not spread_ok else None)
+                  "spread túl nagy (piac-kapu)" if not spread_ok else
+                  "TF-együttállás kapu (nem minden idősík a jel irányába)" if not tf_gate_ok
+                  else None)
         if _block:
             log.info("⏭ %s %s jel — belépő KIHAGYVA: %s", symbol, signal, _block)
 
     if (signal != "NONE" and not already_open and not daily_limit_hit
-            and atr_val is not None and slot_mgr.can_open() and spread_ok):
+            and atr_val is not None and slot_mgr.can_open() and spread_ok
+            and tf_gate_ok):
         # ── Korreláció / devizakitettség kapu ──────────────────────────────
         cmode    = correlation.get_mode()
         conflict = []

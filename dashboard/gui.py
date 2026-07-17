@@ -61,7 +61,6 @@ TRAILING_COLUMNS = [
     Column("position", "Pozíció",    10, "center", kind="fixed"),
     Column("daily",    "Napi P&L",    9, "center", kind="fixed"),
     Column("market",   "Piac",       10, "center", kind="fixed"),
-    Column("tfalign",  "Együtt",     10, "center", kind="tfalign"),
     Column("quality",  "Minőség",     9, "center", kind="fixed"),
     Column("opt",      "Opt státusz",18, "w",      kind="fixed"),
 ]
@@ -106,7 +105,9 @@ def build_columns(strategies) -> list[Column]:
                                     header=st.name, strategy_name=st.name))
             else:
                 mid.append(col)
-    return LEADING_COLUMNS + mid + TRAILING_COLUMNS
+    # A TF-együttállás („Együtt") oszlop a stratégia-oszlopok ELÉ kerül.
+    tfalign = [Column("tfalign", "Együtt", 10, "center", kind="tfalign")]
+    return LEADING_COLUMNS + tfalign + mid + TRAILING_COLUMNS
 
 
 # ---------------------------------------------------------------------------
@@ -3092,17 +3093,21 @@ class DashboardWindow:
                        self.optimizer_status.get(symbol, ""),
                        connected=getattr(self, "_connected", False))
 
-    def _show_tfalign_settings(self, symbol: str = None):
-        """A TF-együttállás („Együtt" oszlop) GLOBÁLIS beállításai: mely idősíkokat
-        figyelje (2–6) + az SMA-periódus. Az „Együtt" cellára kattintva nyílik."""
+    def _show_tfalign_settings(self, symbol: str):
+        """A TF-együttállás beállításai az ADOTT instrumentumra (per-pár): mely
+        idősíkokat figyelje (2–6) + SMA-periódus + be/ki, ÉS stratégiánként egy
+        kapcsoló, hogy az együttállás AKADÁLYOZZA-e a belépőt (csak a trenddel
+        egyező jel köthet). Mentés a `pairs.<sym>.tf_align`-ba. Az „Együtt" cellára
+        kattintva nyílik."""
         from core import tf_align as _tfa
-        _en, _tfs, _sma = _tfa.config(self.cfg)
+        from strategy import available_strategy_names
+        _en, _tfs, _sma, _gate = _tfa.config_for(self.cfg, symbol)
         popup = tk.Toplevel(self.root)
-        popup.title("TF-együttállás — beállítások (globális)")
+        popup.title(f"{symbol} — TF-együttállás")
         popup.configure(bg=BG)
         popup.resizable(False, False)
         popup.grab_set()
-        tk.Label(popup, text="TF-együttállás figyelő", bg=BG, fg=FG_WHITE,
+        tk.Label(popup, text=f"{symbol} — TF-együttállás figyelő", bg=BG, fg=FG_WHITE,
                  font=self._header_font).pack(anchor="w", padx=12, pady=(12, 2))
         tk.Label(popup, text="Mely idősíkokat figyelje (válassz 2–6-ot):", bg=BG,
                  fg=FG_GRAY, font=self._small_font).pack(anchor="w", padx=12, pady=(4, 2))
@@ -3126,13 +3131,29 @@ class DashboardWindow:
         tk.Entry(_f2, textvariable=sma_var, width=6, bg=BG_HEADER, fg=FG_WHITE,
                  font=self._small_font, insertbackground=FG_WHITE).pack(side="left", padx=6)
         en_var = tk.BooleanVar(value=_en)
-        tk.Checkbutton(popup, text="Bekapcsolva (az oszlop látszik)", variable=en_var,
+        tk.Checkbutton(popup, text="Bekapcsolva (az oszlop + viz-SMA látszik)", variable=en_var,
                        bg=BG, fg=FG_WHITE, selectcolor=BG_HEADER, font=self._small_font,
                        activebackground=BG, activeforeground=FG_WHITE).pack(
                        anchor="w", padx=12, pady=(4, 0))
 
+        # ── Kapu: az együttállás akadályozza-e a belépőt (per stratégia) ──────
+        tk.Label(popup, text="Az együttállás AKADÁLYOZZA a belépőt (csak a trenddel "
+                 "egyező jel köthet) ezeknél a stratégiáknál:", bg=BG, fg=FG_GRAY,
+                 font=self._small_font, justify="left", wraplength=340).pack(
+                 anchor="w", padx=12, pady=(10, 2))
+        _gate_vars = {}
+        _grow = tk.Frame(popup, bg=BG)
+        _grow.pack(anchor="w", padx=18)
+        for sn in available_strategy_names(self.cfg):
+            gv = tk.BooleanVar(value=(sn in _gate))
+            _gate_vars[sn] = gv
+            tk.Checkbutton(_grow, text=sn, variable=gv, bg=BG, fg=FG_WHITE,
+                           selectcolor=BG_HEADER, font=self._small_font,
+                           activebackground=BG, activeforeground=FG_WHITE).pack(
+                           side="left", padx=(0, 12))
+
         lbl_err = tk.Label(popup, text="", bg=BG, fg=FG_RED, font=self._small_font,
-                           wraplength=320, justify="left")
+                           wraplength=340, justify="left")
         lbl_err.pack(anchor="w", padx=12, pady=(6, 0))
 
         def _save():
@@ -3145,10 +3166,10 @@ class DashboardWindow:
             except ValueError:
                 lbl_err.config(text="Az SMA-periódus egész szám legyen.")
                 return
-            tc = self.cfg.setdefault("tf_align", {})
-            tc["enabled"] = bool(en_var.get())
-            tc["timeframes"] = chosen
-            tc["sma_period"] = sma
+            gate = [sn for sn, gv in _gate_vars.items() if gv.get()]
+            pc = self.cfg.setdefault("pairs", {}).setdefault(symbol, {})
+            pc["tf_align"] = {"enabled": bool(en_var.get()),
+                              "timeframes": chosen, "sma_period": sma, "gate": gate}
             self._save_main_config()
             popup.destroy()
 
@@ -3588,18 +3609,15 @@ class DashboardWindow:
         # NATIVE copy_rates (nincs resample-torzítás); sign(close − SMA(n)).
         try:
             from core import tf_align as _tfa
-            _tfa_en, _tfa_tfs, _tfa_sma = _tfa.config(self.cfg)
+            from core import mt5_connector as _mc
+            _tfa_en, _tfa_tfs, _tfa_sma, _ = _tfa.config_for(self.cfg, symbol)
             if _tfa_en:
-                _closes = {}
-                with MT5_LOCK:
-                    for _tf in _tfa_tfs:
-                        _r = _mt5.copy_rates_from_pos(
-                            symbol, self._mt5_timeframe(_mt5, _tf), 0, _tfa_sma + 5)
-                        if _r is not None and len(_r):
-                            _closes[_tf] = [float(x["close"]) for x in _r]
+                _closes = _mc.tf_closes(symbol, _tfa_tfs, _tfa_sma + 5)
                 ds.tf_align_dir, ds.tf_align_signs = _tfa.alignment(
                     _closes, _tfa_tfs, _tfa_sma)
                 ds.tf_align_labels = _tfa.labels(_tfa_tfs)
+            else:
+                ds.tf_align_signs, ds.tf_align_dir = [], None
         except Exception:
             pass
         # 'Utolsó opt' PERZISZTENS címke (a done-marker idejéből) — ha nem épp optimalizál.

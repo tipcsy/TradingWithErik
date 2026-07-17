@@ -486,6 +486,32 @@ def _breakeven_plan(p, info):
     return target_sl, feasible
 
 
+_TF_CONST = None   # perc → MT5 timeframe konstans (lazán, első híváskor töltve)
+
+
+def tf_closes(symbol: str, timeframes: list, count: int) -> dict:
+    """Idősíkonként (perc) az utolsó `count` ZÁRÓár, NATIVE copy_rates-ből
+    (nincs resample-torzítás). {perc: [close,…]}; a nem elérhetőt kihagyja. A
+    TF-együttállás figyelő (dashboard + élő kapu) ezt használja."""
+    global _TF_CONST
+    if _TF_CONST is None:
+        _TF_CONST = {1: mt5.TIMEFRAME_M1, 5: mt5.TIMEFRAME_M5, 15: mt5.TIMEFRAME_M15,
+                     30: mt5.TIMEFRAME_M30, 60: mt5.TIMEFRAME_H1, 240: mt5.TIMEFRAME_H4}
+    out: dict = {}
+    try:
+        with MT5_LOCK:
+            for tf in timeframes:
+                const = _TF_CONST.get(int(tf))
+                if const is None:
+                    continue
+                r = mt5.copy_rates_from_pos(symbol, const, 0, int(count))
+                if r is not None and len(r):
+                    out[int(tf)] = [float(x["close"]) for x in r]
+    except Exception:
+        return out
+    return out
+
+
 def breakeven_reached(ticket: int) -> bool:
     """A pozíció JELENLEGI SL-je már eléri-e (vagy túllépi) a költség-tudatos BE
     szintet a PROFIT oldalon — függetlenül attól, KI mozgatta (a motor VAGY a
