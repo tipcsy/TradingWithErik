@@ -61,6 +61,7 @@ TRAILING_COLUMNS = [
     Column("position", "Pozíció",    10, "center", kind="fixed"),
     Column("daily",    "Napi P&L",    9, "center", kind="fixed"),
     Column("market",   "Piac",       10, "center", kind="fixed"),
+    Column("tfalign",  "Együtt",     10, "center", kind="tfalign"),
     Column("quality",  "Minőség",     9, "center", kind="fixed"),
     Column("opt",      "Opt státusz",18, "w",      kind="fixed"),
 ]
@@ -188,7 +189,7 @@ class PairRow:
     def __init__(self, parent: tk.Frame, symbol: str, row_idx: int, columns: list,
                  on_run, on_opt, on_delete, on_risky, on_name_click, mono_font, small_font,
                  on_status_click=None, on_viz=None, on_marker_click=None, on_opt_menu=None,
-                 on_trades=None):
+                 on_trades=None, on_tfalign=None):
         self.symbol  = symbol
         self.columns = columns
         self._bg     = BG_ROW_ODD if row_idx % 2 == 0 else BG_ROW_EVEN
@@ -204,6 +205,8 @@ class PairRow:
         # A fix szélességű Frame (pack_propagate ki) igazodik a fejléc-oszlophoz
         # (width karakter × mono px + 2×padx), a körök benne elosztva.
         self.markers: dict[str, tuple] = {}
+        self.tfalign = None            # TF-együttállás cella (dots + S), lazán építve
+        self._on_tfalign = None        # kattintás-callback a TF-align cellához
         _charpx = mono_font.measure("0")
         _cellh  = mono_font.metrics("linespace") + 6
         for col in self.columns:
@@ -245,6 +248,25 @@ class PairRow:
                     c.pack(side="left", expand=True)
                     circles.append((skey, c))
                 self.markers[col.key] = (cell, circles, pause, inner)
+                continue
+            if col.kind == "tfalign":
+                # TF-együttállás cella: idősíkonként egy színes pont (zöld BUY / piros
+                # SELL / szürke semleges) + egy erős „S", ha MIND egyezik. A pontokat
+                # az első frissítéskor építjük (a figyelt idősíkok számától függően).
+                # A cellára kattintva → a TF-együttállás beállítás-ablaka (idősíkok+SMA).
+                cell = tk.Frame(self.frame, bg=self._bg,
+                                width=_charpx * col.width + 8, height=_cellh)
+                cell.pack(side="left")
+                cell.pack_propagate(False)
+                inner = tk.Frame(cell, bg=self._bg)
+                inner.pack(expand=True)
+                self._on_tfalign = on_tfalign
+                if on_tfalign is not None:
+                    _tclick = lambda e: on_tfalign(symbol)
+                    for _w in (cell, inner):
+                        _w.config(cursor="hand2")
+                        _w.bind("<Button-1>", _tclick)
+                self.tfalign = {"inner": inner, "dots": [], "s": None}
                 continue
             if col.key == "opt":
                 # Az Opt státusz a Vezérlés gombok UTÁN jön, és az ablak MARADÉK
@@ -383,6 +405,48 @@ class PairRow:
             else:
                 c.config(text="●", fg=FG_GRAY, bg=bg)
 
+    def _render_tfalign(self, ds, bg):
+        """TF-együttállás cella: idősíkonként egy színes pont (zöld=fölfelé /
+        piros=lefelé / szürke=semleges) + egy erős „S", ha MIND egy irányba mutat
+        (zöld BUY / piros SELL). A pontokat az idősíkok számához igazítva építjük."""
+        if not self.tfalign:
+            return
+        signs = getattr(ds, "tf_align_signs", None) or []
+        direction = getattr(ds, "tf_align_dir", None)
+        inner, dots = self.tfalign["inner"], self.tfalign["dots"]
+        # Pontok (újra)építése, ha a szám változott (config-váltás/első frissítés).
+        if len(dots) != len(signs):
+            _tclick = (lambda e: self._on_tfalign(self.symbol)) if self._on_tfalign else None
+            for w in inner.winfo_children():
+                w.destroy()
+            dots = []
+            for _ in signs:
+                d = tk.Label(inner, text="●", bg=bg, fg=FG_GRAY, font=self._mono, padx=1)
+                if _tclick is not None:
+                    d.config(cursor="hand2")
+                    d.bind("<Button-1>", _tclick)
+                d.pack(side="left")
+                dots.append(d)
+            s_lbl = tk.Label(inner, text=" ", bg=bg, fg=FG_GRAY, font=self._mono, padx=1)
+            if _tclick is not None:
+                s_lbl.config(cursor="hand2")
+                s_lbl.bind("<Button-1>", _tclick)
+            s_lbl.pack(side="left")
+            self.tfalign["dots"], self.tfalign["s"] = dots, s_lbl
+        # Pontok színe a per-idősík irányból.
+        for d, s in zip(self.tfalign["dots"], signs):
+            col = FG_GREEN if s > 0 else FG_RED if s < 0 else FG_GRAY
+            d.config(fg=col, bg=bg)
+        # Erős „S" csak együttállásnál (különben halvány „–").
+        s_lbl = self.tfalign["s"]
+        if s_lbl is not None:
+            if direction == "BUY":
+                s_lbl.config(text="S", fg=FG_GREEN, bg=bg)
+            elif direction == "SELL":
+                s_lbl.config(text="S", fg=FG_RED, bg=bg)
+            else:
+                s_lbl.config(text="–", fg=FG_GRAY_DIM, bg=bg)
+
     def update(self, ds, inst_state: str, opt_status: str, connected: bool = True,
                no_trade: bool = False):
         trained      = ds.trained
@@ -490,6 +554,8 @@ class PairRow:
                     self.labels[key].config(text=f"{rem//60}:{rem%60:02d}", fg=FG_GRAY)
             elif col.kind == "marker":
                 self._render_marker(col, ds, trained, no_trade, bg)
+            elif col.kind == "tfalign":
+                self._render_tfalign(ds, bg)
             else:  # strategy
                 cell = ds.strategy_cells.get(key) if trained else None
                 if cell:
@@ -2203,7 +2269,8 @@ class DashboardWindow:
                 mono_font=mono_font, small_font=small_font,
                 on_status_click=self._show_opt_log, on_viz=self._handle_viz,
                 on_marker_click=self._show_strategy_params,
-                on_opt_menu=self._handle_opt_menu, on_trades=self._handle_trades)
+                on_opt_menu=self._handle_opt_menu, on_trades=self._handle_trades,
+                on_tfalign=self._show_tfalign_settings)
             self._bind_ctrl_width_sync(self.rows[symbol])
 
         self._apply_filter_sort()
@@ -2447,7 +2514,8 @@ class DashboardWindow:
             mono_font=self._mono_font, small_font=self._small_font,
             on_status_click=self._show_opt_log, on_viz=self._handle_viz,
             on_marker_click=self._show_strategy_params,
-            on_opt_menu=self._handle_opt_menu, on_trades=self._handle_trades)
+            on_opt_menu=self._handle_opt_menu, on_trades=self._handle_trades,
+            on_tfalign=self._show_tfalign_settings)
         self._bind_ctrl_width_sync(self.rows[symbol])
         self._apply_filter_sort()
 
@@ -3024,6 +3092,73 @@ class DashboardWindow:
                        self.optimizer_status.get(symbol, ""),
                        connected=getattr(self, "_connected", False))
 
+    def _show_tfalign_settings(self, symbol: str = None):
+        """A TF-együttállás („Együtt" oszlop) GLOBÁLIS beállításai: mely idősíkokat
+        figyelje (2–6) + az SMA-periódus. Az „Együtt" cellára kattintva nyílik."""
+        from core import tf_align as _tfa
+        _en, _tfs, _sma = _tfa.config(self.cfg)
+        popup = tk.Toplevel(self.root)
+        popup.title("TF-együttállás — beállítások (globális)")
+        popup.configure(bg=BG)
+        popup.resizable(False, False)
+        popup.grab_set()
+        tk.Label(popup, text="TF-együttállás figyelő", bg=BG, fg=FG_WHITE,
+                 font=self._header_font).pack(anchor="w", padx=12, pady=(12, 2))
+        tk.Label(popup, text="Mely idősíkokat figyelje (válassz 2–6-ot):", bg=BG,
+                 fg=FG_GRAY, font=self._small_font).pack(anchor="w", padx=12, pady=(4, 2))
+        _AVAIL = [(1, "M1"), (5, "M5"), (15, "M15"), (30, "M30"), (60, "H1"), (240, "H4")]
+        _vars = {}
+        _row = tk.Frame(popup, bg=BG)
+        _row.pack(anchor="w", padx=18)
+        for mins, lbl in _AVAIL:
+            v = tk.BooleanVar(value=(mins in _tfs))
+            _vars[mins] = v
+            tk.Checkbutton(_row, text=lbl, variable=v, bg=BG, fg=FG_WHITE,
+                           selectcolor=BG_HEADER, font=self._small_font,
+                           activebackground=BG, activeforeground=FG_WHITE).pack(
+                           side="left", padx=(0, 10))
+
+        _f2 = tk.Frame(popup, bg=BG)
+        _f2.pack(anchor="w", padx=12, pady=(8, 2))
+        tk.Label(_f2, text="SMA-periódus:", bg=BG, fg=FG_GRAY,
+                 font=self._small_font).pack(side="left")
+        sma_var = tk.StringVar(value=str(_sma))
+        tk.Entry(_f2, textvariable=sma_var, width=6, bg=BG_HEADER, fg=FG_WHITE,
+                 font=self._small_font, insertbackground=FG_WHITE).pack(side="left", padx=6)
+        en_var = tk.BooleanVar(value=_en)
+        tk.Checkbutton(popup, text="Bekapcsolva (az oszlop látszik)", variable=en_var,
+                       bg=BG, fg=FG_WHITE, selectcolor=BG_HEADER, font=self._small_font,
+                       activebackground=BG, activeforeground=FG_WHITE).pack(
+                       anchor="w", padx=12, pady=(4, 0))
+
+        lbl_err = tk.Label(popup, text="", bg=BG, fg=FG_RED, font=self._small_font,
+                           wraplength=320, justify="left")
+        lbl_err.pack(anchor="w", padx=12, pady=(6, 0))
+
+        def _save():
+            chosen = [m for m, _ in _AVAIL if _vars[m].get()]
+            if not (2 <= len(chosen) <= 6):
+                lbl_err.config(text="2–6 idősíkot válassz.")
+                return
+            try:
+                sma = max(2, int(sma_var.get().strip()))
+            except ValueError:
+                lbl_err.config(text="Az SMA-periódus egész szám legyen.")
+                return
+            tc = self.cfg.setdefault("tf_align", {})
+            tc["enabled"] = bool(en_var.get())
+            tc["timeframes"] = chosen
+            tc["sma_period"] = sma
+            self._save_main_config()
+            popup.destroy()
+
+        btns = tk.Frame(popup, bg=BG)
+        btns.pack(pady=12)
+        tk.Button(btns, text="Mentés", bg=BTN_PLAY_BG, fg=BTN_PLAY_FG, relief="flat",
+                  font=self._small_font, command=_save).pack(side="left", padx=6)
+        tk.Button(btns, text="Mégse", bg=BTN_DIS_BG, fg=BTN_DIS_FG, relief="flat",
+                  font=self._small_font, command=popup.destroy).pack(side="left", padx=6)
+
     def _handle_delete(self, symbol: str):
         """Instrumentum törlése a config-ból és a táblából (megerősítéssel).
         Csak megállított (STOPPED) párra engedélyezett."""
@@ -3449,6 +3584,24 @@ class DashboardWindow:
                         ds.market_state_label, ds.market_state_color = _ms.display(_cat)
             except Exception:
                 pass
+        # TF-együttállás (M1/M5/M15 SMA-irány) → az „Együtt" oszlop. Idősíkonként
+        # NATIVE copy_rates (nincs resample-torzítás); sign(close − SMA(n)).
+        try:
+            from core import tf_align as _tfa
+            _tfa_en, _tfa_tfs, _tfa_sma = _tfa.config(self.cfg)
+            if _tfa_en:
+                _closes = {}
+                with MT5_LOCK:
+                    for _tf in _tfa_tfs:
+                        _r = _mt5.copy_rates_from_pos(
+                            symbol, self._mt5_timeframe(_mt5, _tf), 0, _tfa_sma + 5)
+                        if _r is not None and len(_r):
+                            _closes[_tf] = [float(x["close"]) for x in _r]
+                ds.tf_align_dir, ds.tf_align_signs = _tfa.alignment(
+                    _closes, _tfa_tfs, _tfa_sma)
+                ds.tf_align_labels = _tfa.labels(_tfa_tfs)
+        except Exception:
+            pass
         # 'Utolsó opt' PERZISZTENS címke (a done-marker idejéből) — ha nem épp optimalizál.
         # Így restart / opt közben sem tűnik el (nem az in-memory 'Kész ✓'-ra hagyatkozik).
         if self.instrument_state.get(symbol) not in ("OPTIMIZING", "QUEUED"):

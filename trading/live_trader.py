@@ -129,6 +129,12 @@ class PairDashboardState:
     # valós SL/TP) ettől függetlenül mindig látszanak. Ki: a GUI egyszeri CLEAR-t kér.
     show_trades:      bool = True
 
+    # TF-együttállás monitor (az „Együtt" oszlop): a figyelt idősíkok SMA-iránya
+    # (+1/−1/0 sorrendben) + az együttállás iránya ('BUY'/'SELL'/None) + a címkék.
+    tf_align_signs:   list = field(default_factory=list)
+    tf_align_dir:     "str | None" = None
+    tf_align_labels:  list = field(default_factory=list)
+
 
 # Globális dashboard állapot — a GUI ebből olvas
 dashboard: dict[str, PairDashboardState] = {}

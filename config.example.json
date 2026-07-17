@@ -9,6 +9,16 @@
     "ml_ai"
   ],
   "_comment_available_strategies": "A programban ELÉRHETŐVÉ tett stratégiák (a strategy/ csomag regisztráltjainak whitelistje). A per-pár választó ezeket kínálja, a dashboard ezekből képez oszlopot. Kihagyva/üresen = az ÖSSZES regisztrált. A dashboardon a ⚙ Beállítás ablakból is állítható (oszlop-változás újraindítás után).",
+  "tf_align": {
+    "_comment": "TF-együttállás figyelő (dashboard 'Együtt' oszlop): idősíkonként sign(close - SMA(sma_period)); ha a figyelt idősíkok MIND egy irányba mutatnak, erős 'S' (zöld BUY / piros SELL). Csak MEGJELENÍTŐ, nem befolyásolja a kereskedést. Globális (minden instrumentumra). enabled=false → az oszlop üres.",
+    "enabled": true,
+    "timeframes": [
+      1,
+      5,
+      15
+    ],
+    "sma_period": 50
+  },
   "dashboard": {
     "_comment": "Felület frissítési ütem. price_refresh_sec: BID/ASK/spread MINDEN párra (1-5 ajánlott). live_refresh_sec: indikátor (WPR) a FUTÓ pároknál. all_refresh_sec: indikátor minden párra. watchdog_threshold_sec: ennyi mp blokkolás fölött figyelmeztet a fagyás-watchdog (data/ui_watchdog.log).",
     "price_refresh_sec": 3,
