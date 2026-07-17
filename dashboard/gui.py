@@ -1880,9 +1880,12 @@ class DashboardWindow:
         self._on_stop         = on_stop_pair
         self._on_slots_change = on_slots_change
         self.strategy         = strategy or get_strategy(cfg)
-        # Több-stratégia: oszlop MINDEN regisztrált stratégiához (fejléc = neve).
-        from strategy import registered_strategy_names, get_strategy_by_name
-        self._all_strategies  = [get_strategy_by_name(n) for n in registered_strategy_names()]
+        # Több-stratégia: oszlop MINDEN ELÉRHETŐ stratégiához (fejléc = neve). Az
+        # elérhetők a config `available_strategies` whitelistje (alap = az összes
+        # regisztrált) — így egy kikapcsolt stratégia nem kap oszlopot.
+        from strategy import available_strategy_names, get_strategy_by_name
+        self._all_strategies  = [get_strategy_by_name(n)
+                                 for n in available_strategy_names(cfg)]
         self._columns         = build_columns(self._all_strategies)
         # Stratégia-hatókörű params-tárolás: aktív stratégia + egyszeri migráció.
         from core.params_store import set_active_strategy, migrate_flat_layout
@@ -2424,6 +2427,26 @@ class DashboardWindow:
                  bg=BG, fg=FG_GRAY, font=self._small_font, justify="left",
                  wraplength=680).pack(anchor="w", padx=10)
 
+        # ── Elérhető stratégiák (config: available_strategies) ────────────────
+        # A program ezeket kínálja fel (per-pár választó) és ezekből képez oszlopot.
+        # A jelölőnégyzetek AZ IRÁNYADÓK erre a kulcsra (a lenti JSON-t felülírják).
+        from strategy import registered_strategy_names, available_strategy_names
+        tk.Label(popup, text="Elérhető stratégiák (a program ezeket kínálja és ezekből "
+                 "képez oszlopot — az oszlop-változás újraindítás után látszik):",
+                 bg=BG, fg=FG_BLUE, font=self._small_font, justify="left",
+                 wraplength=680).pack(anchor="w", padx=10, pady=(8, 0))
+        _avail_now  = set(available_strategy_names(self.cfg))
+        _avail_vars = {}
+        _av_row = tk.Frame(popup, bg=BG)
+        _av_row.pack(anchor="w", padx=20, pady=(2, 0))
+        for _sn in registered_strategy_names():
+            _v = tk.BooleanVar(value=(_sn in _avail_now))
+            _avail_vars[_sn] = _v
+            tk.Checkbutton(_av_row, text=_sn, variable=_v, bg=BG, fg=FG_WHITE,
+                           selectcolor=BG_HEADER, font=self._small_font,
+                           activebackground=BG, activeforeground=FG_WHITE).pack(
+                           side="left", padx=(0, 12))
+
         txt_frame = tk.Frame(popup, bg=BG)
         txt_frame.pack(fill="both", expand=True, padx=10, pady=4)
         sb = tk.Scrollbar(txt_frame)
@@ -2462,6 +2485,16 @@ class DashboardWindow:
             except Exception as e:
                 lbl_err.config(text=f"Érvénytelen JSON: {e}")
                 return
+            # Az 'Elérhető stratégiák' jelölőnégyzetek az irányadók az
+            # available_strategies kulcsra (a szerkesztő JSON-ját felülírják).
+            chosen_av = [n for n in registered_strategy_names() if _avail_vars[n].get()]
+            if not chosen_av:
+                lbl_err.config(text="Legalább egy stratégia legyen elérhető.")
+                return
+            if set(chosen_av) == set(registered_strategy_names()):
+                new.pop("available_strategies", None)   # mind → default, ne szennyezze
+            else:
+                new["available_strategies"] = chosen_av
             try:
                 with open(ROOT / "config.json", "w", encoding="utf-8") as f:
                     json.dump(new, f, indent=2, ensure_ascii=False)
@@ -2505,7 +2538,7 @@ class DashboardWindow:
         """Mely stratégiák aktívak ezen az instrumentumon (több is választható →
         pairs.<sym>.strategies). A per-stratégia kockázatcsökkentés és a V-gomb
         stratégiája később kerül ide (a jegyzet szerint tisztázandó)."""
-        from strategy import (registered_strategy_names, enabled_strategy_names,
+        from strategy import (available_strategy_names, enabled_strategy_names,
                               default_strategy_name)
         popup = tk.Toplevel(self.root)
         popup.title(f"{symbol} — instrumentum beállítások")
@@ -2518,7 +2551,7 @@ class DashboardWindow:
                  font=self._small_font).pack(anchor="w", padx=12, pady=(4, 2))
         cur = set(enabled_strategy_names(self.cfg, symbol))
         _vars = {}
-        for name in registered_strategy_names():
+        for name in available_strategy_names(self.cfg):
             v = tk.BooleanVar(value=(name in cur))
             _vars[name] = v
             tk.Checkbutton(popup, text=name, variable=v, bg=BG, fg=FG_WHITE,
@@ -2547,7 +2580,7 @@ class DashboardWindow:
         lbl.pack(anchor="w", padx=12, pady=(8, 0))
 
         def _save():
-            chosen = [n for n in registered_strategy_names() if _vars[n].get()]
+            chosen = [n for n in available_strategy_names(self.cfg) if _vars[n].get()]
             if not chosen:
                 lbl.config(text="Legalább egy stratégia legyen aktív.", fg=FG_RED)
                 return
@@ -3786,9 +3819,9 @@ def _demo_dashboard(cfg: dict):
     random.shuffle(states_pool)
 
     db, inst_state, opt_status = {}, {}, {}
-    from strategy import (registered_strategy_names, get_strategy_by_name,
+    from strategy import (available_strategy_names, get_strategy_by_name,
                           enabled_strategy_names as _enabled_names)
-    reg_strats = [get_strategy_by_name(n) for n in registered_strategy_names()]
+    reg_strats = [get_strategy_by_name(n) for n in available_strategy_names(cfg)]
     # Per-stratégia stádium-kulcsok a demó köreihez {strat_név: [stádium_kulcs,…]}
     stages_by_strat = {st.name: [sk for c in st.columns() if c.kind == "marker"
                                  for sk, _ in c.stages] for st in reg_strats}

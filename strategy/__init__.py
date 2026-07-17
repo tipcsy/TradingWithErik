@@ -48,9 +48,32 @@ def get_strategy_by_name(name: str) -> Strategy:
     return _INSTANCES[name]
 
 
+def available_strategy_names(cfg: dict) -> list[str]:
+    """A programban ELÉRHETŐVÉ tett stratégiák — a regisztráltak config-vezérelt
+    whitelistje (config.json: `available_strategies`). Ez határozza meg, MIT kínál
+    a per-pár választó és MIBŐL képződnek a dashboard-oszlopok. Hiány/üres/csupa-
+    érvénytelen → az ÖSSZES regisztrált (visszafelé kompatibilis). A config
+    sorrendjét megtartja, csak érvényes+egyedi neveket ad vissza."""
+    reg = registered_strategy_names()
+    want = cfg.get("available_strategies")
+    if not want:
+        return reg
+    seen, res = set(), []
+    for n in want:
+        if n in reg and n not in seen:
+            seen.add(n)
+            res.append(n)
+    return res or reg
+
+
 def default_strategy_name(cfg: dict) -> str:
-    """A config elsődleges/alapértelmezett stratégiája (config.json strategy.name)."""
-    return (cfg.get("strategy", {}) or {}).get("name", "wpr_sma")
+    """A config elsődleges/alapértelmezett stratégiája (config.json strategy.name):
+    az a stratégia, amit egy pár akkor használ, ha nincs saját `strategies` listája.
+    Ha az érték nincs az elérhetők (available_strategies) között, az első elérhetőre
+    esik vissza — így egy kikapcsolt stratégia nem marad ‚láthatatlan alapértelmezett'."""
+    name = (cfg.get("strategy", {}) or {}).get("name", "wpr_sma")
+    avail = available_strategy_names(cfg)
+    return name if name in avail else (avail[0] if avail else name)
 
 
 def get_strategy(cfg: dict) -> Strategy:
@@ -89,4 +112,5 @@ __all__ = [
     "MarketData", "Cell", "Timeframe",
     "get_strategy", "get_strategy_by_name", "default_strategy_name",
     "enabled_strategy_names", "strategies_for", "registered_strategy_names",
+    "available_strategy_names",
 ]

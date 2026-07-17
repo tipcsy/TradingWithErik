@@ -1,9 +1,14 @@
 {
   "_README": "PÉLDA config. Másold 'config.json' néven, és töltsd ki a broker-adatokat + az mt5.path-ot. A config.json GITIGNORE-olt (érzékeny adat: login/jelszó) — SOSE kerüljön fel a repóra! Ez a fájl (config.example.json) csak a szerkezetet mutatja.",
   "strategy": {
-    "_comment": "Az aktív stratégia modul a strategy/ csomagból. Cseréhez csak ezt kell átírni + új modult írni.",
+    "_comment": "ALAPÉRTELMEZETT stratégia: ezt használja egy pár, ha nincs saját pairs.<sym>.strategies listája. A tényleges vezérlés per-instrumentum (pairs.<sym>.strategies), a felkínált/megjelenített halmaz pedig az available_strategies. Ha a name nincs az available_strategies között, az első elérhetőre esik vissza.",
     "name": "wpr_sma"
   },
+  "available_strategies": [
+    "wpr_sma",
+    "ml_ai"
+  ],
+  "_comment_available_strategies": "A programban ELÉRHETŐVÉ tett stratégiák (a strategy/ csomag regisztráltjainak whitelistje). A per-pár választó ezeket kínálja, a dashboard ezekből képez oszlopot. Kihagyva/üresen = az ÖSSZES regisztrált. A dashboardon a ⚙ Beállítás ablakból is állítható (oszlop-változás újraindítás után).",
   "dashboard": {
     "_comment": "Felület frissítési ütem. price_refresh_sec: BID/ASK/spread MINDEN párra (1-5 ajánlott). live_refresh_sec: indikátor (WPR) a FUTÓ pároknál. all_refresh_sec: indikátor minden párra. watchdog_threshold_sec: ennyi mp blokkolás fölött figyelmeztet a fagyás-watchdog (data/ui_watchdog.log).",
     "price_refresh_sec": 3,
