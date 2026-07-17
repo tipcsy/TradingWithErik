@@ -467,9 +467,9 @@ def apply_market_state(objects: list, df15, pair_cfg: dict = None) -> list:
 def tf_align_visual_objects(symbol: str) -> list:
     """A TF-együttállás figyelő SMA-vonalai a charton: a figyelt (bekapcsolt)
     idősíkokra egy-egy MA(sma_period), a fő ablakba (az MQL5 iMA-val rajzolja az
-    adott idősíkon). Csak ha az instrumentumon engedélyezve van; a viz-oldalon
-    csak az MQL5 által ismert idősíkok (M1/M5/M15/M30/H1) — a H4-et a cella mutatja."""
-    _VIZ_TF = {1: "M1", 5: "M5", 15: "M15", 30: "M30", 60: "H1"}
+    adott idősíkon). Csak ha az instrumentumon engedélyezve van; az MQL5 TfFromStr
+    által ismert idősíkok (M1/M5/M15/M30/H1/H4)."""
+    _VIZ_TF = {1: "M1", 5: "M5", 15: "M15", 30: "M30", 60: "H1", 240: "H4"}
     try:
         from strategy import visual as viz
         from core import tf_align as _tfa

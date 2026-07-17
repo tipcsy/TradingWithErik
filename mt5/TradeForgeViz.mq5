@@ -20,8 +20,8 @@ input string InpStrategy  = "";      // Melyik STRATÉGIÁT mutassa (üres = MIN
 
 string g_file;                    // TFV_<Symbol>.csv
 string g_objpref;                 // szűrő-prefix: TFV_ (mind) VAGY TFV_<InpStrategy>@
-bool   g_ind_done = false;        // az indikátorok fel vannak-e már rakva
-string g_ma_name  = "";           // a felrakott SMA rövidneve (fő ablak, leszedéshez)
+string g_ind_sig  = "";           // az utoljára felrakott IND-halmaz aláírása
+string g_ma_names[];              // MINDEN általunk felrakott MA rövidneve (leszedéshez)
 
 //+------------------------------------------------------------------+
 //| A SAJÁT al-ablak-indikátorok (TFWPR, TFBANDS) leszedése MINDEN    |
@@ -42,14 +42,28 @@ void RemoveOurWPRs()
 }
 
 //+------------------------------------------------------------------+
+//| A SAJÁT (általunk felrakott) MA-k leszedése a FŐ ablakból, név    |
+//| szerint. Több MA is lehet (tf_align: idősíkonként egy) — a        |
+//| g_ma_names MINDET számon tartja; azonos rövidnév (pl. két SMA100  |
+//| más idősíkon) esetén az ismételt törlés egyenként szedi le.       |
+//+------------------------------------------------------------------+
+void RemoveOurMAs()
+{
+   for(int i = ArraySize(g_ma_names) - 1; i >= 0; i--)
+      if(g_ma_names[i] != "")
+         ChartIndicatorDelete(0, 0, g_ma_names[i]);
+   ArrayResize(g_ma_names, 0);
+}
+
+//+------------------------------------------------------------------+
 int OnInit()
 {
    g_file = FilePrefix + _Symbol + ".csv";
    // Szűrő-prefix: ha van InpStrategy, csak a TFV_<strat>@ nevű objektumok a mieink
    // (a Python minden objektumot a stratégia nevével jelöl). Üres → minden TFV_.
    g_objpref = (InpStrategy == "") ? FilePrefix : (FilePrefix + InpStrategy + "@");
-   g_ind_done = false;
-   g_ma_name  = "";
+   g_ind_sig = "";
+   ArrayResize(g_ma_names, 0);
    RemoveOurWPRs();   // előző futás maradék WPR-jei (halmozódás ellen)
    EventSetTimer(TimerSeconds);
    RefreshFromFile();
@@ -63,8 +77,7 @@ void OnDeinit(const int reason)
    // Az AUTO-felrakott indikátorokat leszedjük (a TradeForgeViz-hez tartoznak).
    // A rajz-objektumok (TFV_) SZÁNDÉKOSAN maradnak.
    RemoveOurWPRs();
-   if(g_ma_name != "")
-      ChartIndicatorDelete(0, 0, g_ma_name);
+   RemoveOurMAs();
 }
 
 //+------------------------------------------------------------------+
@@ -133,11 +146,22 @@ void RefreshFromFile()
    if(!cleared)
       SweepOrphans(g_objpref, seen, nseen);
 
-   // Az indikátorokat CSAK EGYSZER rakjuk fel (amint először látjuk az IND sorokat).
-   if(!g_ind_done && nind > 0)
+   // Indikátorok: az IND-halmaz ALÁÍRÁSA alapján. Ha VÁLTOZOTT (pl. a TF-együttállás
+   // idősíkjai/SMA-ja átállt a dashboardon), a SAJÁT indikátorainkat leszedjük és
+   // frissen felrakjuk — így a config-váltás azonnal látszik (nem csak restart után).
+   // Változatlan halmaznál nem nyúlunk hozzá (nincs villódzás, nincs duplikátum).
+   if(nind > 0)
    {
-      SetupIndicators(inds, nind);
-      g_ind_done = true;
+      string sig = "";
+      for(int i = 0; i < nind; i++)
+         sig += inds[i] + "|";
+      if(sig != g_ind_sig)
+      {
+         RemoveOurMAs();
+         RemoveOurWPRs();
+         SetupIndicators(inds, nind);
+         g_ind_sig = sig;
+      }
    }
    ChartRedraw();
 }
@@ -379,7 +403,13 @@ void SetupIndicators(string &inds[], int cnt)
          if(hnd == INVALID_HANDLE)
             continue;
          if(ChartIndicatorAdd(0, 0, hnd))   // 0 = fő (ár) ablak
-            g_ma_name = ChartIndicatorName(0, 0, ChartIndicatorsTotal(0, 0) - 1);
+         {
+            // MINDEN felrakott MA nevét eltesszük (több is lehet: tf_align idősíkonként)
+            string mn = ChartIndicatorName(0, 0, ChartIndicatorsTotal(0, 0) - 1);
+            int k = ArraySize(g_ma_names);
+            ArrayResize(g_ma_names, k + 1);
+            g_ma_names[k] = mn;
+         }
       }
       else if(kind == "WPR")
       {
