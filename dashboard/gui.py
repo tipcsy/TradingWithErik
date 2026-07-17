@@ -66,21 +66,26 @@ TRAILING_COLUMNS = [
 ]
 
 
-def opt_done_label(symbol: str, strategy_name: str) -> str:
-    """PERZISZTENS 'utolsó optimalizálás' címke a done-marker fájl idejéből
-    (`{symbol}_study.done`, az ADOTT stratégia mappájában), pl.
-    'Utolsó opt: 26/07/16'. '' ha nincs marker. Modul-szintű (a vezérlő és az
-    ablak is használja — az OptimizerController-nek nincs `strategy` tagja)."""
+def opt_done_date(symbol: str, strategy_name: str):
+    """Az ADOTT stratégia utolsó optimalizálásának ideje a done-marker fájlból
+    (`{symbol}_study.done`, a stratégia mappájában), vagy None ha nincs marker."""
     try:
         from core.params_store import done_marker
         import datetime as _dt
         dm = done_marker(symbol, strategy_name)
         if dm.exists():
-            d = _dt.datetime.fromtimestamp(dm.stat().st_mtime)
-            return f"Utolsó opt: {d.strftime('%y/%m/%d')}"
+            return _dt.datetime.fromtimestamp(dm.stat().st_mtime)
     except Exception:
         pass
-    return ""
+    return None
+
+
+def opt_done_label(symbol: str, strategy_name: str) -> str:
+    """PERZISZTENS 'utolsó optimalizálás' címke EGY stratégiára, pl.
+    'Utolsó opt: 26/07/16'. '' ha nincs marker. Modul-szintű (a vezérlő és az
+    ablak is használja — az OptimizerController-nek nincs `strategy` tagja)."""
+    d = opt_done_date(symbol, strategy_name)
+    return f"Utolsó opt: {d.strftime('%y/%m/%d')}" if d else ""
 
 
 def build_columns(strategies) -> list[Column]:
@@ -169,7 +174,8 @@ def _fixed_cell(key: str, ds, opt_status: str, inst_state: str) -> tuple[str, st
         if inst_state in ("OPTIMIZING", "QUEUED"):
             col = "yellow" if inst_state == "OPTIMIZING" else "muted"
         else:
-            col = "green" if ("Kész" in txt or "Utolsó opt" in txt) else "muted"
+            col = "green" if ("Kész" in txt or "Utolsó opt" in txt
+                              or txt.startswith("Opt:")) else "muted"
         return txt, col
     return "—", "muted"
 
@@ -1723,7 +1729,22 @@ CLOSED_COLUMNS = [
     ("close",    "Záró",       10, "center"),
     ("time",     "Zárás",       8, "center"),
     ("pnl",      "P&L",         9, "center"),
+    ("r",        "R",           6, "center"),
 ]
+
+
+def _r_multiple(c: dict):
+    """A trade R-szorzója (ár-alapú): kedvező ármozgás / kezdeti SL-táv. Lot- és
+    pip-érték-független, a klasszikus „R multiple". None, ha nincs érvényes SL."""
+    sl = c.get("sl")
+    po = c.get("price_open")
+    if not sl or not po:
+        return None
+    risk = abs(po - sl)
+    if risk <= 0:
+        return None
+    move = (c["price_close"] - po) if c["type"] == "BUY" else (po - c["price_close"])
+    return move / risk
 
 
 class ClosedTab:
@@ -1738,6 +1759,7 @@ class ClosedTab:
         self._strategy_provider = strategy_provider
         self._digits_provider = digits_provider
         self._rows: dict = {}
+        self._day = None          # az utolsó frissítés napja (napváltás-detektálás)
         self._build_ui()
 
     def _build_ui(self):
@@ -1775,17 +1797,29 @@ class ClosedTab:
             "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
 
     def refresh(self):
+        # Napváltás (a provider csak a MAI trade-eket adja, a sorok viszont csak
+        # bővültek) → új napon nulláznunk kell, különben két nap adata keveredne.
+        today = datetime.now().date()
+        if self._day is not None and today != self._day:
+            for w in self._rows_frame.winfo_children():
+                w.destroy()
+            self._rows.clear()
+        self._day = today
+
         closed = self._closed_provider() or []
         for c in closed:
             pid = c["position"]
             if pid not in self._rows:
                 self._rows[pid] = self._make_row(c)   # nincs törlés — a lista csak bővül
 
-        total  = sum(c["pnl"] for c in closed)
-        wins   = sum(1 for c in closed if c["pnl"] > 0)
-        losses = sum(1 for c in closed if c["pnl"] < 0)
+        total   = sum(c["pnl"] for c in closed)
+        wins    = sum(1 for c in closed if c["pnl"] > 0)
+        losses  = sum(1 for c in closed if c["pnl"] < 0)
+        r_vals  = [_r_multiple(c) for c in closed]
+        total_r = sum(r for r in r_vals if r is not None)
+        r_txt   = f"   |   {total_r:+.2f}R" if any(r is not None for r in r_vals) else ""
         self._lbl_total.config(
-            text=f"Összes P&L: {total:+.2f}$   |   {len(closed)} trade   |   {wins}W / {losses}L",
+            text=f"Összes P&L: {total:+.2f}${r_txt}   |   {len(closed)} trade   |   {wins}W / {losses}L",
             fg=FG_GREEN if total >= 0 else FG_RED)
 
         by_strat: dict = {}
@@ -1805,6 +1839,7 @@ class ClosedTab:
         strat  = self._strategy_provider(c.get("magic")) if self._strategy_provider else "—"
         t      = c["type"]
         pnl    = c["pnl"]
+        r      = _r_multiple(c)
         tstr   = datetime.fromtimestamp(c["close_time"], tz=timezone.utc).strftime("%H:%M")
         vals = {
             "symbol":   (c["symbol"],                       FG_WHITE),
@@ -1815,6 +1850,8 @@ class ClosedTab:
             "close":    (_fmt_price(c["price_close"], digits), FG_WHITE),
             "time":     (tstr,                              FG_GRAY),
             "pnl":      (f"{pnl:+.2f}$",     FG_GREEN if pnl >= 0 else FG_RED),
+            "r":        (f"{r:+.2f}R" if r is not None else "—",
+                         FG_GRAY if r is None else (FG_GREEN if r >= 0 else FG_RED)),
         }
         row = tk.Frame(self._rows_frame, bg=BG_ROW_EVEN)
         for key, label, w, anchor in CLOSED_COLUMNS:
@@ -2736,10 +2773,54 @@ class DashboardWindow:
                 label="▶ Mind",
                 command=lambda: ([self._opt_ctrl.request_optimize(symbol, s)
                                   for s in names], self._refresh_row(symbol)))
+        # Opt-állapot (study/trials/marker) törlése — per stratégia, majd 'Mind'.
+        menu.add_separator()
+        if len(names) == 1:
+            menu.add_command(label="🗑 Opt-állapot törlése",
+                             command=lambda: self._delete_opt_state(symbol, list(names)))
+        else:
+            for sn in names:
+                menu.add_command(
+                    label=f"🗑 {sn} opt-állapot törlése",
+                    command=lambda s=sn: self._delete_opt_state(symbol, [s]))
+            menu.add_command(label="🗑 Mind törlése",
+                             command=lambda: self._delete_opt_state(symbol, list(names)))
         try:
             menu.tk_popup(int(x), int(y))
         finally:
             menu.grab_release()
+
+    def _delete_opt_state(self, symbol: str, names: list):
+        """Az optimalizálási ÁLLAPOT/LOG törlése a megadott stratégiákhoz: study DB
+        (optuna SQLite, a folytatás forrása), trials CSV, done- és stop-marker. A
+        mentett paraméterek (params) MEGMARADNAK — csak az előzmény és az 'Utolsó opt'
+        dátum tűnik el, így a következő futás tiszta lappal (nem folytatás) indul.
+        Futó/sorban álló optimalizálásnál tiltva."""
+        from tkinter import messagebox
+        if self.instrument_state.get(symbol) in ("OPTIMIZING", "QUEUED"):
+            messagebox.showinfo(
+                "Nem törölhető",
+                "Előbb állítsd le a futó/sorban álló optimalizálást.")
+            return
+        who = ", ".join(names)
+        if not messagebox.askyesno(
+                "Opt-állapot törlése",
+                f"Törlöd a(z) {symbol} optimalizálási állapotát ({who})?\n\n"
+                "A mentett paraméterek megmaradnak, de a study/trials-előzmény és az "
+                "'Utolsó opt' dátum törlődik — a következő futás nem folytatás lesz."):
+            return
+        from core.params_store import (trials_file, study_db, done_marker,
+                                        stop_marker)
+        for sn in names:
+            for pth in (trials_file(symbol, sn), study_db(symbol, sn),
+                        done_marker(symbol, sn), stop_marker(symbol, sn)):
+                try:
+                    if pth.exists():
+                        pth.unlink()
+                except Exception:
+                    pass
+        self.optimizer_status[symbol] = ""
+        self._refresh_row(symbol)
 
     def _handle_opt_menu(self, symbol: str, event):
         """JOBB-klikk az OPT gombon: stratégiaválasztó menü (ugyanaz, mint a
@@ -3239,22 +3320,31 @@ class DashboardWindow:
         # Így restart / opt közben sem tűnik el (nem az in-memory 'Kész ✓'-ra hagyatkozik).
         if self.instrument_state.get(symbol) not in ("OPTIMIZING", "QUEUED"):
             _cur = self.optimizer_status.get(symbol, "")
-            if not _cur or "Kész" in _cur or "Utolsó opt" in _cur:
+            if (not _cur or "Kész" in _cur or "Utolsó opt" in _cur
+                    or _cur.startswith("Opt:")):
                 _lbl = self._opt_done_label(symbol)
                 if _lbl:
                     self.optimizer_status[symbol] = _lbl
 
     def _opt_done_label(self, symbol: str) -> str:
-        """'Utolsó opt' címke a perzisztens frissítéshez: az instrumentumon
-        ENGEDÉLYEZETT stratégiák közül a LEGFRISSEBB done-marker (több stratégia
-        esetén nem csak az elsődlegesét — az ml_ai tanítása is látszódjon)."""
+        """'Utolsó opt' címke a perzisztens frissítéshez. Egy stratégia esetén a
+        klasszikus 'Utolsó opt: yy/mm/dd'. TÖBB stratégia esetén PER-STRATÉGIA
+        bontás ('Opt: wpr_sma 07/16 · ml_ai —'), hogy látsszon MELYIK stratégia
+        MIKOR frissült (a '—' a még nem optimalizáltat jelöli)."""
         try:
             from strategy import enabled_strategy_names
             names = enabled_strategy_names(self.cfg, symbol)
         except Exception:
             names = [self.strategy.name]
-        labels = [l for l in (opt_done_label(symbol, n) for n in names) if l]
-        return max(labels) if labels else ""
+        if not names:
+            return ""
+        if len(names) == 1:
+            return opt_done_label(symbol, names[0])
+        parts = []
+        for n in names:
+            d = opt_done_date(symbol, n)
+            parts.append(f"{n} {d.strftime('%m/%d')}" if d else f"{n} —")
+        return "Opt: " + " · ".join(parts)
 
     # MT5 timeframe leképezés perc → konstans (lazán, futásidőben)
     @staticmethod

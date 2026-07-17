@@ -266,6 +266,17 @@ def closed_positions_today() -> list:
                         break
                 if din is None:
                     continue
+            # KEZDETI SL a nyitó ORDER-ből (a deal nem hordozza). Ebből számol R-t a
+            # dashboard. A SL-módosítás (pl. breakeven) külön order → a nyitó order
+            # sl-je marad az EREDETI kockázati táv. Hiány/0 → None (R = „—").
+            sl_open = None
+            try:
+                with MT5_LOCK:
+                    ords = mt5.history_orders_get(ticket=din.order)
+                if ords and ords[0].sl:
+                    sl_open = ords[0].sl
+            except Exception:
+                sl_open = None
             out.append({
                 "position":    pid,
                 "symbol":      din.symbol,
@@ -275,6 +286,7 @@ def closed_positions_today() -> list:
                 "price_close": p["close_price"],
                 "close_time":  p["close_time"],
                 "magic":       din.magic,
+                "sl":          sl_open,
                 "pnl":         round(p["pnl"], 2),
             })
         out.sort(key=lambda x: x["close_time"])
