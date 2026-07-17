@@ -468,11 +468,14 @@ class WprSmaStrategy(Strategy):
                 window=1 if tl_win[k] else 0))
 
         # ── Feltétel 3: M1 belépők + 6-gyertyás TP/SL ──────────────────────
+        # JEL-REPLAY: a per-jel belépő-jelzések (függőleges irány-vonal + Entry/TP/SL).
+        # A „K" gombbal kikapcsolható (md.show_signals=False) → a chart nem zsúfolódik
+        # tele az összes jellel; az SMA-szalag/sáv-állapot és a tényleges kötések maradnak.
         pip = md.params.get("pip_size", 0.0001)
         m1_wprs  = m1["wpr"].values
         m1_close = m1["close"].values
         times1   = [int(t.timestamp()) for t in m1.index]
-        if tl_t:
+        if tl_t and getattr(md, "show_signals", True):
             p = 0
             # PERZISZTENS M1-állapot: az M1 belépő állapotgép (felfegyverez az extrémnél
             # → tüzel a trigger átütésekor) a nyitott ablakon belül ŐRZI a felfegyverzést.

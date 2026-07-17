@@ -76,7 +76,7 @@
     "overwrite_existing": false
   },
   "pairs": {
-    "_comment": "pip_size: 1 pip értéke az árfolyamban. min_lot/lot_step: MT5 korlátok. sess_start/end: UTC óra. Új párt a GUI-ból is felvehetsz (a bróker adataival automatikusan kitölti), vagy ide kézzel az alábbi minták szerint.",
+    "_comment": "pip_size: 1 pip értéke az árfolyamban. min_lot/lot_step: MT5 korlátok. sess_start/end: UTC óra. viz_enabled: a chart-vizualizáció (V gomb) per pár. show_trades: a JEL-REPLAY réteg (K gomb) — a sűrű zöld/piros belépő-jelzés vonalak + Entry/TP/SL (alap: true); a tényleges MT5-kötések ettől függetlenül látszanak. Új párt a GUI-ból is felvehetsz (a bróker adataival automatikusan kitölti), vagy ide kézzel az alábbi minták szerint.",
     "EURUSD": {
       "_comment": "Forex-pár minta",
       "enabled": true,
@@ -88,7 +88,8 @@
       "sess_start": 10,
       "sess_end": 21,
       "contract_size": 100000.0,
-      "viz_enabled": false
+      "viz_enabled": false,
+      "show_trades": true
     },
     "GER40": {
       "_comment": "Index/CFD minta",

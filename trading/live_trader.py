@@ -123,6 +123,12 @@ class PairDashboardState:
     # chart-objektumokat (mt5_visual.clear).
     viz_enabled:      bool = True
 
+    # Per-instrumentum JEL-REPLAY réteg ki/be (a GUI „K" gombja billenti). A stratégia
+    # jel-replay-e (a sűrű zöld/piros belépő-jelzés vonalak + Entry/TP/SL) csak akkor
+    # kerül a viz-fájlba, ha ez True → md.show_signals. A tényleges MT5-kötések (nyíl +
+    # valós SL/TP) ettől függetlenül mindig látszanak. Ki: a GUI egyszeri CLEAR-t kér.
+    show_trades:      bool = True
+
 
 # Globális dashboard állapot — a GUI ebből olvas
 dashboard: dict[str, PairDashboardState] = {}
@@ -612,13 +618,18 @@ def pair_visual_lines(symbol: str, params: dict, strategy, pip_size: float,
     # pip_size a jövőbeli TP/SL-rajzoláshoz (feltétel 3) — a params nem tartalmazza.
     # A no_trade_hours-t a visual_objects ELŐTT állítjuk be → a kék sáv + belépő-
     # jelölések visszajátszása ugyanúgy RESETEL a szüneteknél, mint a live motor.
+    # A „K" gomb (per pár, config.json: show_trades) a JEL-REPLAY réteget kapcsolja
+    # (a sűrű zöld/piros belépő-jelzés vonalak + Entry/TP/SL). A tényleges kötések
+    # (lentebb, actual_trade_objects) ettől FÜGGETLENÜL mindig látszanak.
+    _show_signals = bool((pair_cfg or {}).get("show_trades", True))
     md = MarketData(symbol=symbol, params={**params, "pip_size": pip_size}, bars=bars,
-                    no_trade_hours=no_trade_set)
+                    no_trade_hours=no_trade_set, show_signals=_show_signals)
     objects = apply_no_trade(strategy.visual_objects(md), pair_cfg or {}, th)
     # + a GENERIKUS piac-állapot kód a per-gyertya BarState-ekhez (a per-pár
     #   kiválasztott piac-stratégiából; csak ha kérve van a charton).
     objects = apply_market_state(objects, bars.get("M15"), pair_cfg)
-    # + a VALÓS kötések nyilai ugyanarra az M1-ablakra (a maszkolás UTÁN).
+    # + a VALÓS kötések nyilai ugyanarra az M1-ablakra (a maszkolás UTÁN). Ezek MINDIG
+    #   látszanak (a „K" gomb a jel-replay-t kapcsolja, nem a tényleges kötéseket).
     m1 = bars.get("M1")
     if m1 is not None and len(m1):
         objects = objects + actual_trade_objects(symbol, int(m1.index[0].timestamp()))
@@ -677,6 +688,19 @@ def _apply_be_and_trailing(symbol, pos, ticket, pstate, is_rf, risky,
     ágának off/risky BE+trailing részével (csak kiemelve, hogy a szünet-ág is hívhassa);
     a Felező/Pajzs részleges zárás + RUNNER_EXIT (ami bart igényel) marad a fő ágban.
     A `pstate`-et módosítja, MT5-öt hív."""
+    # Kézi/külső SL-húzás felismerése (mint a fő ágban): ha az SL már a költség-
+    # tudatos BE-n van, „BE kész" → slot fel, trailing indulhat (szünet-órákban is).
+    # Olcsó elő-szűrő: csak ha az SL a profit oldalon van (különben nincs connector-hívás).
+    _sl_profit_side = pos.sl and (pos.sl > pos.price_open
+                                  if pos.type == mt5.ORDER_TYPE_BUY
+                                  else pos.sl < pos.price_open)
+    if (not pstate.get("be_done") and _sl_profit_side
+            and mt5_connector.breakeven_reached(ticket)):
+        pstate["be_done"] = True
+        slot_mgr.set_risk_free(ticket)
+        is_rf = True
+        log.info("✦ %s #%d — SL már a költség-tudatos BE-n (kézi/külső húzás) → BE kész",
+                 symbol, ticket)
     # ── Költség-tudatos breakeven ──
     be_pct = params.get("breakeven_pct", 0.5)
     if (risky or be_pct > 0) and not is_rf:
@@ -983,6 +1007,20 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         elif abs(pos.sl - _prev_sl) > 1e-9:
             pstate["last_sl"] = pos.sl
             sl_journal_append(symbol, ticket, int(pos.time_update), pos.sl)
+        # Kézi/külső SL-húzás felismerése: ha a JELENLEGI SL már eléri a költség-
+        # tudatos BE-szintet a profit oldalon (bárki mozgatta — pl. a felhasználó a
+        # charton), az ugyanúgy „BE kész". A naiv (költséget nem fedező) BE-t NEM
+        # fogadja el (a modell végig költség-tudatos). Így a kézi húzás után is zöld
+        # a BE ✓, felszabadul a slot és indulhat a trailing. Olcsó elő-szűrő (az SL a
+        # profit oldalon van-e) → a drágább connector-hívás csak az átbillenéskor fut.
+        _sl_profit_side = pos.sl and (pos.sl > pos.price_open
+                                      if pos.type == mt5.ORDER_TYPE_BUY
+                                      else pos.sl < pos.price_open)
+        if (not pstate.get("be_done") and _sl_profit_side
+                and mt5_connector.breakeven_reached(ticket)):
+            pstate["be_done"] = True
+            log.info("✦ %s #%d — SL már a költség-tudatos BE-n (kézi/külső húzás) → BE kész",
+                     symbol, ticket)
         # Kézi BE (a Pozíciók fülről): ha be_done jelölt, de a slot-kezelő még
         # nem tudja, szinkronizáljuk (slot felszabadul, trailing indulhat).
         if pstate.get("be_done") and not is_rf:
@@ -1520,6 +1558,7 @@ def run(cfg: dict, slot_mgr: SlotManager):
             enabled=pair_cfg.get("enabled", False),
             trained=trained,
             viz_enabled=pair_cfg.get("viz_enabled", True),   # V mód a config.json-ból
+            show_trades=pair_cfg.get("show_trades", True),   # K (kötés-réteg) a config.json-ból
             enabled_strategies=[st.name for st in strats],
         )
         # Kezdeti állapot (restart-biztos): a KERESKEDÉS-SZÁNDÉK a config.json

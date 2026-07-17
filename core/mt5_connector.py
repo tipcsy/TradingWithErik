@@ -486,6 +486,31 @@ def _breakeven_plan(p, info):
     return target_sl, feasible
 
 
+def breakeven_reached(ticket: int) -> bool:
+    """A pozíció JELENLEGI SL-je már eléri-e (vagy túllépi) a költség-tudatos BE
+    szintet a PROFIT oldalon — függetlenül attól, KI mozgatta (a motor VAGY a
+    felhasználó kézzel, a charton). Így a kézi SL-húzás is „BE kész"-nek számít, ha
+    valóban fedezi a spread+jutalék+swap költséget. A naiv (költséget nem fedező,
+    de az entryt épp túllépő) BE-t SZÁNDÉKOSAN nem fogadja el — a modell végig
+    költség-tudatos. Nincs order_send."""
+    try:
+        with MT5_LOCK:
+            pos = mt5.positions_get(ticket=ticket)
+            if not pos or not pos[0].sl:
+                return False
+            p = pos[0]
+            info = mt5.symbol_info(p.symbol)
+            if info is None:
+                return False
+            target_sl, _ = _breakeven_plan(p, info)
+            tol = info.point or 1e-9
+            # Profit oldal: BUY → az SL a cél FÖLÖTT/egyenlő; SELL → ALATT/egyenlő.
+            return ((p.sl >= target_sl - tol) if p.type == mt5.ORDER_TYPE_BUY
+                    else (p.sl <= target_sl + tol))
+    except Exception:
+        return False
+
+
 def breakeven_feasible(ticket: int) -> bool:
     """Mozgatható-e MOST a pozíció a költség-tudatos breakevenre (a profit fedezi a
     spread+jutalék+swap költséget)? A GUI ez alapján TILTJA/engedélyezi a kézi BE

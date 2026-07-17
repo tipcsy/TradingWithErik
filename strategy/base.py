@@ -110,6 +110,11 @@ class MarketData:
     # nem visz át a szüneten egy elavult szetupot. Üres → nincs no-trade reset
     # (visszafelé kompatibilis: aki nem tölti, a régi viselkedést kapja).
     no_trade_hours: set = field(default_factory=set)
+    # JEL-REPLAY megjelenítése a charton (a per-jel belépő-jelzések: függőleges
+    # irány-vonalak + Entry/TP/SL szintek). A dashboard „K" gombja billenti (per pár).
+    # False → a stratégia NE adja vissza a jel-replay objektumokat (a chart-zsúfoltság
+    # forrása); az SMA-szalag, a sáv-állapot és a tényleges kötések nem érintettek.
+    show_signals: bool = True
 
     def closed(self, label: str) -> Optional[pd.Series]:
         df = self.bars.get(label)

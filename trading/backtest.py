@@ -30,7 +30,7 @@ sys.path.insert(0, str(ROOT))
 
 from core.risk_manager import calc_lot, calc_effective_slots
 from core import risky_mode
-from strategy import get_strategy
+from strategy import get_strategy, get_strategy_by_name
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1019,22 +1019,31 @@ def run_portfolio_backtest(
     progress_callback=None,   # fn(date_str, balance, n_open, n_closed, pct_done)
     stop_flag=None,           # threading.Event — ha set(), leállítja
     rr: "dict | None" = None, # globális kockázatcsökkentő preset (mind a párra); None = a per-pár auto-risky
+    strategy_name: "str | None" = None,  # melyik stratégián fut (None = a config elsődlegese)
+    max_slots: "int | None" = None,      # egyszerre nyitott pozíciók száma (None = trading.max_open_slots)
+    build: bool = False,                 # pozícióépítés (piramidális ráépítés) bekapcsolva?
 ) -> dict:
     """
     Portfólió szintű backtest: az összes szimbólum közös tőkén,
     kronológiai M1 szimulációval fut.
 
-    Optimalizált params betöltése: data/optimized_params/<SYMBOL>.json
+    Optimalizált params betöltése: data/optimized_params/<strategy>/<SYMBOL>.json
 
     rr: ha adott (pl. {"preset":"shield",...}), MINDEN pár erre a preset-re fut →
     így a GUI-ból összevethetők a technikák. None → a jelenlegi per-pár auto-risky
     (gyenge minősítés → risky).
+    strategy_name: a portfólió ezen a stratégián fut (a párok params-fájljai is
+    ebből az almappából jönnek). None → a config elsődleges stratégiája.
+    max_slots: az egyidejűleg nyitott (nem risk-free) pozíciók max. száma. None →
+    a trading.max_open_slots.
+    build: ha True, a risk-free runnerek piramidálisan ráépítenek (mint a run_pair
+    Auto-építése) — a párok build_state configjával, alapból AUTO/gyertyás.
     """
     if initial_balance is None:
         initial_balance = float(cfg.get("ml", {}).get("starting_balance_eur", 1000.0))
     trading_cfg = cfg["trading"]
     spread_default = 1.5
-    strategy = get_strategy(cfg)
+    strategy = get_strategy_by_name(strategy_name) if strategy_name else get_strategy(cfg)
     set_active_strategy(strategy.name)     # stratégia-hatókörű params-tárolás
     migrate_flat_layout(strategy.name)
     tf_hi = strategy.timeframes()[0].label
@@ -1055,6 +1064,18 @@ def run_portfolio_backtest(
         if spec.get("preset") == _rrm2.PRESET_OFF and weak_risky:  # gyenge → risky
             spec = {**spec, "preset": _rrm2.PRESET_RISKY, "cautious": True}
         return spec
+
+    # Pozícióépítés: ha bekapcsolva, a párok build-configját használjuk (mode≠Ki),
+    # egyébként alapból AUTO/gyertyás — így a portfólió-BT-ben is kísérletezhető.
+    from core import build_state as _bstate
+    from core import position_build as _pb
+    def _pair_build_cfg(sym: str):
+        if not build:
+            return None
+        bc = _bstate.get_config(sym) or {}
+        if bc.get("mode", _pb.MODE_OFF) == _pb.MODE_OFF:
+            bc = {**bc, "mode": _pb.MODE_AUTO}   # bekapcsolva → alapból AUTO
+        return {**_pb.default_config(), **bc}
 
     # ── Per-pár optimalizált paraméterek + risky állapot betöltése ─────────
     pair_params: dict = {}
@@ -1134,6 +1155,7 @@ def run_portfolio_backtest(
             "exit_at":   _build_exit_evaluator(m15, _rr_pair),
             # Pajzs↔Fibo auto kiértékelő (None, ha a preset nem shield_fibo).
             "bigmove_at": _build_bigmove_evaluator(m15, _rr_pair),
+            "build_cfg": _pair_build_cfg(sym),   # pozícióépítés (None, ha kikapcsolva)
             "state":     strategy.bt_new_state(sym),
             "prev_row":  None,
         }
@@ -1158,7 +1180,7 @@ def run_portfolio_backtest(
     closed_trades: list  = []
     daily_pnl:     dict  = {}
     equity_curve:  list  = []   # (date_str, balance) pontok a görbe rajzához
-    max_slots      = trading_cfg["max_open_slots"]
+    max_slots      = int(max_slots) if max_slots else trading_cfg["max_open_slots"]
 
     last_eq_date = ""
 
@@ -1270,6 +1292,34 @@ def run_portfolio_backtest(
                     trade.status      = "cut"
                     closed = True
 
+            # ── Pozícióépítés (ha bekapcsolva): risk-free runner + gyertyás/R jel
+            # → piramidális ráépítés, az SL az új ÁTLAGÁRRA (mint a run_pair-ben).
+            # A build_ref = a jel-gyertya záróra → gyertyánként legfeljebb egyszer.
+            _bcfg = info.get("build_cfg")
+            if (not closed and _bcfg is not None and trade.risk_free
+                    and 0 <= info["m15_ptr"] < len(info["m15"])
+                    and len(trade.legs) <= _pb.HARD_MAX_ADDS):
+                _m15   = info["m15"]
+                _bc_cl = float(_m15["close"].iloc[info["m15_ptr"]])
+                _btrig = _bcfg.get("trigger", _pb.TRIGGER_CANDLE)
+                if _btrig == _pb.TRIGGER_CANDLE:
+                    _fired = ((_bc_cl > trade.build_ref) if trade.direction == "BUY"
+                              else (_bc_cl < trade.build_ref))
+                else:
+                    _rp  = trade.sl_pips * pip_size
+                    _lvl = _pb.r_level(trade.open_price, _rp, trade.direction,
+                                       len(trade.legs), _bcfg)
+                    _fired = _lvl is not None and (
+                        _bc_cl >= _lvl if trade.direction == "BUY" else _bc_cl <= _lvl)
+                if _fired:
+                    _last = min(l[1] for l in trade.legs) if trade.legs else trade.lot
+                    _add  = _pb.next_lot(_last, _bcfg["size_factor"], _minlot, _lotstep)
+                    if _add > 0:
+                        trade.legs.append((float(row["close"]), _add))
+                        trade.lot = round(sum(l[1] for l in trade.legs), 8)
+                        trade.sl  = round(_pb.average_price(trade.legs), 6)
+                        trade.build_ref = _bc_cl
+
             if closed:
                 trade.pnl_usd += trade.booked_pnl   # a részleges zárás(ok) realizált P&L-je
                 del open_trades[sym]
@@ -1349,6 +1399,8 @@ def run_portfolio_backtest(
                                 risk_usd=risk_usd,
                                 risk_pct=risk_usd / balance * 100 if balance > 0 else 0,
                             )
+                            trade.legs = [(open_price, lot)]   # 1. láb; a build bővíti
+                            trade.build_ref = open_price       # az első ráépítés innen figyel
                             if info.get("bigmove_at") is not None:
                                 # Pajzs↔Fibo auto: belépéskor dől el (nagy mozgás → Fibo)
                                 trade.rr_preset_eff = (

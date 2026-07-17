@@ -187,7 +187,8 @@ def _fixed_cell(key: str, ds, opt_status: str, inst_state: str) -> tuple[str, st
 class PairRow:
     def __init__(self, parent: tk.Frame, symbol: str, row_idx: int, columns: list,
                  on_run, on_opt, on_delete, on_risky, on_name_click, mono_font, small_font,
-                 on_status_click=None, on_viz=None, on_marker_click=None, on_opt_menu=None):
+                 on_status_click=None, on_viz=None, on_marker_click=None, on_opt_menu=None,
+                 on_trades=None):
         self.symbol  = symbol
         self.columns = columns
         self._bg     = BG_ROW_ODD if row_idx % 2 == 0 else BG_ROW_EVEN
@@ -277,6 +278,13 @@ class PairRow:
                                  relief="flat",
                                  command=(lambda: on_viz(symbol)) if on_viz else None)
         self.btn_viz.pack(side="left", padx=1)
+        # Jel-replay réteg ki/be a charton (a sűrű zöld/piros belépő-jelzés vonalak +
+        # Entry/TP/SL). A tényleges MT5-kötések (nyíl + valós SL/TP) mindig látszanak.
+        self.btn_trades = tk.Button(self.ctrl_frame, text="K", width=2,
+                                    bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
+                                    relief="flat",
+                                    command=(lambda: on_trades(symbol)) if on_trades else None)
+        self.btn_trades.pack(side="left", padx=1)
         self.btn_opt = tk.Button(self.ctrl_frame, text="OPT", width=4,
                                  bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
                                  relief="flat", command=lambda: on_opt(symbol))
@@ -422,6 +430,12 @@ class PairRow:
             self.btn_viz.config(text="V", bg=FG_GREEN, fg="#1e1e2e", state="normal")
         else:
             self.btn_viz.config(text="V", bg=BTN_DIS_BG, fg=FG_GRAY, state="normal")
+
+        # Jel-replay gomb — zöld, ha a belépő-jelzés vonalak (jel-replay) látszanak
+        if getattr(ds, "show_trades", True):
+            self.btn_trades.config(text="K", bg=FG_GREEN, fg="#1e1e2e", state="normal")
+        else:
+            self.btn_trades.config(text="K", bg=BTN_DIS_BG, fg=FG_GRAY, state="normal")
 
         # ── Offline ───────────────────────────────────────────────────────
         if not connected and inst_state not in ("OPTIMIZING", "QUEUED"):
@@ -928,80 +942,97 @@ class PortfolioBacktestTab:
         ctrl = tk.Frame(top, bg=BG_BT)
         ctrl.pack(side="left", fill="y")
 
+        # ── Stratégia-választó — a portfólió ezen a stratégián fut; a párlista is
+        # ehhez igazodik (az adott stratégia optimalizált almappája). ──────────
+        from strategy import available_strategy_names, default_strategy_name
+        strat_row = tk.Frame(ctrl, bg=BG_BT)
+        strat_row.pack(fill="x", pady=(0, 4))
+        tk.Label(strat_row, text="Stratégia:", bg=BG_BT, fg=FG_BLUE,
+                 font=self._header).pack(side="left")
+        self._strat_var = tk.StringVar(value=default_strategy_name(self.cfg))
+        _snames = available_strategy_names(self.cfg)
+        self._strat_menu = tk.OptionMenu(strat_row, self._strat_var, *_snames,
+                                         command=lambda _=None: self._reload_symbols())
+        self._strat_menu.config(bg=BG_HEADER, fg=FG_WHITE, font=self._small,
+                                relief="flat", highlightthickness=0,
+                                activebackground=BG_HEADER)
+        self._strat_menu["menu"].config(bg=BG_HEADER, fg=FG_WHITE)
+        self._strat_menu.pack(side="left", padx=6)
+
         tk.Label(ctrl, text="Instrumentumok (optimalizáltak):",
-                 bg=BG_BT, fg=FG_BLUE, font=self._header).grid(
-                     row=0, column=0, columnspan=4, sticky="w", pady=(0, 4))
-
+                 bg=BG_BT, fg=FG_BLUE, font=self._header).pack(anchor="w", pady=(2, 4))
+        # A párlista dinamikusan újraépül a stratégiaváltásra.
+        self._sym_frame = tk.Frame(ctrl, bg=BG_BT)
+        self._sym_frame.pack(fill="x")
         self._sym_vars: dict = {}
-        from core.params_store import strategy_dir
-        params_dir = strategy_dir()          # az aktív stratégia almappája
-        optimized  = sorted([f.stem for f in params_dir.glob("*.json")]) \
-                     if params_dir.exists() else []
+        self._reload_symbols()
 
-        if not optimized:
-            tk.Label(ctrl, text="(Nincs optimalizált instrumentum)",
-                     bg=BG_BT, fg=FG_GRAY, font=self._small).grid(
-                         row=1, column=0, columnspan=4, sticky="w")
-        else:
-            cols = 4
-            for i, sym in enumerate(optimized):
-                var = tk.BooleanVar(value=True)
-                self._sym_vars[sym] = var
-                cb = tk.Checkbutton(ctrl, text=sym, variable=var,
-                                    bg=BG_BT, fg=FG_WHITE, selectcolor=BG_HEADER,
-                                    activebackground=BG_BT, activeforeground=FG_WHITE,
-                                    font=self._small)
-                cb.grid(row=1 + i // cols, column=i % cols, sticky="w", padx=6)
+        # ── Űrlap: dátum / tőke / slotok / kockázatcsökkentés / építés / gombok ─
+        form = tk.Frame(ctrl, bg=BG_BT)
+        form.pack(fill="x", pady=(8, 0))
 
-        n_rows = max(1, (len(optimized) + 3) // 4)
-        date_row = n_rows + 2
-
-        tk.Label(ctrl, text="Tól:", bg=BG_BT, fg=FG_GRAY,
-                 font=self._small).grid(row=date_row, column=0, sticky="e", pady=6)
-        self._entry_from = tk.Entry(ctrl, width=12, bg=BG_HEADER, fg=FG_WHITE,
+        tk.Label(form, text="Tól:", bg=BG_BT, fg=FG_GRAY,
+                 font=self._small).grid(row=0, column=0, sticky="e", pady=6)
+        self._entry_from = tk.Entry(form, width=12, bg=BG_HEADER, fg=FG_WHITE,
                                     font=self._small, insertbackground=FG_WHITE)
         self._entry_from.insert(0, self.cfg.get("optimizer", {}).get(
             "test_start_date", "2025-10-01"))
-        self._entry_from.grid(row=date_row, column=1, padx=4)
+        self._entry_from.grid(row=0, column=1, padx=4)
 
-        tk.Label(ctrl, text="Ig:", bg=BG_BT, fg=FG_GRAY,
-                 font=self._small).grid(row=date_row, column=2, sticky="e")
-        self._entry_to = tk.Entry(ctrl, width=12, bg=BG_HEADER, fg=FG_WHITE,
+        tk.Label(form, text="Ig:", bg=BG_BT, fg=FG_GRAY,
+                 font=self._small).grid(row=0, column=2, sticky="e")
+        self._entry_to = tk.Entry(form, width=12, bg=BG_HEADER, fg=FG_WHITE,
                                   font=self._small, insertbackground=FG_WHITE)
         self._entry_to.insert(0, datetime.now().strftime("%Y-%m-%d"))
-        self._entry_to.grid(row=date_row, column=3, padx=4)
+        self._entry_to.grid(row=0, column=3, padx=4)
 
-        tk.Label(ctrl, text="Kezdő tőke ($):", bg=BG_BT, fg=FG_GRAY,
-                 font=self._small).grid(row=date_row+1, column=0, sticky="e", pady=4)
-        self._entry_bal = tk.Entry(ctrl, width=10, bg=BG_HEADER, fg=FG_WHITE,
+        tk.Label(form, text="Kezdő tőke ($):", bg=BG_BT, fg=FG_GRAY,
+                 font=self._small).grid(row=1, column=0, sticky="e", pady=4)
+        self._entry_bal = tk.Entry(form, width=10, bg=BG_HEADER, fg=FG_WHITE,
                                    font=self._small, insertbackground=FG_WHITE)
         self._entry_bal.insert(0, str(int(
             self.cfg.get("ml", {}).get("starting_balance_eur", 1000))))
-        self._entry_bal.grid(row=date_row+1, column=1, padx=4)
+        self._entry_bal.grid(row=1, column=1, padx=4)
+
+        # Egyszerre nyitott (nem risk-free) pozíciók száma — alap: trading.max_open_slots.
+        tk.Label(form, text="Slotok:", bg=BG_BT, fg=FG_GRAY,
+                 font=self._small).grid(row=1, column=2, sticky="e", pady=4)
+        self._entry_slots = tk.Entry(form, width=6, bg=BG_HEADER, fg=FG_WHITE,
+                                     font=self._small, insertbackground=FG_WHITE)
+        self._entry_slots.insert(0, str(int(
+            self.cfg.get("trading", {}).get("max_open_slots", 4))))
+        self._entry_slots.grid(row=1, column=3, padx=4, sticky="w")
 
         # Kockázatcsökkentés preset (MIND a párra) — a technikák összevetéséhez.
-        tk.Label(ctrl, text="Kockázatcsökkentés:", bg=BG_BT, fg=FG_GRAY,
-                 font=self._small).grid(row=date_row+1, column=2, sticky="e", pady=4)
+        tk.Label(form, text="Kockázatcsökkentés:", bg=BG_BT, fg=FG_GRAY,
+                 font=self._small).grid(row=2, column=0, sticky="e", pady=4)
         self._rr_var = tk.StringVar(value="Auto (jelenlegi)")
         self._rr_combo = ttk.Combobox(
-            ctrl, textvariable=self._rr_var, width=16, state="readonly",
+            form, textvariable=self._rr_var, width=16, state="readonly",
             font=self._small,
             values=["Auto (jelenlegi)", "Ki (mind)", "Risky (mind)",
                     "Felező (mind)", "Pajzs (mind)", "Fibo (mind)",
                     "Harmados (mind)", "Pajzs↔Fibo (mind)"])
-        self._rr_combo.grid(row=date_row+1, column=3, padx=4, sticky="w")
+        self._rr_combo.grid(row=2, column=1, padx=4, sticky="w")
 
-        btn_row = date_row + 2
-        self._btn_start = tk.Button(ctrl, text="▶  Backtest indítása", width=20,
+        # Pozícióépítés (piramidális ráépítés a risk-free runnereken) ki/be.
+        self._build_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(form, text="Pozícióépítés", variable=self._build_var,
+                       bg=BG_BT, fg=FG_WHITE, selectcolor=BG_HEADER,
+                       activebackground=BG_BT, activeforeground=FG_WHITE,
+                       font=self._small).grid(row=2, column=2, columnspan=2,
+                                              sticky="w", padx=4)
+
+        self._btn_start = tk.Button(form, text="▶  Backtest indítása", width=20,
                                     bg=BTN_BT_BG, fg=BTN_BT_FG, font=self._small,
                                     relief="flat", command=self._start_bt)
-        self._btn_start.grid(row=btn_row, column=0, columnspan=2, pady=8, sticky="w")
+        self._btn_start.grid(row=3, column=0, columnspan=2, pady=8, sticky="w")
 
-        self._btn_stop_bt = tk.Button(ctrl, text="■  Leállítás", width=12,
+        self._btn_stop_bt = tk.Button(form, text="■  Leállítás", width=12,
                                       bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=self._small,
                                       relief="flat", command=self._stop_bt,
                                       state="disabled")
-        self._btn_stop_bt.grid(row=btn_row, column=2, columnspan=2, pady=8, sticky="w")
+        self._btn_stop_bt.grid(row=3, column=2, columnspan=2, pady=8, sticky="w")
 
         right = tk.Frame(top, bg=BG_BT)
         right.pack(side="left", fill="both", expand=True, padx=(20, 0))
@@ -1064,6 +1095,35 @@ class PortfolioBacktestTab:
                                        fg=FG_YELLOW, font=self._mono)
         self._lbl_res_total.pack(anchor="w", padx=8, pady=4)
 
+    def _reload_symbols(self):
+        """A párlista (jelölőnégyzetek) újraépítése a választott stratégia
+        optimalizált almappájából (stratégiaváltáskor és induláskor)."""
+        from core.params_store import strategy_dir
+        for w in self._sym_frame.winfo_children():
+            w.destroy()
+        self._sym_vars = {}
+        strat_name = getattr(self, "_strat_var", None)
+        params_dir = strategy_dir(strat_name.get() if strat_name else None)
+        # A *_hours.json a kereskedési-óra fájl, NEM optimalizált param — kiszűrjük
+        # (ilyet kiválasztva a portfólió-backtest elszállna a hiányzó params miatt).
+        optimized  = sorted([f.stem for f in params_dir.glob("*.json")
+                             if not f.stem.endswith("_hours")]) \
+                     if params_dir.exists() else []
+        if not optimized:
+            tk.Label(self._sym_frame, text="(Nincs optimalizált instrumentum)",
+                     bg=BG_BT, fg=FG_GRAY, font=self._small).grid(
+                         row=0, column=0, columnspan=4, sticky="w")
+            return
+        cols = 4
+        for i, sym in enumerate(optimized):
+            var = tk.BooleanVar(value=True)
+            self._sym_vars[sym] = var
+            tk.Checkbutton(self._sym_frame, text=sym, variable=var,
+                           bg=BG_BT, fg=FG_WHITE, selectcolor=BG_HEADER,
+                           activebackground=BG_BT, activeforeground=FG_WHITE,
+                           font=self._small).grid(row=i // cols, column=i % cols,
+                                                  sticky="w", padx=6)
+
     def _start_bt(self):
         if self._thread and self._thread.is_alive():
             return
@@ -1077,6 +1137,12 @@ class PortfolioBacktestTab:
             init_bal = float(self._entry_bal.get().strip())
         except ValueError:
             init_bal = 1000.0
+        try:
+            n_slots = max(1, int(self._entry_slots.get().strip()))
+        except ValueError:
+            n_slots = None          # → a config max_open_slots
+        build_on   = self._build_var.get()
+        strat_name = self._strat_var.get()
 
         self._stop_flag.clear()
         self._equity_pts = []
@@ -1090,7 +1156,8 @@ class PortfolioBacktestTab:
 
         self._thread = threading.Thread(
             target=self._run_thread,
-            args=(symbols, date_from, date_to, init_bal, self._rr_spec()),
+            args=(symbols, date_from, date_to, init_bal, self._rr_spec(),
+                  strat_name, n_slots, build_on),
             daemon=True,
         )
         self._thread.start()
@@ -1114,7 +1181,8 @@ class PortfolioBacktestTab:
             return None
         return {**_rr.default_config(), "preset": preset}
 
-    def _run_thread(self, symbols, date_from, date_to, init_bal, rr_spec=None):
+    def _run_thread(self, symbols, date_from, date_to, init_bal, rr_spec=None,
+                    strat_name=None, n_slots=None, build_on=False):
         from trading.backtest import run_portfolio_backtest, _save_backtest_results
 
         def on_progress(date_str, balance, n_open, n_closed, pct):
@@ -1131,6 +1199,9 @@ class PortfolioBacktestTab:
                 progress_callback=on_progress,
                 stop_flag=self._stop_flag,
                 rr=rr_spec,
+                strategy_name=strat_name,
+                max_slots=n_slots,
+                build=build_on,
             )
             if result.get("trades"):
                 _save_backtest_results(
@@ -2132,7 +2203,7 @@ class DashboardWindow:
                 mono_font=mono_font, small_font=small_font,
                 on_status_click=self._show_opt_log, on_viz=self._handle_viz,
                 on_marker_click=self._show_strategy_params,
-                on_opt_menu=self._handle_opt_menu)
+                on_opt_menu=self._handle_opt_menu, on_trades=self._handle_trades)
             self._bind_ctrl_width_sync(self.rows[symbol])
 
         self._apply_filter_sort()
@@ -2376,7 +2447,7 @@ class DashboardWindow:
             mono_font=self._mono_font, small_font=self._small_font,
             on_status_click=self._show_opt_log, on_viz=self._handle_viz,
             on_marker_click=self._show_strategy_params,
-            on_opt_menu=self._handle_opt_menu)
+            on_opt_menu=self._handle_opt_menu, on_trades=self._handle_trades)
         self._bind_ctrl_width_sync(self.rows[symbol])
         self._apply_filter_sort()
 
@@ -2915,6 +2986,35 @@ class DashboardWindow:
             pc = self.cfg.get("pairs", {}).get(symbol)
             if isinstance(pc, dict):
                 pc["viz_enabled"] = ds.viz_enabled
+                self._save_main_config()
+        except Exception:
+            pass
+        row = self.rows.get(symbol)
+        if row is not None:
+            row.update(ds, self.instrument_state.get(symbol, "STOPPED"),
+                       self.optimizer_status.get(symbol, ""),
+                       connected=getattr(self, "_connected", False))
+
+    def _handle_trades(self, symbol: str):
+        """A JEL-REPLAY réteg (a sűrű zöld/piros belépő-jelzés vonalak + Entry/TP/SL)
+        ki/be az adott instrumentumhoz. A tényleges MT5-kötések ettől függetlenül
+        látszanak. A no-delete viz-modell miatt a következő íráshoz egyszeri CLEAR-t
+        kérünk, hogy a jel-objektumok tisztán eltűnjenek / újrarajzolódjanak."""
+        ds = self.dashboard_ref.get(symbol)
+        if ds is None:
+            return
+        ds.show_trades = not getattr(ds, "show_trades", True)
+        try:
+            from trading import live_trader as _lt
+            _lt._viz_pending_clear[symbol] = True    # tiszta újrarajz (kötések be/ki)
+            _lt._viz_last_write.pop(symbol, None)      # következő ciklusban azonnal ír
+        except Exception:
+            pass
+        # Perzisztálás a config.json-ba (per-instrumentum K állapot)
+        try:
+            pc = self.cfg.get("pairs", {}).get(symbol)
+            if isinstance(pc, dict):
+                pc["show_trades"] = ds.show_trades
                 self._save_main_config()
         except Exception:
             pass
@@ -3852,6 +3952,7 @@ def _demo_dashboard(cfg: dict):
             position_pnl=None, risk_free=False, daily_pnl=0.0,
             opt_grade=grade_cell, opt_grade_reason=grade_reason,
             viz_enabled=cfg["pairs"][symbol].get("viz_enabled", True),
+            show_trades=cfg["pairs"][symbol].get("show_trades", True),
             # Per-pár engedélyezett stratégiák (mint az éles induláskor) — a
             # jelölő-oszlop a nem engedélyezettet apró ponttal különbözteti meg.
             enabled_strategies=_enabled_names(cfg, symbol),
