@@ -34,10 +34,13 @@ Opcionális, de gyakran kell: `signal_warmup_bars`, `live_cells`, `visual_lookba
 Minta a bevált stratégiákból: [strategy/wpr_sma.py](../../strategy/wpr_sma.py) (klasszikus),
 [strategy/ml_ai.py](../../strategy/ml_ai.py) (tanítható — `fit`).
 
-## 2. Regisztráció ([strategy/__init__.py](../../strategy/__init__.py))
+## 2. Regisztráció — AUTOMATIKUS (nincs teendő)
 
-1. Add a nevet a `_REGISTERED` tuple-höz.
-2. Adj egy ágat a `get_strategy_by_name()`-be (lusta import + példányosítás).
+A `strategy/__init__.py` **auto-felderíti** a `strategy/` csomag moduljait, és a `Strategy`
+interfészt implementáló osztályt a `.name` attribútuma alapján magától regisztrálja.
+**Új stratégia = csak egy új modul a `strategy/`-ben** — a vázat (`__init__.py`) NEM kell
+szerkeszteni. A `name` osztály-attribútum legyen EGYEDI (ez a registry-kulcs). A be nem
+tölthető modult a felderítés kihagyja (warning a logban).
 
 ## 3. Elérhetőség és konfiguráció
 

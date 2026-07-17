@@ -7,25 +7,65 @@ csomagon keresztül csatlakozik: deklarálja a saját oszlopait, kiszámítja a
 megjelenítendő értékeket, kezeli a jelzéslogikát és megadja az optimalizálandó
 paramétertartományt.
 
-Új stratégia = egy új modul, ami a `Strategy` interfészt implementálja.
-A `get_strategy()` adja vissza az aktívat (config-vezérelt).
+Új stratégia = EGY új modul a `strategy/` csomagban, ami a `Strategy` interfészt
+implementálja. A regisztráció AUTOMATIKUS (a modul felderítése) — ezt a fájlt (a
+vázat) NEM kell szerkeszteni. A `get_strategy()` adja vissza az aktívat (config-vezérelt).
 """
+
+import importlib
+import logging
+import pkgutil
 
 from strategy.base import (
     Strategy, Column, CountdownColumn, StrategyColumn, MarkerColumn,
     MarketData, Cell, Timeframe,
 )
 
+log = logging.getLogger(__name__)
 
-# A regisztrált (ismert) stratégiák nevei — a dashboard ezekből képez EGY-EGY
-# jelölő-oszlopot (fejléc = stratégia neve). Új stratégia = egy név ide + egy ág a
-# get_strategy_by_name-ben + egy modul a strategy/-ben.
-_REGISTERED = ("wpr_sma", "ml_ai")
+# A strategy/ csomag NEM-stratégia segédmoduljai — a felderítés kihagyja őket. (Nem
+# kötelező: a felderítés amúgy is csak a Strategy-alosztályokat regisztrálja; ez a
+# lista pusztán az importjukat spórolja meg.)
+_SKIP_MODULES = {"base", "settings", "visual", "ml_features", "ml_train"}
+
+_REGISTRY: "dict[str, type] | None" = None   # név → Strategy-osztály (lazán felderítve)
+
+
+def _registry() -> "dict[str, type]":
+    """A `strategy/` csomag AUTOMATIKUS felderítése: végignézi a moduljait, és a
+    talált `Strategy`-alosztályokat a `.name`-jük alapján regisztrálja. Egyszer fut
+    (cache-elve). ÍGY egy új stratégia = EGY új modul a strategy/-ben — a registry-t
+    (ezt a fájlt) nem kell módosítani. Determinisztikus (ábécé) sorrend; a be nem
+    tölthető modult átugorja (figyelmeztetéssel)."""
+    global _REGISTRY
+    if _REGISTRY is not None:
+        return _REGISTRY
+    import strategy as _pkg
+    reg: dict = {}
+    for _mi in pkgutil.iter_modules(_pkg.__path__):
+        nm = _mi.name
+        if nm.startswith("_") or nm in _SKIP_MODULES:
+            continue
+        try:
+            mod = importlib.import_module(f"strategy.{nm}")
+        except Exception as e:
+            log.warning("Stratégia-modul nem tölthető be: strategy.%s (%s)", nm, e)
+            continue
+        for obj in vars(mod).values():
+            if (isinstance(obj, type) and issubclass(obj, Strategy)
+                    and obj is not Strategy):
+                sn = getattr(obj, "name", None)
+                if sn and sn not in reg:
+                    reg[sn] = obj
+    _REGISTRY = dict(sorted(reg.items()))
+    return _REGISTRY
 
 
 def registered_strategy_names() -> list[str]:
-    """A dashboard-oszlopokhoz: az összes ismert stratégia neve (sorrendben)."""
-    return list(_REGISTERED)
+    """A felderített (ismert) stratégiák nevei, ábécé sorrendben. A MEGJELENÍTÉSI
+    sorrendet a config `available_strategies` (whitelist) / az elsődleges stratégia
+    felülírja — lásd `available_strategy_names`."""
+    return list(_registry().keys())
 
 
 # A stratégia-példányok gyorsítótára (stratégia-nevenként EGY példány; a példány
@@ -34,17 +74,13 @@ _INSTANCES: dict[str, Strategy] = {}
 
 
 def get_strategy_by_name(name: str) -> Strategy:
-    """Stratégia-példány NÉV alapján (a registry-ből, cache-elve).
-    Új stratégia = egy új ág itt (és egy új modul a `strategy/`-ben)."""
+    """Stratégia-példány NÉV alapján (a felderített registry-ből, cache-elve).
+    Új stratégia = egy új modul a strategy/-ben (Strategy-alosztály) — itt nincs mit írni."""
     if name not in _INSTANCES:
-        if name == "wpr_sma":
-            from strategy.wpr_sma import WprSmaStrategy
-            _INSTANCES[name] = WprSmaStrategy()
-        elif name == "ml_ai":
-            from strategy.ml_ai import MlAiStrategy
-            _INSTANCES[name] = MlAiStrategy()
-        else:
+        cls = _registry().get(name)
+        if cls is None:
             raise ValueError(f"Ismeretlen stratégia: {name!r}")
+        _INSTANCES[name] = cls()
     return _INSTANCES[name]
 
 
@@ -57,6 +93,12 @@ def available_strategy_names(cfg: dict) -> list[str]:
     reg = registered_strategy_names()
     want = cfg.get("available_strategies")
     if not want:
+        # Nincs whitelist → az ÖSSZES felderített, de a config elsődleges stratégiája
+        # ELÖL (a megszokott oszlopsorrend megőrzése; a többi ábécében). A primary-t
+        # NYERSEN olvassuk (nem default_strategy_name-en át), hogy ne legyen ciklus.
+        primary = (cfg.get("strategy", {}) or {}).get("name", "")
+        if primary in reg:
+            return [primary] + [n for n in reg if n != primary]
         return reg
     seen, res = set(), []
     for n in want:
