@@ -189,8 +189,8 @@ def _fixed_cell(key: str, ds, opt_status: str, inst_state: str) -> tuple[str, st
 class PairRow:
     def __init__(self, parent: tk.Frame, symbol: str, row_idx: int, columns: list,
                  on_run, on_opt, on_delete, on_risky, on_name_click, mono_font, small_font,
-                 on_status_click=None, on_viz=None, on_marker_click=None, on_opt_menu=None,
-                 on_trades=None, on_tfalign=None):
+                 on_status_click=None, on_marker_click=None, on_opt_menu=None,
+                 on_tfalign=None):
         self.symbol  = symbol
         self.columns = columns
         self._bg     = BG_ROW_ODD if row_idx % 2 == 0 else BG_ROW_EVEN
@@ -295,19 +295,10 @@ class PairRow:
                                    bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
                                    relief="flat", command=lambda: on_risky(symbol))
         self.btn_risky.pack(side="left", padx=1)
-        # Vizualizáció ki/be az adott instrumentumhoz (MT5 chart-rajz)
-        self.btn_viz = tk.Button(self.ctrl_frame, text="V", width=2,
-                                 bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
-                                 relief="flat",
-                                 command=(lambda: on_viz(symbol)) if on_viz else None)
-        self.btn_viz.pack(side="left", padx=1)
-        # Jel-replay réteg ki/be a charton (a sűrű zöld/piros belépő-jelzés vonalak +
-        # Entry/TP/SL). A tényleges MT5-kötések (nyíl + valós SL/TP) mindig látszanak.
-        self.btn_trades = tk.Button(self.ctrl_frame, text="K", width=2,
-                                    bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
-                                    relief="flat",
-                                    command=(lambda: on_trades(symbol)) if on_trades else None)
-        self.btn_trades.pack(side="left", padx=1)
+        # A korábbi „V" (vizualizáció) és „K" (jel-replay) gomb ÁTKÖLTÖZÖTT az
+        # instrumentum-beállítások táblázatába (az instrumentum NEVÉRE kattintva),
+        # ahol PER STRATÉGIA pipálható — a sorban egy pár-szintű gomb nem tudta
+        # volna kifejezni a több-stratégiás esetet. Lásd `_show_instrument_settings`.
         self.btn_opt = tk.Button(self.ctrl_frame, text="OPT", width=4,
                                  bg=BTN_DIS_BG, fg=BTN_DIS_FG, font=small_font,
                                  relief="flat", command=lambda: on_opt(symbol))
@@ -490,17 +481,8 @@ class PairRow:
         else:
             self.btn_risky.config(text="—", bg=BTN_DIS_BG, fg=FG_GRAY, state="normal")
 
-        # Viz gomb — bármely állapotban kapcsolható; zöld, ha a viz BE van kapcsolva
-        if getattr(ds, "viz_enabled", True):
-            self.btn_viz.config(text="V", bg=FG_GREEN, fg="#1e1e2e", state="normal")
-        else:
-            self.btn_viz.config(text="V", bg=BTN_DIS_BG, fg=FG_GRAY, state="normal")
-
-        # Jel-replay gomb — zöld, ha a belépő-jelzés vonalak (jel-replay) látszanak
-        if getattr(ds, "show_trades", True):
-            self.btn_trades.config(text="K", bg=FG_GREEN, fg="#1e1e2e", state="normal")
-        else:
-            self.btn_trades.config(text="K", bg=BTN_DIS_BG, fg=FG_GRAY, state="normal")
+        # (A V/K gomb-állapot innen elkerült — a kapcsolók az instrumentum-
+        # beállítások táblázatában élnek, per stratégia.)
 
         # ── Offline ───────────────────────────────────────────────────────
         if not connected and inst_state not in ("OPTIMIZING", "QUEUED"):
@@ -2274,9 +2256,9 @@ class DashboardWindow:
                 on_delete=self._handle_delete, on_risky=self._handle_risky,
                 on_name_click=self._show_instrument_settings,
                 mono_font=mono_font, small_font=small_font,
-                on_status_click=self._show_opt_log, on_viz=self._handle_viz,
+                on_status_click=self._show_opt_log,
                 on_marker_click=self._show_strategy_params,
-                on_opt_menu=self._handle_opt_menu, on_trades=self._handle_trades,
+                on_opt_menu=self._handle_opt_menu,
                 on_tfalign=self._show_tfalign_settings)
             self._bind_ctrl_width_sync(self.rows[symbol])
 
@@ -2519,9 +2501,9 @@ class DashboardWindow:
             on_delete=self._handle_delete, on_risky=self._handle_risky,
             on_name_click=self._show_instrument_settings,
             mono_font=self._mono_font, small_font=self._small_font,
-            on_status_click=self._show_opt_log, on_viz=self._handle_viz,
+            on_status_click=self._show_opt_log,
             on_marker_click=self._show_strategy_params,
-            on_opt_menu=self._handle_opt_menu, on_trades=self._handle_trades,
+            on_opt_menu=self._handle_opt_menu,
             on_tfalign=self._show_tfalign_settings)
         self._bind_ctrl_width_sync(self.rows[symbol])
         self._apply_filter_sort()
@@ -2681,29 +2663,50 @@ class DashboardWindow:
 
     # ── Instrumentum beállítások (az instrumentum NEVÉRE kattintva) ──────
     def _show_instrument_settings(self, symbol: str):
-        """Mely stratégiák aktívak ezen az instrumentumon (több is választható →
-        pairs.<sym>.strategies). A per-stratégia kockázatcsökkentés és a V-gomb
-        stratégiája később kerül ide (a jegyzet szerint tisztázandó)."""
+        """Per-instrumentum beállítások TÁBLÁZATOSAN: oszlop = stratégia, sor =
+        tulajdonság (aktív / vizualizáció / kötés-réteg). A korábbi sorbeli „V" és
+        „K" gomb ide költözött pipa formában, és PER STRATÉGIA állítható — eddig
+        pár-szintű volt, így egy több-stratégiás páron nem lehetett külön
+        kikapcsolni az egyik rajzát (lásd core.viz_prefs)."""
         from strategy import (available_strategy_names, enabled_strategy_names,
                               default_strategy_name)
+        from core import viz_prefs as _vp
         popup = tk.Toplevel(self.root)
         popup.title(f"{symbol} — instrumentum beállítások")
         popup.configure(bg=BG)
         popup.grab_set()
         tk.Label(popup, text=symbol, bg=BG, fg=FG_WHITE,
                  font=self._header_font).pack(anchor="w", padx=12, pady=(12, 2))
-        tk.Label(popup, text="Aktív stratégiák ezen az instrumentumon (több is "
-                             "választható):", bg=BG, fg=FG_GRAY,
-                 font=self._small_font).pack(anchor="w", padx=12, pady=(4, 2))
-        cur = set(enabled_strategy_names(self.cfg, symbol))
-        _vars = {}
-        for name in available_strategy_names(self.cfg):
-            v = tk.BooleanVar(value=(name in cur))
-            _vars[name] = v
-            tk.Checkbutton(popup, text=name, variable=v, bg=BG, fg=FG_WHITE,
-                           selectcolor=BG_HEADER, font=self._small_font,
-                           activebackground=BG, activeforeground=FG_WHITE).pack(
-                           anchor="w", padx=20)
+
+        # ── Stratégia-táblázat ───────────────────────────────────────────────
+        _names = available_strategy_names(self.cfg)
+        cur    = set(enabled_strategy_names(self.cfg, symbol))
+        tbl = tk.Frame(popup, bg=BG)
+        tbl.pack(anchor="w", padx=12, pady=(6, 2))
+        tk.Label(tbl, text="", bg=BG).grid(row=0, column=0)
+        for c, n in enumerate(_names, start=1):
+            tk.Label(tbl, text=n, bg=BG, fg=FG_WHITE, font=self._small_font,
+                     padx=8).grid(row=0, column=c)
+        # (sor-címke, kezdőérték-függvény) — a sorrend a táblázat sorrendje.
+        _ROWS = [
+            ("Aktív stratégia",      lambda n: n in cur),
+            ("Vizualizáció látszik", lambda n: _vp.viz_on(self.cfg, symbol, n)),
+            ("Kötések látszanak",    lambda n: _vp.trades_on(self.cfg, symbol, n)),
+        ]
+        _vars = {}          # (sor-index, stratégia-név) → BooleanVar
+        for r, (label, initial) in enumerate(_ROWS, start=1):
+            tk.Label(tbl, text=label, bg=BG, fg=FG_GRAY, font=self._small_font,
+                     anchor="w").grid(row=r, column=0, sticky="w", pady=1)
+            for c, n in enumerate(_names, start=1):
+                v = tk.BooleanVar(value=bool(initial(n)))
+                _vars[(r, n)] = v
+                tk.Checkbutton(tbl, variable=v, bg=BG, selectcolor=BG_HEADER,
+                               activebackground=BG).grid(row=r, column=c)
+        tk.Label(popup, text='A tényleges MT5-kötések a „Kötések látszanak" pipától '
+                             'függetlenül mindig látszanak (az a jel-replay réteget '
+                             'kapcsolja).',
+                 bg=BG, fg=FG_GRAY_DIM, font=self._small_font,
+                 wraplength=360, justify="left").pack(anchor="w", padx=12, pady=(0, 4))
 
         # ── Piac-előszűrő (piac-állapot osztályozó) — instrumentumonként EGY ──
         from core import market_strategy as _ms
@@ -2726,11 +2729,31 @@ class DashboardWindow:
         lbl.pack(anchor="w", padx=12, pady=(8, 0))
 
         def _save():
-            chosen = [n for n in available_strategy_names(self.cfg) if _vars[n].get()]
+            chosen = [n for n in _names if _vars[(1, n)].get()]
             if not chosen:
                 lbl.config(text="Legalább egy stratégia legyen aktív.", fg=FG_RED)
                 return
             pc = self.cfg.setdefault("pairs", {}).setdefault(symbol, {})
+            # ── Per-stratégia megjelenítési kapcsolók (a V/K pipák) ──────────
+            for n in _names:
+                _vp.set_on(self.cfg, symbol, n, _vp.VIZ,    _vars[(2, n)].get())
+                _vp.set_on(self.cfg, symbol, n, _vp.TRADES, _vars[(3, n)].get())
+            _vp.prune(self.cfg, symbol, _names)
+            # A chart azonnal kövesse: egyszeri CLEAR + friss pillanatkép, hogy a
+            # kikapcsolt stratégia objektumai eltűnjenek (a viz-modell nem töröl
+            # magától). Ha EGYIK stratégia rajza sem látszik, a motor meg sem
+            # nyitja az írási utat → a törlést itt kell elvégezni, különben a régi
+            # objektumok ottragadnának a charton.
+            try:
+                from trading import live_trader as _lt
+                from core import mt5_visual as _viz
+                if _vp.any_viz_on(self.cfg, symbol, chosen):
+                    _lt._viz_pending_clear[symbol] = True
+                    _lt._viz_last_write.pop(symbol, None)
+                else:
+                    _viz.clear(symbol)
+            except Exception:
+                pass
             # Ha csak az elsődleges → ne szennyezzük a configot (default viselkedés).
             if chosen == [default_strategy_name(self.cfg)]:
                 pc.pop("strategies", None)
@@ -3038,66 +3061,6 @@ class DashboardWindow:
                            self.optimizer_status.get(symbol, ""),
                            connected=getattr(self, "_connected", False),
                            no_trade=no_trade)
-
-    def _handle_viz(self, symbol: str):
-        """Vizualizáció ki/be az adott instrumentumhoz. Bekapcsoláskor azonnali
-        újrarajzolás (a throttle nullázásával); kikapcsoláskor a chart-objektumok
-        törlése (mt5_visual.clear)."""
-        ds = self.dashboard_ref.get(symbol)
-        if ds is None:
-            return
-        ds.viz_enabled = not getattr(ds, "viz_enabled", True)
-        try:
-            from trading import live_trader as _lt
-            from core import mt5_visual as _viz
-            if ds.viz_enabled:
-                _lt._viz_last_write.pop(symbol, None)   # következő ciklusban azonnal ír
-            else:
-                _viz.clear(symbol)                       # objektumok törlése a chartról
-        except Exception:
-            pass
-        # Perzisztálás a config.json-ba (per-instrumentum V állapot)
-        try:
-            pc = self.cfg.get("pairs", {}).get(symbol)
-            if isinstance(pc, dict):
-                pc["viz_enabled"] = ds.viz_enabled
-                self._save_main_config()
-        except Exception:
-            pass
-        row = self.rows.get(symbol)
-        if row is not None:
-            row.update(ds, self.instrument_state.get(symbol, "STOPPED"),
-                       self.optimizer_status.get(symbol, ""),
-                       connected=getattr(self, "_connected", False))
-
-    def _handle_trades(self, symbol: str):
-        """A JEL-REPLAY réteg (a sűrű zöld/piros belépő-jelzés vonalak + Entry/TP/SL)
-        ki/be az adott instrumentumhoz. A tényleges MT5-kötések ettől függetlenül
-        látszanak. A no-delete viz-modell miatt a következő íráshoz egyszeri CLEAR-t
-        kérünk, hogy a jel-objektumok tisztán eltűnjenek / újrarajzolódjanak."""
-        ds = self.dashboard_ref.get(symbol)
-        if ds is None:
-            return
-        ds.show_trades = not getattr(ds, "show_trades", True)
-        try:
-            from trading import live_trader as _lt
-            _lt._viz_pending_clear[symbol] = True    # tiszta újrarajz (kötések be/ki)
-            _lt._viz_last_write.pop(symbol, None)      # következő ciklusban azonnal ír
-        except Exception:
-            pass
-        # Perzisztálás a config.json-ba (per-instrumentum K állapot)
-        try:
-            pc = self.cfg.get("pairs", {}).get(symbol)
-            if isinstance(pc, dict):
-                pc["show_trades"] = ds.show_trades
-                self._save_main_config()
-        except Exception:
-            pass
-        row = self.rows.get(symbol)
-        if row is not None:
-            row.update(ds, self.instrument_state.get(symbol, "STOPPED"),
-                       self.optimizer_status.get(symbol, ""),
-                       connected=getattr(self, "_connected", False))
 
     def _show_tfalign_settings(self, symbol: str):
         """A TF-együttállás beállításai az ADOTT instrumentumra (per-pár): mely
@@ -4181,8 +4144,6 @@ def _demo_dashboard(cfg: dict):
             spread_pts=random.randint(6, 18), max_spread_pts=random.randint(12, 25),
             position_pnl=None, risk_free=False, daily_pnl=0.0,
             opt_grade=grade_cell, opt_grade_reason=grade_reason,
-            viz_enabled=cfg["pairs"][symbol].get("viz_enabled", True),
-            show_trades=cfg["pairs"][symbol].get("show_trades", True),
             # Per-pár engedélyezett stratégiák (mint az éles induláskor) — a
             # jelölő-oszlop a nem engedélyezettet apró ponttal különbözteti meg.
             enabled_strategies=_enabled_names(cfg, symbol),

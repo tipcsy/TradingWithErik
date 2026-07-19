@@ -36,6 +36,7 @@ from core import correlation
 from core import run_state
 from core import exit_signal
 from core import position_build as _position_build
+from core import viz_prefs as _vp
 from core.indicator_engine import atr as atr_indicator
 from core.risk_manager import calc_lot, calc_effective_slots, SlotManager
 from strategy import get_strategy
@@ -118,16 +119,10 @@ class PairDashboardState:
     market_state_label: str = ""
     market_state_color: str = "muted"
 
-    # Per-instrumentum vizualizáció ki/be (a GUI V gombja billenti). A motor
-    # csak akkor írja a viz-fájlt, ha ez True. Kikapcsoláskor a GUI törli a
-    # chart-objektumokat (mt5_visual.clear).
-    viz_enabled:      bool = True
-
-    # Per-instrumentum JEL-REPLAY réteg ki/be (a GUI „K" gombja billenti). A stratégia
-    # jel-replay-e (a sűrű zöld/piros belépő-jelzés vonalak + Entry/TP/SL) csak akkor
-    # kerül a viz-fájlba, ha ez True → md.show_signals. A tényleges MT5-kötések (nyíl +
-    # valós SL/TP) ettől függetlenül mindig látszanak. Ki: a GUI egyszeri CLEAR-t kér.
-    show_trades:      bool = True
+    # (A vizualizáció / jel-replay kapcsolók NEM itt élnek: per PÁR+STRATÉGIA a
+    # config.json-ban, `core.viz_prefs` olvassa. Korábban volt itt egy pár-szintű
+    # `viz_enabled` / `show_trades` másolat is — kivéve, hogy ne legyen két
+    # igazságforrás, ami elavulhat.)
 
     # TF-együttállás monitor (az „Együtt" oszlop): a figyelt idősíkok SMA-iránya
     # (+1/−1/0 sorrendben) + az együttállás iránya ('BUY'/'SELL'/None) + a címkék.
@@ -641,10 +636,15 @@ def pair_visual_lines(symbol: str, params: dict, strategy, pip_size: float,
     # pip_size a jövőbeli TP/SL-rajzoláshoz (feltétel 3) — a params nem tartalmazza.
     # A no_trade_hours-t a visual_objects ELŐTT állítjuk be → a kék sáv + belépő-
     # jelölések visszajátszása ugyanúgy RESETEL a szüneteknél, mint a live motor.
-    # A „K" gomb (per pár, config.json: show_trades) a JEL-REPLAY réteget kapcsolja
-    # (a sűrű zöld/piros belépő-jelzés vonalak + Entry/TP/SL). A tényleges kötések
-    # (lentebb, actual_trade_objects) ettől FÜGGETLENÜL mindig látszanak.
-    _show_signals = bool((pair_cfg or {}).get("show_trades", True))
+    # A „Kötések látszanak" kapcsoló (per pár ÉS per STRATÉGIA — az instrumentum-
+    # beállítások táblázata állítja) a JEL-REPLAY réteget kapcsolja (a sűrű zöld/
+    # piros belépő-jelzés vonalak + Entry/TP/SL). A tényleges kötések (lentebb,
+    # actual_trade_objects) ettől FÜGGETLENÜL mindig látszanak.
+    # A `pair_cfg` egy PÁR-szótár (nincs benne a `pairs` szint), ezért a
+    # viz_prefs-nek megfelelő alakra csomagoljuk — így a per-stratégia térkép és a
+    # legacy `show_trades` visszaesés EGY helyen dől el.
+    _show_signals = _vp.trades_on({"pairs": {symbol: (pair_cfg or {})}},
+                                  symbol, strategy.name)
     md = MarketData(symbol=symbol, params={**params, "pip_size": pip_size}, bars=bars,
                     no_trade_hours=no_trade_set, show_signals=_show_signals)
     objects = apply_no_trade(strategy.visual_objects(md), pair_cfg or {}, th)
@@ -676,7 +676,14 @@ def _write_symbol_viz(symbol, pair_cfg, strats, pair_states):
     input szerint szűr → az egyik chart-ablak az A-t, a másik a B-t mutatja).
     Throttle-olva; a viz MEGJELENÍTÉS → kereskedési szünetben is frissül."""
     ds = dashboard.get(symbol)
-    if not (VIZ_ENABLED and ds is not None and ds.viz_enabled):
+    if not (VIZ_ENABLED and ds is not None):
+        return
+    # A viz PER STRATÉGIA kapcsolható (instrumentum-beállítások táblázat). A
+    # pár-szintű kapu = legalább egy stratégia rajza látszik; ha egyik sem, meg
+    # sem nyitjuk az írási utat (a chart-objektumok törléséről a GUI gondoskodik).
+    _cfgview = {"pairs": {symbol: (pair_cfg or {})}}
+    _viz_names = [st.name for st in strats if _vp.viz_on(_cfgview, symbol, st.name)]
+    if not _viz_names:
         return
     now = time.time()
     if now - _viz_last_write.get(symbol, 0.0) < VIZ_INTERVAL_SEC:
@@ -688,7 +695,7 @@ def _write_symbol_viz(symbol, pair_cfg, strats, pair_states):
     lines = []
     for st in strats:
         key = (symbol, st.name)
-        if key not in pair_states:
+        if key not in pair_states or st.name not in _viz_names:
             continue
         try:
             # A LEGFRISSEBB JSON-paraméter (követi az instrumentum-ablak Mentését).
@@ -1599,8 +1606,6 @@ def run(cfg: dict, slot_mgr: SlotManager):
             symbol=symbol,
             enabled=pair_cfg.get("enabled", False),
             trained=trained,
-            viz_enabled=pair_cfg.get("viz_enabled", True),   # V mód a config.json-ból
-            show_trades=pair_cfg.get("show_trades", True),   # K (kötés-réteg) a config.json-ból
             enabled_strategies=[st.name for st in strats],
         )
         # Kezdeti állapot (restart-biztos): a KERESKEDÉS-SZÁNDÉK a config.json
