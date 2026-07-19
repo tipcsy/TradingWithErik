@@ -3305,11 +3305,21 @@ class DashboardWindow:
         sma_var = tk.StringVar(value=str(_sma))
         tk.Entry(_f2, textvariable=sma_var, width=6, bg=BG_HEADER, fg=FG_WHITE,
                  font=self._small_font, insertbackground=FG_WHITE).pack(side="left", padx=6)
+        # A FIGYELÉS és a chart-RAJZ két külön kapcsoló: figyelheted az együttállást
+        # tiszta charton, és fordítva, kirajzoltathatod az SMA-kat anélkül, hogy az
+        # oszlop/kapu dolgozna. (Korábban egy kapcsoló vezérelte mindkettőt.)
         en_var = tk.BooleanVar(value=_en)
-        tk.Checkbutton(popup, text="Bekapcsolva (az oszlop + viz-SMA látszik)", variable=en_var,
+        tk.Checkbutton(popup, text='Bekapcsolva — figyeli az együttállást '
+                                   '(„Együtt" oszlop + belépő-kapu)',
+                       variable=en_var,
                        bg=BG, fg=FG_WHITE, selectcolor=BG_HEADER, font=self._small_font,
                        activebackground=BG, activeforeground=FG_WHITE).pack(
-                       anchor="w", padx=12, pady=(4, 0))
+                       anchor="w", padx=12, pady=(6, 0))
+        viz_tf_var = tk.BooleanVar(value=_tfa.viz_on(self.cfg, symbol))
+        tk.Checkbutton(popup, text="SMA-vonalak a charton (viz)", variable=viz_tf_var,
+                       bg=BG, fg=FG_WHITE, selectcolor=BG_HEADER, font=self._small_font,
+                       activebackground=BG, activeforeground=FG_WHITE).pack(
+                       anchor="w", padx=12, pady=(0, 2))
 
         # ── Kapu: az együttállás akadályozza-e a belépőt (per stratégia) ──────
         tk.Label(popup, text="Az együttállás AKADÁLYOZZA a belépőt (csak a trenddel "
@@ -3355,7 +3365,7 @@ class DashboardWindow:
                 lbl_err.config(text="Az SMA-periódus egész szám legyen.")
                 return
             gate = [sn for sn, gv in _gate_vars.items() if gv.get()]
-            rule = {"enabled": bool(en_var.get()),
+            rule = {"enabled": bool(en_var.get()), "viz": bool(viz_tf_var.get()),
                     "timeframes": chosen, "sma_period": sma, "gate": gate}
             pairs = self.cfg.setdefault("pairs", {})
             if all_var.get():
@@ -3374,8 +3384,19 @@ class DashboardWindow:
                 for s in targets:
                     pairs[s]["tf_align"] = dict(rule)   # páronként külön szótár
             else:
+                targets = [symbol]
                 pairs.setdefault(symbol, {})["tf_align"] = rule
             self._save_main_config()
+            # A chart azonnal kövesse az SMA-vonal kapcsolót: egyszeri CLEAR + friss
+            # pillanatkép, különben a levett vonalak a következő paraméter-váltásig
+            # ottmaradnának (a viz-modell nem töröl magától), a felrakottak pedig
+            # csak a throttle leteltével jelennének meg.
+            try:
+                from trading import live_trader as _lt
+                for s in targets:
+                    _lt.request_viz_clear(s)
+            except Exception:
+                pass
             popup.destroy()
 
         btns = tk.Frame(popup, bg=BG)

@@ -9,8 +9,14 @@ Ez egy MEGJELENÍTŐ (a dashboard „Együtt" oszlopa) — nem befolyásolja a k
 A modul SZÁNDÉKOSAN MT5-mentes és tiszta (tesztelhető): a bar-adatot (záróárak
 idősíkonként) a hívó (dashboard) tölti native copy_rates-ből.
 
-Konfiguráció (config.json, VÁZ-szint):
-    "tf_align": { "enabled": true, "timeframes": [1, 5, 15], "sma_period": 50 }
+Konfiguráció (config.json, VÁZ-szint; per-pár felülírható a `pairs.<sym>.tf_align`-ban):
+    "tf_align": { "enabled": true, "viz": false,
+                  "timeframes": [1, 5, 15], "sma_period": 50, "gate": [] }
+
+KÉT KÜLÖN kapcsoló:
+  • `enabled` — a FIGYELÉS: az „Együtt" oszlop és a belépő-kapu (`gate`).
+  • `viz`     — a chart-RAJZ: a figyelt idősíkok SMA-vonalai. Hiányzó `viz` esetén
+                az `enabled` dönt (visszafelé kompatibilis).
 """
 
 from __future__ import annotations
@@ -42,13 +48,38 @@ def config(cfg: dict) -> tuple:
     return en, tfs, sma
 
 
+def _merged(cfg: dict, symbol: str) -> dict:
+    """A per-pár `pairs.<sym>.tf_align` a globális `tf_align` fölé olvasztva
+    (kulcsonként), az pedig az alapértékek fölé."""
+    glob = cfg.get("tf_align") or {}
+    pair = ((cfg.get("pairs") or {}).get(symbol) or {}).get("tf_align") or {}
+    return {**glob, **pair}
+
+
 def config_for(cfg: dict, symbol: str) -> tuple:
     """(enabled, timeframes, sma_period, gate) az ADOTT instrumentumra: a per-pár
     `pairs.<sym>.tf_align` FELÜLÍRJA a globális `tf_align`-t (kulcsonként), az pedig
-    az alapértékeket. Így minden instrumentum mást figyelhet (pl. M1/M15/H1, SMA100)."""
-    glob = cfg.get("tf_align") or {}
-    pair = ((cfg.get("pairs") or {}).get(symbol) or {}).get("tf_align") or {}
-    return _normalize({**glob, **pair})
+    az alapértékeket. Így minden instrumentum mást figyelhet (pl. M1/M15/H1, SMA100).
+
+    Az `enabled` a FIGYELÉST kapcsolja: az „Együtt" oszlopot és a belépő-kaput.
+    A chart-rajzot NEM — arra külön kapcsoló van (`viz_on`)."""
+    return _normalize(_merged(cfg, symbol))
+
+
+def viz_on(cfg: dict, symbol: str) -> bool:
+    """Látszanak-e a figyelt idősíkok SMA-vonalai a CHARTON.
+
+    FÜGGETLEN az `enabled`-től: figyelheted az együttállást chart-rajz nélkül
+    (tiszta chart), és fordítva, kirajzoltathatod az SMA-kat anélkül, hogy az
+    oszlop/kapu dolgozna.
+
+    Visszafelé kompatibilis: ha a `viz` kulcs HIÁNYZIK, az `enabled` dönt — a
+    régi configok pontosan úgy viselkednek, mint eddig (egy kapcsoló mindkettőre)."""
+    tc = _merged(cfg, symbol)
+    v = tc.get("viz")
+    if v is None:
+        return bool(tc.get("enabled", True))
+    return bool(v)
 
 
 def _sign(closes, n: int) -> int:

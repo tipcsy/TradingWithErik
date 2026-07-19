@@ -475,16 +475,18 @@ def apply_market_state(objects: list, df15, pair_cfg: dict = None) -> list:
 
 
 def tf_align_visual_objects(symbol: str) -> list:
-    """A TF-együttállás figyelő SMA-vonalai a charton: a figyelt (bekapcsolt)
-    idősíkokra egy-egy MA(sma_period), a fő ablakba (az MQL5 iMA-val rajzolja az
-    adott idősíkon). Csak ha az instrumentumon engedélyezve van; az MQL5 TfFromStr
-    által ismert idősíkok (M1/M5/M15/M30/H1/H4)."""
+    """A TF-együttállás figyelő SMA-vonalai a charton: a figyelt idősíkokra egy-egy
+    MA(sma_period), a fő ablakba (az MQL5 iMA-val rajzolja az adott idősíkon). Az
+    MQL5 TfFromStr által ismert idősíkok (M1/M5/M15/M30/H1/H4).
+
+    A RAJZ saját kapcsolón függ (`tf_align.viz`), NEM a figyelés `enabled`-jén:
+    figyelheted az együttállást tiszta charton, és fordítva."""
     _VIZ_TF = {1: "M1", 5: "M5", 15: "M15", 30: "M30", 60: "H1", 240: "H4"}
     try:
         from strategy import visual as viz
         from core import tf_align as _tfa
-        en, tfs, sma, _ = _tfa.config_for(_run_cfg, symbol)
-        if not en:
+        _, tfs, sma, _g = _tfa.config_for(_run_cfg, symbol)
+        if not _tfa.viz_on(_run_cfg, symbol):
             return []
         return [viz.Indicator("MA", _VIZ_TF[tf], sma) for tf in tfs if tf in _VIZ_TF]
     except Exception:
