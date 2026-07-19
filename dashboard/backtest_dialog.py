@@ -184,6 +184,21 @@ class BacktestDialog:
             pass
         return spec
 
+    def _cfg_max_slots(self) -> int:
+        """A config szerinti slot-szám (a mező alapértéke). Hiány/hibás → 4."""
+        try:
+            return max(1, int(self.cfg.get("trading", {}).get("max_open_slots", 4)))
+        except (TypeError, ValueError):
+            return 4
+
+    def _run_trading_cfg(self) -> dict:
+        """A futtatáshoz használt trading_cfg — a `Slotok` mezővel felülírt
+        `max_open_slots`-szal. MÁSOLAT: a feltáró futtatás nem írja a live configot.
+        Érvénytelen/üres mező → a config értéke (a korábbi viselkedés)."""
+        n = _num(self._slots_var.get())
+        slots = max(1, int(n)) if n is not None and n >= 1 else self._cfg_max_slots()
+        return {**self.cfg["trading"], "max_open_slots": slots}
+
     def _allowed_hours(self):
         """A backtest óra-kapuja. None → minden óra (a checkbox KI). Bekapcsolva a
         stratégia kereskedési órái (trade_hours), a live `process_pair`-rel EGYEZŐ
@@ -255,6 +270,25 @@ class BacktestDialog:
                        variable=self._hours_filter_var, bg=BG, fg=FG_GRAY,
                        selectcolor=BG_HEADER, font=self._sf, activebackground=BG,
                        activeforeground=FG_WHITE).pack(side="left")
+
+        # ── Slotok ──────────────────────────────────────────────────────────
+        # FIGYELEM: egy páron amúgy is legfeljebb EGY pozíció fut (a ráépítés
+        # ugyanannak a kötésnek a lábai), így itt a slot-szám NEM a pozíciók
+        # számát korlátozza, hanem a MÉRETEZÉST: a kockázat slotonként oszlik
+        # (risk_per_slot = egyenleg × account_risk_pct / slotok), lásd
+        # core.risk_manager.calc_lot. Több slot → arányosan kisebb lot.
+        tk.Label(hrow, text="Slotok:", bg=BG, fg=FG_GRAY,
+                 font=self._sf).pack(side="left", padx=(16, 2))
+        self._slots_var = tk.StringVar(value=str(self._cfg_max_slots()))
+        _se = tk.Entry(hrow, width=4, textvariable=self._slots_var, bg=BG_HEADER,
+                       fg=FG_WHITE, font=self._sf, insertbackground=FG_WHITE,
+                       justify="center")
+        _se.pack(side="left")
+        _attach_tooltip(_se, "Egyszerre nyitható slotok száma — a POZÍCIÓMÉRETET\n"
+                             "állítja, nem a pozíciók számát (egy páron úgyis egy\n"
+                             "kötés fut). A kockázat ennyi slot közt oszlik el:\n"
+                             "több slot = kisebb lot. Alapérték a config\n"
+                             "trading.max_open_slots értéke.")
 
         # ── Paraméterek (SZERKESZTHETŐ — feltáró) ───────────────────────────
         phdr = tk.Frame(win, bg=BG)
@@ -719,6 +753,7 @@ class BacktestDialog:
         rr_spec = self._current_rr_spec()          # az ablakban választott (feltáró) rr
         build_cfg = self._current_build_cfg()      # az ablakban választott (feltáró) építés
         allowed = self._allowed_hours()            # None = minden óra; különben trade_hours
+        tcfg = self._run_trading_cfg()             # a `Slotok` mezővel felülírt méretezés
 
         def cb(pct, m1_time, balance, n_open, n_closed, tech):
             try:
@@ -732,7 +767,7 @@ class BacktestDialog:
             try:
                 from trading.backtest import run_pair
                 result = run_pair(self.symbol, self._df15, self._df1, params,
-                                  self.pair_cfg, self.cfg["trading"], ib,
+                                  self.pair_cfg, tcfg, ib,
                                   strategy=self.strategy, rr=rr_spec,
                                   build=build_cfg, allowed_hours=allowed,
                                   test_start=start, test_end=end,

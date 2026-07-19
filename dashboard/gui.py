@@ -2154,6 +2154,12 @@ class DashboardWindow:
         self._balance    = 0.0
         self._free_slots = cfg["trading"]["max_open_slots"]
         self._max_slots  = cfg["trading"]["max_open_slots"]
+        # A nyitott pozíciók BONTÁSA a slot-címkéhez: összes darab vs. ebből
+        # ténylegesen slotot foglaló (nem kockázatmentes). Enélkül a „8 nyitott
+        # pozíció 4 slot mellett" jogos gyanút kelt — pedig szabályos, ha a
+        # többi már BE-re húzott. Lásd `_render_slots_label`.
+        self._open_total    = 0
+        self._open_occupied = 0
 
         self._refresh()
 
@@ -3371,6 +3377,25 @@ class DashboardWindow:
         self._free_slots = free
         self._max_slots  = max_s
 
+    def _render_slots_label(self):
+        """A slot-címke — EGY igazságforrás (a ▼/▲ állítás és a periodikus MT5
+        frissítés is ezt hívja).
+
+        A szabad slotok mellett kiírja a nyitott pozíciók BONTÁSÁT is, mert csak
+        a NEM kockázatmentes pozíciók foglalnak slotot (core.risk_manager.
+        SlotManager.occupied) — így max 4 slot mellett is lehet szabályosan 8
+        nyitott pozíció, ha 4 már biztosított. A bontás nélkül ez bugnak látszik.
+        A ráépített lábak eleve kockázatmentesek (az SL az átlagáron), ezért is
+        nőhet a darabszám a kockázat növekedése nélkül."""
+        free = self._free_slots
+        txt  = f"Szabad slotok: {free}/{self._max_slots}"
+        if self._open_total:
+            rf = self._open_total - self._open_occupied
+            txt += (f"  ·  nyitva {self._open_total} "
+                    f"({self._open_occupied} kockázatos"
+                    + (f" + {rf} biztosított)" if rf else ")"))
+        self.lbl_slots.config(text=txt, fg=FG_GREEN if free > 0 else FG_RED)
+
     def _change_slots(self, delta: int):
         """Max slotszám növelése/csökkentése a felületről.
         Csökkenteni csak a jelenleg FOGLALT (nyitott) slotok számáig lehet —
@@ -3390,9 +3415,7 @@ class DashboardWindow:
         # Perzisztálás a config.json-ba (csak a váz-szekciók)
         self.cfg["trading"]["max_open_slots"] = new_max
         self._save_main_config()
-        self.lbl_slots.config(
-            text=f"Szabad slotok: {self._free_slots}/{self._max_slots}",
-            fg=FG_GREEN if self._free_slots > 0 else FG_RED)
+        self._render_slots_label()
 
     def _change_daily_limit(self, delta: int):
         """A napi veszteség-limit állítása a felületről (10$-os lépés, min. 10$).
@@ -3968,9 +3991,11 @@ class DashboardWindow:
             occupied = sum(p.get("occupied", p.get("count", 1))
                            for p in mt5_positions.values())
             self._free_slots = max(0, self._max_slots - occupied)
-            free = self._free_slots
-            self.lbl_slots.config(text=f"Szabad slotok: {free}/{self._max_slots}",
-                                  fg=FG_GREEN if free > 0 else FG_RED)
+            # A bontáshoz az ÖSSZES nyitott darab is kell (a `count` a
+            # kockázatmenteseket is tartalmazza) — lásd `_render_slots_label`.
+            self._open_total    = sum(p.get("count", 1) for p in mt5_positions.values())
+            self._open_occupied = occupied
+            self._render_slots_label()
 
         live_count = 0
         if hasattr(self, "rows"):
