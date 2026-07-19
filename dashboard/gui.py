@@ -2965,10 +2965,18 @@ class DashboardWindow:
                   font=self._small_font, command=popup.destroy).pack(side="left", padx=6)
 
     # ── Opt státusz részletek (a státusz-cellára kattintva) ──────────────
+    # A hibanapló és a blokk-elválasztója — egy igazságforrás az olvasáshoz és a
+    # törléshez (a `_run_worker` ugyanezt a fájlt bővíti).
+    OPT_LOG_SEP = "=" * 60
+
     @staticmethod
-    def _read_opt_log_for(symbol: str, max_blocks: int = 6) -> str:
+    def _opt_log_file():
+        return ROOT / "data" / "opt_error.log"
+
+    @classmethod
+    def _read_opt_log_for(cls, symbol: str, max_blocks: int = 6) -> str:
         """Az adott instrumentumhoz tartozó legutóbbi hiba-blokkok az opt_error.log-ból."""
-        log_file = ROOT / "data" / "opt_error.log"
+        log_file = cls._opt_log_file()
         if not log_file.exists():
             return ""
         try:
@@ -2976,9 +2984,45 @@ class DashboardWindow:
                 raw = f.read()
         except Exception:
             return ""
-        sep = "=" * 60
+        sep = cls.OPT_LOG_SEP
         blocks = [b for b in raw.split(sep) if f"[{symbol}]" in b]
         return sep.join(blocks[-max_blocks:]).strip() if blocks else ""
+
+    @classmethod
+    def _clear_opt_log_for(cls, symbol: str) -> "tuple[int, str|None]":
+        """Az ADOTT instrumentum hiba-blokkjainak törlése az opt_error.log-ból,
+        AZONNALI kiírással (a törölt állapot rögtön a lemezre kerül — nem csak a
+        megjelenítésből tűnik el).
+
+        SZÁNDÉKOSAN csak ennek a szimbólumnak a blokkjait viszi el: a napló közös,
+        és a többi instrumentum hibái még hasznosak lehetnek.
+
+        Vissza: (törölt blokkok száma, hibaüzenet vagy None). Az írás atomikus
+        (temp → replace), hogy egy megszakadás ne csonkítsa a naplót."""
+        log_file = cls._opt_log_file()
+        if not log_file.exists():
+            return 0, None
+        sep = cls.OPT_LOG_SEP
+        try:
+            with open(log_file, encoding="utf-8") as f:
+                raw = f.read()
+        except Exception as ex:
+            return 0, str(ex)
+        blocks = raw.split(sep)
+        keep   = [b for b in blocks if f"[{symbol}]" not in b]
+        removed = len(blocks) - len(keep)
+        if not removed:
+            return 0, None
+        payload = sep.join(keep).strip()
+        if payload:
+            payload += "\n"
+        try:
+            tmp = log_file.with_suffix(".log.tmp")
+            tmp.write_text(payload, encoding="utf-8")
+            tmp.replace(log_file)
+        except Exception as ex:
+            return 0, str(ex)
+        return removed, None
 
     def _show_opt_log(self, symbol: str):
         """Részletes optimalizálási állapot: státusz + trials CSV + hibalog."""
@@ -3020,6 +3064,14 @@ class DashboardWindow:
         tk.Label(popup, text="Legutóbbi hibák/események (data/opt_error.log):",
                  bg=BG, fg=FG_GRAY, font=self._small_font).pack(anchor="w", padx=10, pady=(8, 0))
 
+        # FONTOS a sorrend: az alsó sáv (visszajelzés + gombok) LENTRŐL foglalja a
+        # helyét, MÉG a táguló szövegdoboz előtt. Fordítva a `expand=True` szövegdoboz
+        # felenné az egész maradékot, és a gombok kiszorulnának a látható területről
+        # (magasság 1 px) — a Bezár gombbal együtt.
+        lbl_res = tk.Label(popup, text="", bg=BG, font=self._small_font)
+        btns = tk.Frame(popup, bg=BG)
+        btns.pack(side="bottom", pady=8)
+
         txt_frame = tk.Frame(popup, bg=BG)
         txt_frame.pack(fill="both", expand=True, padx=10, pady=4)
         sb = tk.Scrollbar(txt_frame)
@@ -3028,14 +3080,35 @@ class DashboardWindow:
                        font=self._mono_font, wrap="word", yscrollcommand=sb.set)
         text.pack(side="left", fill="both", expand=True)
         sb.config(command=text.yview)
-        content = self._read_opt_log_for(symbol)
-        text.insert("1.0", content or "(Nincs naplózott hiba ehhez az instrumentumhoz. "
-                                      "Ha a Trials CSV létezik, az optimalizálás lefutott — "
-                                      "nyisd meg és nézd meg a score oszlopot.)")
+        _EMPTY = ("(Nincs naplózott hiba ehhez az instrumentumhoz. "
+                  "Ha a Trials CSV létezik, az optimalizálás lefutott — "
+                  "nyisd meg és nézd meg a score oszlopot.)")
+        text.insert("1.0", self._read_opt_log_for(symbol) or _EMPTY)
         text.config(state="disabled")
 
-        tk.Button(popup, text="Bezár", bg=BTN_DIS_BG, fg=BTN_DIS_FG, relief="flat",
-                  font=self._small_font, command=popup.destroy).pack(pady=8)
+        def _clear_log():
+            """A megjelenített (ehhez az instrumentumhoz tartozó) napló-bejegyzések
+            törlése — a lemezre is AZONNAL kiírva, nem csak a nézetből."""
+            n, err = self._clear_opt_log_for(symbol)
+            if err:
+                lbl_res.config(text=f"A napló nem írható: {err}", fg=FG_RED)
+            elif n:
+                lbl_res.config(text=f"{n} napló-bejegyzés törölve és elmentve.",
+                               fg=FG_GREEN)
+            else:
+                lbl_res.config(text="Nem volt törölhető bejegyzés.", fg=FG_GRAY)
+            lbl_res.pack(side="bottom", pady=(0, 6), before=btns)
+            # A nézet kövesse: friss (immár üres) tartalom.
+            text.config(state="normal")
+            text.delete("1.0", "end")
+            text.insert("1.0", self._read_opt_log_for(symbol) or _EMPTY)
+            text.config(state="disabled")
+
+        tk.Button(btns, text="🗑 Log törlése", bg=BTN_BT_BG, fg=BTN_BT_FG,
+                  relief="flat", font=self._small_font, cursor="hand2",
+                  command=_clear_log).pack(side="left", padx=6)
+        tk.Button(btns, text="Bezár", bg=BTN_DIS_BG, fg=BTN_DIS_FG, relief="flat",
+                  font=self._small_font, command=popup.destroy).pack(side="left", padx=6)
 
     @staticmethod
     def _open_file(path):
@@ -3148,54 +3221,10 @@ class DashboardWindow:
                 label="▶ Mind",
                 command=lambda: ([self._opt_ctrl.request_optimize(symbol, s)
                                   for s in names], self._refresh_row(symbol)))
-        # Opt-állapot (study/trials/marker) törlése — per stratégia, majd 'Mind'.
-        menu.add_separator()
-        if len(names) == 1:
-            menu.add_command(label="🗑 Opt-állapot törlése",
-                             command=lambda: self._delete_opt_state(symbol, list(names)))
-        else:
-            for sn in names:
-                menu.add_command(
-                    label=f"🗑 {sn} opt-állapot törlése",
-                    command=lambda s=sn: self._delete_opt_state(symbol, [s]))
-            menu.add_command(label="🗑 Mind törlése",
-                             command=lambda: self._delete_opt_state(symbol, list(names)))
         try:
             menu.tk_popup(int(x), int(y))
         finally:
             menu.grab_release()
-
-    def _delete_opt_state(self, symbol: str, names: list):
-        """Az optimalizálási ÁLLAPOT/LOG törlése a megadott stratégiákhoz: study DB
-        (optuna SQLite, a folytatás forrása), trials CSV, done- és stop-marker. A
-        mentett paraméterek (params) MEGMARADNAK — csak az előzmény és az 'Utolsó opt'
-        dátum tűnik el, így a következő futás tiszta lappal (nem folytatás) indul.
-        Futó/sorban álló optimalizálásnál tiltva."""
-        from tkinter import messagebox
-        if self.instrument_state.get(symbol) in ("OPTIMIZING", "QUEUED"):
-            messagebox.showinfo(
-                "Nem törölhető",
-                "Előbb állítsd le a futó/sorban álló optimalizálást.")
-            return
-        who = ", ".join(names)
-        if not messagebox.askyesno(
-                "Opt-állapot törlése",
-                f"Törlöd a(z) {symbol} optimalizálási állapotát ({who})?\n\n"
-                "A mentett paraméterek megmaradnak, de a study/trials-előzmény és az "
-                "'Utolsó opt' dátum törlődik — a következő futás nem folytatás lesz."):
-            return
-        from core.params_store import (trials_file, study_db, done_marker,
-                                        stop_marker)
-        for sn in names:
-            for pth in (trials_file(symbol, sn), study_db(symbol, sn),
-                        done_marker(symbol, sn), stop_marker(symbol, sn)):
-                try:
-                    if pth.exists():
-                        pth.unlink()
-                except Exception:
-                    pass
-        self.optimizer_status[symbol] = ""
-        self._refresh_row(symbol)
 
     def _handle_opt_menu(self, symbol: str, event):
         """JOBB-klikk az OPT gombon: stratégiaválasztó menü (ugyanaz, mint a
