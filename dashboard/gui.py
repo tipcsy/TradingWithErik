@@ -3104,7 +3104,11 @@ class DashboardWindow:
         idősíkokat figyelje (2–6) + SMA-periódus + be/ki, ÉS stratégiánként egy
         kapcsoló, hogy az együttállás AKADÁLYOZZA-e a belépőt (csak a trenddel
         egyező jel köthet). Mentés a `pairs.<sym>.tf_align`-ba. Az „Együtt" cellára
-        kattintva nyílik."""
+        kattintva nyílik.
+
+        Az „Az összes instrumentumra vonatkozzon" pipával a szabály EGY mentéssel
+        minden párra kiterjed (nem kell egyesével végigkattintani) — ez felülírja
+        a többi pár saját beállítását, ezért megerősítést kér."""
         from core import tf_align as _tfa
         from strategy import available_strategy_names
         _en, _tfs, _sma, _gate = _tfa.config_for(self.cfg, symbol)
@@ -3158,6 +3162,19 @@ class DashboardWindow:
                            activebackground=BG, activeforeground=FG_WHITE).pack(
                            side="left", padx=(0, 12))
 
+        # ── Tömeges alkalmazás: ugyanez a szabály MINDEN instrumentumra ──────
+        # Enélkül minden párt egyesével kell végigkattintani, ha pl. a H1-et is
+        # látni akarod mindenhol. FELÜLÍRJA a párok egyedi tf_align-ját, ezért
+        # mentés előtt megerősítést kér (lásd `_save`).
+        all_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(popup, text="Az összes instrumentumra vonatkozzon",
+                       variable=all_var, bg=BG, fg=FG_WHITE, selectcolor=BG_HEADER,
+                       font=self._small_font, activebackground=BG,
+                       activeforeground=FG_WHITE).pack(anchor="w", padx=12, pady=(10, 0))
+        tk.Label(popup, text="(felülírja a többi instrumentum saját TF-beállítását)",
+                 bg=BG, fg=FG_GRAY_DIM, font=self._small_font).pack(
+                 anchor="w", padx=32, pady=(0, 2))
+
         lbl_err = tk.Label(popup, text="", bg=BG, fg=FG_RED, font=self._small_font,
                            wraplength=340, justify="left")
         lbl_err.pack(anchor="w", padx=12, pady=(6, 0))
@@ -3173,9 +3190,26 @@ class DashboardWindow:
                 lbl_err.config(text="Az SMA-periódus egész szám legyen.")
                 return
             gate = [sn for sn, gv in _gate_vars.items() if gv.get()]
-            pc = self.cfg.setdefault("pairs", {}).setdefault(symbol, {})
-            pc["tf_align"] = {"enabled": bool(en_var.get()),
-                              "timeframes": chosen, "sma_period": sma, "gate": gate}
+            rule = {"enabled": bool(en_var.get()),
+                    "timeframes": chosen, "sma_period": sma, "gate": gate}
+            pairs = self.cfg.setdefault("pairs", {})
+            if all_var.get():
+                # MINDEN instrumentum ugyanezt a szabályt kapja. A `gate` is átmegy:
+                # olyan stratégia neve is szerepelhet benne, ami az adott páron nincs
+                # engedélyezve — ez ártalmatlan (a kapu csak a futó stratégiákra hat),
+                # és így a „mindegyikre ugyanaz a szabály" elv nem törik meg.
+                targets = [s for s, p in pairs.items() if isinstance(p, dict)]
+                from tkinter import messagebox
+                if not messagebox.askyesno(
+                        "TF-együttállás — összes instrumentum",
+                        f"Ez a beállítás mind a(z) {len(targets)} instrumentumra "
+                        f"érvényes lesz, és felülírja a saját TF-beállításukat.\n\n"
+                        f"Folytatod?", parent=popup):
+                    return
+                for s in targets:
+                    pairs[s]["tf_align"] = dict(rule)   # páronként külön szótár
+            else:
+                pairs.setdefault(symbol, {})["tf_align"] = rule
             self._save_main_config()
             popup.destroy()
 
