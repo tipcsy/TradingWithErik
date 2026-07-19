@@ -2833,6 +2833,10 @@ class DashboardWindow:
             ("Vizualizáció látszik", lambda n: _vp.viz_on(self.cfg, symbol, n)),
             ("Kötések látszanak",    lambda n: _vp.trades_on(self.cfg, symbol, n)),
         ]
+        # Jelölőnégyzetek — ugyanaz a recept, mint az ablak többi kapcsolójánál:
+        # az `fg` ADJA A PIPA SZÍNÉT, ezért kötelező megadni. Nélküle a rendszer
+        # alapértelmezett (sötét) pipája rajzolódna a sötét `selectcolor`-ra, és
+        # gyakorlatilag láthatatlan lenne.
         _vars = {}          # (sor-index, stratégia-név) → BooleanVar
         for r, (label, initial) in enumerate(_ROWS, start=1):
             tk.Label(tbl, text=label, bg=BG, fg=FG_GRAY, font=self._small_font,
@@ -2840,8 +2844,9 @@ class DashboardWindow:
             for c, n in enumerate(_names, start=1):
                 v = tk.BooleanVar(value=bool(initial(n)))
                 _vars[(r, n)] = v
-                tk.Checkbutton(tbl, variable=v, bg=BG, selectcolor=BG_HEADER,
-                               activebackground=BG).grid(row=r, column=c)
+                tk.Checkbutton(tbl, variable=v, bg=BG, fg=FG_WHITE,
+                               selectcolor=BG_HEADER, activebackground=BG,
+                               activeforeground=FG_WHITE).grid(row=r, column=c)
 
         # ── Kötés-mód sor: valódi kötés vagy CSAK JELZÉS (teszteléshez) ──────
         # Nem pipa, hanem legördülő: a „nem kereskedik" állapot legyen KIÍRVA,
