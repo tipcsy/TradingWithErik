@@ -1425,8 +1425,15 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
     # jelet, végrehajtási szűrők nélkül), de egy VÉGREHAJTÁSI kapu blokkol, írjuk
     # ki, MELYIK — különben úgy tűnik, "látta a jelet, mégsem lépett be". A jel
     # pillanatnyi (az adott M1 átütés gyertyáján), ezért ez ritkán logol.
+    # KIVEZETÉS: a felhasználó megállította a párt, de volt nyitott pozíciója. A
+    # meglévőt tovább kezeljük (ez a függvény fentebb már megtette), ÚJAT viszont
+    # nem nyitunk — a pár akkor lesz valódi STOPPED, ha a pozíció lezárult.
+    closing = instrument_state.get(symbol) == "CLOSING"
+
     if signal != "NONE":
-        _block = ("már van nyitott pozíció ezen a páron" if already_open else
+        _block = ("kivezetés alatt (Stop kérve — csak a nyitott pozíció fut ki)"
+                  if closing else
+                  "már van nyitott pozíció ezen a páron" if already_open else
                   f"napi veszteség-limit elérve ({_day_pnl:+.2f}$ ≤ -{daily_limit:.0f}$)"
                   if daily_limit_hit else
                   "nincs érvényes ATR (adathiány)" if atr_val is None else
@@ -1437,7 +1444,7 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         if _block:
             log.info("⏭ %s %s jel — belépő KIHAGYVA: %s", symbol, signal, _block)
 
-    if (signal != "NONE" and not already_open and not daily_limit_hit
+    if (signal != "NONE" and not closing and not already_open and not daily_limit_hit
             and atr_val is not None and slot_mgr.can_open() and spread_ok
             and tf_gate_ok):
         # ── Korreláció / devizakitettség kapu ──────────────────────────────
@@ -1732,9 +1739,16 @@ def run(cfg: dict, slot_mgr: SlotManager):
         ps = _make_state(_sym, _pcfg, _st, is_display=_is_disp)
         if ps is not None:
             pair_states[(_sym, _sname)] = ps
-            instrument_state[_sym] = "LIVE"
-            log.info("%s/%s — helyreállítva LIVE-ba (nyitott pozíció a magic alatt)",
-                     _sym, _sname)
+            # A MENTETT SZÁNDÉK dönt: ha a felhasználó megállította a párt (a
+            # pozíció kifutása alatt indult újra a program), akkor KIVEZETÉS-be
+            # állunk vissza, nem LIVE-ba — különben az újraindítás némán
+            # visszakapcsolná a kereskedést, és nyithatna új pozíciót.
+            _intent_live = _sname in set(
+                run_state.live_strategies(cfg, _sym,
+                                          [s.name for s in (_primary or [_st])]))
+            instrument_state[_sym] = "LIVE" if _intent_live else "CLOSING"
+            log.info("%s/%s — helyreállítva %s-ba (nyitott pozíció a magic alatt)",
+                     _sym, _sname, instrument_state[_sym])
         else:
             log.warning("%s/%s — nyitott pozíció, de nincs params! Kézi kezelés szükséges.",
                         _sym, _sname)
@@ -1756,6 +1770,13 @@ def run(cfg: dict, slot_mgr: SlotManager):
                 risky_mode.load()
                 last_risky_reload = time.time()
 
+            # Nyitott pozíciók szimbólumonként — EGY MT5-hívás a körre (a CLOSING
+            # állapot lezárás-figyeléséhez kell).
+            try:
+                _pos_by_sym = mt5_connector.open_positions_by_symbol()
+            except Exception:
+                _pos_by_sym = {}
+
             for symbol, pair_cfg in all_pairs.items():
                 state_now = instrument_state.get(symbol, "STOPPED")
                 strats = strats_by_symbol[symbol]
@@ -1774,6 +1795,21 @@ def run(cfg: dict, slot_mgr: SlotManager):
                         instrument_state[symbol] = "STOPPED"
                         log.warning("%s — Play: egyik stratégiához sincs params, STOPPED", symbol)
 
+                # KIVEZETÉS (Stop nyitott pozícióval): a pár TOVÁBBRA IS feldolgozódik,
+                # hogy a nyitott pozíció kezelése (breakeven, trailing, kiszállási jel,
+                # részleges zárás) ne szakadjon meg — csak ÚJ belépőt nem nyit (lásd a
+                # `process_pair` kapuját). Amint a pozíció lezárult, valódi STOPPED lesz.
+                # Enélkül a Stop magára hagyná a pozíciót (csak a bróker SL/TP védené) —
+                # pontosan ezért volt eddig TILTVA a Stop nyitott pozícióval.
+                elif state_now == "CLOSING":
+                    if symbol not in _pos_by_sym:
+                        instrument_state[symbol] = "STOPPED"
+                        for st in strats:
+                            if (symbol, st.name) in pair_states:
+                                del pair_states[(symbol, st.name)]
+                        log.info("%s — kivezetés kész: a pozíció lezárult, STOPPED "
+                                 "(új belépő nem nyílik)", symbol)
+
                 # Stop → az összes (symbol, strat) állapot eltávolítása
                 elif state_now == "STOPPED":
                     for st in strats:
@@ -1781,8 +1817,8 @@ def run(cfg: dict, slot_mgr: SlotManager):
                             del pair_states[(symbol, st.name)]
                             log.info("%s/%s — Stop: LIVE leállítva", symbol, st.name)
 
-                # LIVE: feldolgozás stratégiánként (mindegyik a saját magicjével)
-                if instrument_state.get(symbol) == "LIVE":
+                # LIVE és KIVEZETÉS: feldolgozás stratégiánként (saját magicjével)
+                if instrument_state.get(symbol) in ("LIVE", "CLOSING"):
                     for st in strats:
                         key = (symbol, st.name)
                         if key in pair_states:

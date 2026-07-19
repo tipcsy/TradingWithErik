@@ -454,7 +454,6 @@ class PairRow:
     def update(self, ds, inst_state: str, opt_status: str, connected: bool = True,
                no_trade: bool = False):
         trained      = ds.trained
-        has_position = ds.position_pnl is not None
         self._opt_full = opt_status or ""     # a tooltip a belépéskori teljes szöveget mutatja
 
         if inst_state == "OPTIMIZING":
@@ -520,8 +519,13 @@ class PairRow:
             self._morph_btn(self.btn_del, "✕", False, BG_INACTIVE, FG_RED)
             return
 
-        # ── LIVE / STOPPED ──────────────────────────────────────────────────
-        if inst_state == "LIVE":
+        # ── LIVE / KIVEZETÉS / STOPPED ──────────────────────────────────────
+        if inst_state == "CLOSING":
+            # Stop kérve, de még fut a pozíció: a motor kezeli (BE/trailing), de
+            # ÚJ belépőt nem nyit. Narancs ⏹ — a ⏸ (no-trade) mintájára.
+            sym_lbl.config(text=f"⏹ {self.symbol}", fg=FG_ORANGE,
+                           font=_theme.fonts()["mono_bold"])
+        elif inst_state == "LIVE":
             if no_trade:
                 # Aktív, de az aktuális (bróker-)óra a stratégia trade_hours-ából
                 # kimarad → "letiltott" kinézet (mint egy disabled gomb) + ⏸ jel.
@@ -559,9 +563,15 @@ class PairRow:
                     self.labels[key].config(text="—", fg=FG_GRAY)
 
         # Gombok
-        if inst_state == "LIVE":
-            # Play→Stop morph; nyitott pozícióval nem állítható le
-            self._morph_btn(self.btn_run, "■", not has_position, BTN_STOP_BG, BTN_STOP_FG)
+        if inst_state == "CLOSING":
+            # Kivezetés: a gomb VISSZAVONJA a leállítást (▶ narancs = „mégis fusson").
+            # Az Opt/Törlés tiltva marad, amíg a pozíció ki nem fut.
+            self._morph_btn(self.btn_run, "▶", True, FG_ORANGE, FG_ON_ACCENT)
+            self._morph_btn(self.btn_opt, "OPT", False, BTN_OPT_BG, BTN_OPT_FG)
+            self._morph_btn(self.btn_del, "✕",  False, BG_INACTIVE, FG_RED)
+        elif inst_state == "LIVE":
+            # Play→Stop morph. Nyitott pozícióval IS leállítható → kivezetés.
+            self._morph_btn(self.btn_run, "■", True, BTN_STOP_BG, BTN_STOP_FG)
             self._morph_btn(self.btn_opt, "OPT", False, BTN_OPT_BG, BTN_OPT_FG)
             self._morph_btn(self.btn_del, "✕",  False, BG_INACTIVE, FG_RED)
         else:  # STOPPED
@@ -735,7 +745,8 @@ class OptimizerController:
         (kereskedő) szimbólumot nem optimalizálunk."""
         strategy = strategy or self._default_strategy()
         with self._lock:
-            if self.instrument_state.get(symbol) == "LIVE":
+            # KIVEZETÉS alatt is fut a pár (nyitott pozíciót kezel) → nem optimalizáljuk.
+            if self.instrument_state.get(symbol) in ("LIVE", "CLOSING"):
                 return
             job = (symbol, strategy)
             if job in self._running or job in self._queue:
@@ -796,8 +807,8 @@ class OptimizerController:
         except Exception:
             return
         for symbol, strat in pending:
-            if self.instrument_state.get(symbol) == "LIVE":
-                continue                     # kereskedő pár — nem optimalizáljuk
+            if self.instrument_state.get(symbol) in ("LIVE", "CLOSING"):
+                continue                     # kereskedő/kivezető pár — nem optimalizáljuk
             self.request_optimize(symbol, strat)   # per-job dedup + sor a request-ben
 
     def _start(self, job):
@@ -2196,6 +2207,7 @@ class DashboardWindow:
         legend.pack(fill="x", padx=6)
         for text, col in [
             ("■ LIVE", FG_GREEN), ("■ STOPPED", FG_GRAY),
+            ("⏹ Kivezetés (nincs új belépő)", FG_ORANGE),
             ("■ Nem tanított", FG_GRAY_DIM),
             ("■ Optimalizálás", FG_YELLOW), ("✦ Kockázatmentes", FG_CYAN),
             ("Kockázatcsökk. (kattints):", FG_GRAY),
@@ -3120,12 +3132,24 @@ class DashboardWindow:
 
     # ── Gomb handlerek ────────────────────────────────────────────────────
     def _handle_run(self, symbol: str):
-        """A futtató gomb (Play↔Stop morph) kezelője."""
+        """A futtató gomb (Play↔Stop morph) kezelője. KIVEZETÉS alatt a gomb
+        VISSZAVONJA a leállítást (a pár újra kereskedhet)."""
         st = self.instrument_state.get(symbol)
         if st == "STOPPED":
             self._handle_play(symbol)
         elif st == "LIVE":
             self._handle_stop(symbol)
+        elif st == "CLOSING":
+            self._handle_resume(symbol)
+
+    def _handle_resume(self, symbol: str):
+        """A kivezetés visszavonása: a pár újra nyithat belépőt. A motor állapota
+        megmaradt (a pozíciót végig kezelte), ezért csak a szándékot állítjuk vissza."""
+        if self.instrument_state.get(symbol) != "CLOSING":
+            return
+        self.instrument_state[symbol] = "LIVE"
+        self._persist_run_state(symbol, "live")
+        self._refresh_row(symbol)
 
     def _persist_run_state(self, symbol: str, state: str):
         """A kereskedés-SZÁNDÉK perzisztálása a config.json-ba (restart-biztos):
@@ -3154,15 +3178,24 @@ class DashboardWindow:
             self._on_play(symbol)
 
     def _handle_stop(self, symbol: str):
+        """Leállítás. NYITOTT POZÍCIÓVAL is megengedett: ilyenkor KIVEZETÉS
+        (`CLOSING`) állapotba kerül — a motor tovább kezeli a meglévő pozíciót
+        (breakeven, trailing, kiszállási jel), de ÚJ belépőt nem nyit. Amint a
+        pozíció lezárult, magától valódi STOPPED lesz.
+
+        A mentett szándék MINDKÉT esetben „stopped": újraindítás után sem kezd
+        magától kereskedni (nyitott pozíciónál a motor kivezetésbe áll vissza)."""
         ds = self.dashboard_ref.get(symbol)
         if ds is None:
             return
         if self.instrument_state.get(symbol) != "LIVE":
             return
+        self._persist_run_state(symbol, "stopped")   # restart után NE induljon magától
         if ds.position_pnl is not None:
+            self.instrument_state[symbol] = "CLOSING"
+            self._refresh_row(symbol)
             return
         self.instrument_state[symbol] = "STOPPED"
-        self._persist_run_state(symbol, "stopped")   # restart után NE induljon magától
         if self._on_stop:
             self._on_stop(symbol)
 
@@ -3228,8 +3261,9 @@ class DashboardWindow:
 
     def _handle_opt_menu(self, symbol: str, event):
         """JOBB-klikk az OPT gombon: stratégiaválasztó menü (ugyanaz, mint a
-        bal-klikk több stratégiánál). LIVE szimbólumnál nem teszünk semmit."""
-        if self.instrument_state.get(symbol) == "LIVE":
+        bal-klikk több stratégiánál). LIVE/KIVEZETÉS szimbólumnál nem teszünk
+        semmit (mindkettőnél fut a pár)."""
+        if self.instrument_state.get(symbol) in ("LIVE", "CLOSING"):
             return
         self._show_opt_menu(symbol, self._opt_strategies_for(symbol),
                             event.x_root, event.y_root)
