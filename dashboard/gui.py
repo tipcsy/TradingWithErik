@@ -370,6 +370,16 @@ class PairRow:
                 for _skey, c in circles:
                     c.config(text="●", fg=fg)
                 continue
+            if col.kind == "tfalign":
+                # Az „Együtt" cella nem a `labels`-ben él (saját pont-sor + „S"),
+                # ezért a halványítást külön kell elvégezni — enélkül KeyError.
+                if self.tfalign:
+                    for d in self.tfalign.get("dots") or []:
+                        d.config(fg=fg)
+                    _s = self.tfalign.get("s")
+                    if _s is not None:
+                        _s.config(text="–", fg=fg)
+                continue
             self.labels[col.key].config(text="—", fg=fg)
 
     def _render_marker(self, col, ds, trained, no_trade, bg):
