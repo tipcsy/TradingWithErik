@@ -23,6 +23,14 @@ string g_objpref;                 // szűrő-prefix: TFV_ (mind) VAGY TFV_<InpSt
 string g_ind_sig  = "";           // az utoljára felrakott IND-halmaz aláírása
 string g_ma_names[];              // MINDEN általunk felrakott MA rövidneve (leszedéshez)
 
+// Már LEFUTTATOTT riasztások id-jei. A viz-fájl a kívánt állapot teljes
+// pillanatképe, ezért az ALERT sor minden olvasáskor újra ott van — enélkül
+// másodpercenként újra szólna. Több stratégia is riaszthat egyszerre, ezért
+// LISTÁT tartunk (egyetlen „utolsó id" két stratégia közt oda-vissza billegne,
+// és mindkettő újra és újra megszólalna).
+string g_seen_alerts[];
+int    g_seen_max = 64;           // gyűrű-méret (a régi id-k kiesnek)
+
 //+------------------------------------------------------------------+
 //| A SAJÁT al-ablak-indikátorok (TFWPR, TFBANDS) leszedése MINDEN    |
 //| al-ablakból. CSÖKKENŐ ablak- és index-sorrend → a törlés miatti   |
@@ -121,6 +129,11 @@ void RefreshFromFile()
          cleared = true;
          continue;
       }
+      if(StringFind(ln, "ALERT;") == 0)  // „csak jelzés" mód riasztása
+      {
+         HandleAlert(ln);
+         continue;
+      }
       if(StringFind(ln, "IND;") == 0)   // indikátor-leírás — külön kezeljük
       {
          ArrayResize(inds, nind + 1);
@@ -164,6 +177,46 @@ void RefreshFromFile()
       }
    }
    ChartRedraw();
+}
+
+//+------------------------------------------------------------------+
+//| ALERT;<stratégia>;<id>;<szöveg>                                  |
+//| A „csak jelzés" módú stratégia riasztása: a Python NEM köt, csak |
+//| szól, hogy MOST lépett volna be. Az <id> a jelet azonosítja      |
+//| (szimbólum|stratégia|irány|gyertyaidő) — ugyanarra az id-ra      |
+//| CSAK EGYSZER riasztunk, különben a pillanatkép-modell miatt      |
+//| másodpercenként újra szólna.                                     |
+//+------------------------------------------------------------------+
+void HandleAlert(string ln)
+{
+   string f[];
+   int n = StringSplit(ln, ';', f);
+   if(n < 4)
+      return;
+   // Több-stratégia szűrő — ugyanaz az elv, mint az IND soroknál: ha ez a chart
+   // egy KONKRÉT stratégiát mutat, a másikét ne riasszuk (különben két chart
+   // kétszer szólna ugyanarra a jelre).
+   if(InpStrategy != "" && f[1] != InpStrategy)
+      return;
+
+   string aid = f[2];
+   int cnt = ArraySize(g_seen_alerts);
+   for(int i = 0; i < cnt; i++)
+      if(g_seen_alerts[i] == aid)
+         return;                       // erre a jelre már szóltunk
+
+   if(cnt >= g_seen_max)               // gyűrű: a legrégebbi kiesik
+   {
+      for(int i = 1; i < cnt; i++)
+         g_seen_alerts[i - 1] = g_seen_alerts[i];
+      g_seen_alerts[cnt - 1] = aid;
+   }
+   else
+   {
+      ArrayResize(g_seen_alerts, cnt + 1);
+      g_seen_alerts[cnt] = aid;
+   }
+   Alert(f[3]);
 }
 
 //+------------------------------------------------------------------+

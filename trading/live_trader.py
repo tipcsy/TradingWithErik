@@ -37,6 +37,7 @@ from core import run_state
 from core import exit_signal
 from core import position_build as _position_build
 from core import viz_prefs as _vp
+from core import trade_mode as _tmode
 from core.indicator_engine import atr as atr_indicator
 from core.risk_manager import calc_lot, calc_effective_slots, SlotManager
 from strategy import get_strategy
@@ -166,6 +167,20 @@ _viz_last_write:  dict[str, float] = {}
 # után (instrument-ablak Mentés) állítjuk, hogy a régi belépő-jelzések garantáltan
 # eltűnjenek EGY atomi írásban (a snapshot elé CLEAR sor). A _write_symbol_viz fogyasztja.
 _viz_pending_clear: dict[str, bool] = {}
+
+# Per-(szimbólum, stratégia) FÜGGŐBEN LÉVŐ riasztás a „csak jelzés" módhoz:
+# (alert_id, szöveg). A viz-írás minden pillanatképbe beleteszi, az MQL5 pedig az
+# id alapján dedupál (csak ÚJ id-re szól) — így a riasztás akkor sem vész el, ha a
+# chart épp nem olvasott, és nem is ismétlődik. Új jel felülírja a régit.
+_pending_alerts: dict[tuple, tuple] = {}
+
+
+def request_alert(symbol: str, strategy_name: str, aid: str, text: str) -> None:
+    """Riasztás kérése a charton a `symbol`/`strategy_name` párosra. A throttle-t
+    nullázza, hogy a jelzés a következő ciklusban azonnal kimenjen (a „csak jelzés"
+    mód értéke pont az időzítésben van)."""
+    _pending_alerts[(symbol, strategy_name)] = (aid, text)
+    _viz_last_write.pop(symbol, None)
 
 
 def request_viz_clear(symbol: str) -> None:
@@ -683,7 +698,12 @@ def _write_symbol_viz(symbol, pair_cfg, strats, pair_states):
     # sem nyitjuk az írási utat (a chart-objektumok törléséről a GUI gondoskodik).
     _cfgview = {"pairs": {symbol: (pair_cfg or {})}}
     _viz_names = [st.name for st in strats if _vp.viz_on(_cfgview, symbol, st.name)]
-    if not _viz_names:
+    # A „csak jelzés" mód RIASZTÁSAI akkor is ki kell menjenek, ha az adott
+    # stratégia RAJZA ki van kapcsolva: az alert értesítés, nem vizualizáció —
+    # épp azért van, hogy pénz nélkül is megtudd, mikor lépett volna be a motor.
+    _alerts = [(st.name, _pending_alerts[(symbol, st.name)])
+               for st in strats if (symbol, st.name) in _pending_alerts]
+    if not _viz_names and not _alerts:
         return
     now = time.time()
     if now - _viz_last_write.get(symbol, 0.0) < VIZ_INTERVAL_SEC:
@@ -703,6 +723,13 @@ def _write_symbol_viz(symbol, pair_cfg, strats, pair_states):
             lines += pair_visual_lines(symbol, vparams, st, pip_size, pair_cfg)
         except Exception as e:
             log.debug("%s/%s — viz sor hiba: %s", symbol, st.name, e)
+    # A függő riasztások MINDEN pillanatképbe belekerülnek (az MQL5 az alert-id
+    # alapján dedupál, így pontosan egyszer szól). Szándékosan NEM töröljük őket
+    # itt: ha a chart épp nem olvasott (zárva volt, indikátor újraindult), a
+    # riasztás megmarad, amíg egy ÚJ jel felül nem írja.
+    from strategy.visual import Alert as _VAlert, tag_line as _tag
+    for _sname, (_aid, _atext) in _alerts:
+        lines.append(_tag(_VAlert(aid=_aid, text=_atext).line(), _sname))
     # Paraméter-váltás után egyszeri CLEAR a snapshot elé → a régi (elavult) belépő-
     # jelzések garantáltan eltűnnek, majd az új paraméterekkel frissen rajzol.
     clear_first = _viz_pending_clear.pop(symbol, False)
@@ -1463,6 +1490,44 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
                     sl_price   = round(open_price + pip_to_price(sl_pips, pip_size), 5)
                     tp_price   = round(open_price - pip_to_price(tp_pips, pip_size), 5)
 
+                # ── „Csak jelzés" mód: megbízás NEM megy ki ────────────────
+                # Minden fenti számítás (kapuk, SL/TP, lot) ugyanúgy lefutott —
+                # csak a végrehajtás marad el. Így a chart-riasztás és a napló
+                # pontosan azt mutatja, amit VALÓDI módban kötött volna a motor.
+                if _tmode.is_signal_only({"pairs": {symbol: pair_cfg}},
+                                         symbol, strategy.name):
+                    # Az alert-id a JELET azonosítja, hogy az MQL5 dedupálhasson:
+                    # a döntést hozó (zárt) alacsony-idősíkú gyertya ideje — ez
+                    # ugyanaz a bar, amit a jelzéslogika is használ (iloc[-2]).
+                    try:
+                        _bt = int(df_lo.index[-2].timestamp())
+                    except Exception:
+                        _bt = int(time.time())
+                    _aid = f"{symbol}|{strategy.name}|{signal}|{_bt}"
+                    request_alert(
+                        symbol, strategy.name, _aid,
+                        f"{symbol} {signal} JELZÉS ({strategy.name}) — "
+                        f"belépő {open_price:.5g} | SL {sl_price:.5g} | "
+                        f"TP {tp_price:.5g} | lot {lot:.2f}")
+                    log.info("🔔 %s %s JELZÉS (%s) — csak jelzés mód, NINCS kötés "
+                             "| belépő: %.5g | SL: %.5g | TP: %.5g | lot: %.2f",
+                             symbol, signal, strategy.name, open_price,
+                             sl_price, tp_price, lot)
+                    log_trade({
+                        "time":      datetime.now(timezone.utc).isoformat(),
+                        "event":     "signal",          # NEM "open" — nincs kötés
+                        "strategy":  strategy.name,
+                        "symbol":    symbol,
+                        "direction": signal,
+                        "lot":       lot,
+                        "price":     open_price,
+                        "sl":        sl_price,
+                        "tp":        tp_price,
+                        "ticket":    None,
+                        "magic":     magic,
+                    })
+                    return
+
                 ticket = open_position(symbol, signal, lot, sl_price, tp_price, magic,
                                        comment=strategy.name, strategy_name=strategy.name)
                 if ticket:
@@ -1564,6 +1629,14 @@ def run(cfg: dict, slot_mgr: SlotManager):
     # Per-instrumentum ENGEDÉLYEZETT stratégiák (az elsődleges az első). Egy
     # stratégiával (nincs pairs.<sym>.strategies) ez a jelenlegi viselkedés.
     strats_by_symbol = {s: strategies_for(cfg, s) for s in all_pairs}
+
+    # „Csak jelzés" módú párok KIÍRÁSA induláskor. Ezek nem kötnek — ha valaki
+    # elfelejti visszaállítani, a hiányzó kötések rejtélyesnek tűnnének; így a
+    # napló első képernyőjén ott van, miért nincs pozíció.
+    _sig_only = _tmode.signal_only_pairs(cfg)
+    if _sig_only:
+        log.warning("🔔 CSAK JELZÉS mód (NEM köt): %s",
+                    ", ".join(f"{s}/{n}" for s, n in _sig_only))
 
     # magic → stratégia (recovery-hez). TÖBB stratégiához EGYEDI magic kell; ha
     # ütközés van (két stratégia azonos magic), figyelmeztetünk — broker-szinten

@@ -2671,6 +2671,7 @@ class DashboardWindow:
         from strategy import (available_strategy_names, enabled_strategy_names,
                               default_strategy_name)
         from core import viz_prefs as _vp
+        from core import trade_mode as _tm
         popup = tk.Toplevel(self.root)
         popup.title(f"{symbol} — instrumentum beállítások")
         popup.configure(bg=BG)
@@ -2702,10 +2703,33 @@ class DashboardWindow:
                 _vars[(r, n)] = v
                 tk.Checkbutton(tbl, variable=v, bg=BG, selectcolor=BG_HEADER,
                                activebackground=BG).grid(row=r, column=c)
+
+        # ── Kötés-mód sor: valódi kötés vagy CSAK JELZÉS (teszteléshez) ──────
+        # Nem pipa, hanem legördülő: a „nem kereskedik" állapot legyen KIÍRVA,
+        # ne egy üres checkbox — ez pénzt érintő beállítás.
+        _r_mode = len(_ROWS) + 1
+        tk.Label(tbl, text="Kötés módja", bg=BG, fg=FG_GRAY, font=self._small_font,
+                 anchor="w").grid(row=_r_mode, column=0, sticky="w", pady=(4, 1))
+        _mode_vars = {}
+        for c, n in enumerate(_names, start=1):
+            mv = tk.StringVar(value=_tm.LABELS[_tm.mode_of(self.cfg, symbol, n)])
+            _mode_vars[n] = mv
+            _om2 = tk.OptionMenu(tbl, mv, _tm.LABELS[_tm.MODE_LIVE],
+                                 _tm.LABELS[_tm.MODE_SIGNAL])
+            _om2.config(bg=BG_HEADER, fg=FG_WHITE, font=self._small_font,
+                        relief="flat", highlightthickness=0,
+                        activebackground=BG_HEADER)
+            _om2["menu"].config(bg=BG_HEADER, fg=FG_WHITE)
+            _om2.grid(row=_r_mode, column=c, padx=4, pady=(4, 1), sticky="ew")
+
         tk.Label(popup, text='A tényleges MT5-kötések a „Kötések látszanak" pipától '
                              'függetlenül mindig látszanak (az a jel-replay réteget '
                              'kapcsolja).',
                  bg=BG, fg=FG_GRAY_DIM, font=self._small_font,
+                 wraplength=360, justify="left").pack(anchor="w", padx=12, pady=(0, 2))
+        tk.Label(popup, text='„Jelzés" módban a motor mindent kiszámol, de NEM köt: '
+                             'riasztást ad a charton (MT5 Alert) és naplóz. Teszteléshez.',
+                 bg=BG, fg=FG_YELLOW, font=self._small_font,
                  wraplength=360, justify="left").pack(anchor="w", padx=12, pady=(0, 4))
 
         # ── Piac-előszűrő (piac-állapot osztályozó) — instrumentumonként EGY ──
@@ -2739,6 +2763,11 @@ class DashboardWindow:
                 _vp.set_on(self.cfg, symbol, n, _vp.VIZ,    _vars[(2, n)].get())
                 _vp.set_on(self.cfg, symbol, n, _vp.TRADES, _vars[(3, n)].get())
             _vp.prune(self.cfg, symbol, _names)
+            # Kötés-mód per stratégia (a „Jelzés" nem köt, csak riaszt).
+            _lbl2mode = {v: k for k, v in _tm.LABELS.items()}
+            for n in _names:
+                _tm.set_mode(self.cfg, symbol, n,
+                             _lbl2mode.get(_mode_vars[n].get(), _tm.MODE_LIVE))
             # A chart azonnal kövesse: egyszeri CLEAR + friss pillanatkép, hogy a
             # kikapcsolt stratégia objektumai eltűnjenek (a viz-modell nem töröl
             # magától). Ha EGYIK stratégia rajza sem látszik, a motor meg sem

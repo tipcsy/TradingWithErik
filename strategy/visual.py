@@ -63,8 +63,9 @@ def tag_line(line: str, strategy: str) -> str:
 
     - Nevesített objektum (RECT/VLINE/TREND/ARROW/TEXT/LABEL): a NÉV mezőt
       namespace-eljük: `TFV_<eredeti>` → `TFV_<strategy>@<eredeti>`.
-    - Névtelen sor (STATE/IND): a stratégiát a TÍPUS UTÁN szúrjuk be (`STATE;<strat>;
-      …`), mert az IND változó-hosszú szint-listája miatt a sor VÉGE nem egyértelmű.
+    - Névtelen sor (STATE/IND/ALERT): a stratégiát a TÍPUS UTÁN szúrjuk be
+      (`STATE;<strat>;…`), mert az IND változó-hosszú szint-listája miatt a sor
+      VÉGE nem egyértelmű.
     - CLEAR: érintetlen (direktíva).
     `strategy` üres → a sor változatlan (egy-stratégiás, régi viselkedés)."""
     if not strategy:
@@ -72,7 +73,7 @@ def tag_line(line: str, strategy: str) -> str:
     typ, sep, rest = line.partition(";")
     if typ == "CLEAR":
         return line
-    if typ in ("STATE", "IND"):
+    if typ in ("STATE", "IND", "ALERT"):
         return f"{typ};{strategy};{rest}" if sep else f"{typ};{strategy}"
     fields = line.split(";")
     if len(fields) >= 2 and fields[1].startswith(PREFIX):
@@ -239,6 +240,26 @@ class Indicator:
         parts = ["IND", self.kind, self.timeframe, str(int(self.period)), col]
         parts += [repr(float(x)) for x in self.levels]
         return ";".join(parts)
+
+
+@dataclass
+class Alert:
+    """RIASZTÁS az MQL5 `Alert()`-en keresztül (nem rajz-objektum).
+
+    A „csak jelzés" módú stratégia ezzel szól, hogy MOST kellene belépni — valódi
+    megbízás nélkül (lásd `core.trade_mode`). Mivel a viz-fájl a kívánt állapot
+    teljes PILLANATKÉPE (minden ciklusban újraíródik), a sor önmagában ismétlődne;
+    ezért van `aid` (alert-id): az indikátor MEGJEGYZI az utoljára lefuttatottat, és
+    csak ÚJ id-re riaszt. Az id-t úgy kell képezni, hogy egy jelre stabil legyen
+    (pl. szimbólum+irány+gyertyaidő) — így pontosan egyszer szól.
+
+    A sor a STATE/IND-hez hasonlóan névtelen: a stratégia-tag a TÍPUS UTÁN áll
+    (`tag_line`), hogy az indikátor `InpStrategy` szerint szűrhessen."""
+    aid: str
+    text: str
+
+    def line(self) -> str:
+        return ";".join(["ALERT", _clean(self.aid), _clean(self.text)])
 
 
 @dataclass
