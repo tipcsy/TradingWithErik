@@ -31,8 +31,10 @@ from dashboard.theme import (
     FG_WHITE, FG_GREEN, FG_RED, FG_YELLOW, FG_GRAY, FG_GRAY_DIM, FG_BLUE,
     BTN_PLAY_BG, BTN_PLAY_FG, BTN_BT_BG, BTN_BT_FG,
     BTN_DIS_BG, BTN_DIS_FG,
+    FG_ON_ACCENT, TOOLTIP_BG, TOOLTIP_FG,
     color as sem_color,
 )
+from dashboard import theme as _theme
 from core.quality import metric_colors
 from core.params_store import (
     params_file, trials_file, resolve_trade_hours, save_trade_hours,
@@ -96,7 +98,7 @@ def _attach_tooltip(widget, text):
         t.attributes("-topmost", True)
         x = widget.winfo_rootx()
         y = widget.winfo_rooty() + widget.winfo_height() + 2
-        tk.Label(t, text=txt, bg="#2a2a3a", fg="#e0e0f0", font=("Segoe UI", 8),
+        tk.Label(t, text=txt, bg=TOOLTIP_BG, fg=TOOLTIP_FG, font=_theme.fonts()["small"],
                  padx=6, pady=3, relief="solid", bd=1, justify="left",
                  wraplength=340).pack()
         t.wm_geometry(f"+{x}+{y}")
@@ -751,7 +753,7 @@ class InstrumentParamsDialog:
         def _paint(h):
             btn = hour_btns[h]
             if hour_on[h]:
-                btn.config(bg=FG_GREEN, fg="#1e1e2e")     # BE — zöld
+                btn.config(bg=FG_GREEN, fg=FG_ON_ACCENT)     # BE — zöld
             else:
                 btn.config(bg=BG_HEADER, fg=FG_GRAY_DIM)  # KI — sötét
 
@@ -763,7 +765,7 @@ class InstrumentParamsDialog:
             colf = tk.Frame(hours_frame, bg=BG)
             colf.grid(row=0, column=h, padx=1)
             btn = tk.Label(colf, text=f"{h:02d}", width=2, padx=2, pady=2,
-                           font=("Courier New", 8, "bold"), cursor="hand2")
+                           font=_theme.fonts()["small_bold"], cursor="hand2")
             btn.pack()
             btn.bind("<Button-1>", lambda e, hh=h: _toggle(hh))
             hour_btns[h] = btn
@@ -773,13 +775,13 @@ class InstrumentParamsDialog:
                 _pnl, _cnt = _b.get("pnl", 0.0), _b.get("count", 0)
                 tk.Label(colf, text=f"{_pnl:+.0f}", bg=BG,
                          fg=FG_GREEN if _pnl >= 0 else FG_RED,
-                         font=("Courier New", 7)).pack()
+                         font=_theme.fonts()["tiny"]).pack()
                 tk.Label(colf, text=f"{_cnt}", bg=BG, fg=FG_GRAY,
-                         font=("Courier New", 7)).pack()
+                         font=_theme.fonts()["tiny"]).pack()
             else:
                 tk.Label(colf, text="—", bg=BG, fg=FG_GRAY_DIM,
-                         font=("Courier New", 7)).pack()
-                tk.Label(colf, text="", bg=BG, font=("Courier New", 7)).pack()
+                         font=_theme.fonts()["tiny"]).pack()
+                tk.Label(colf, text="", bg=BG, font=_theme.fonts()["tiny"]).pack()
 
         # Az óraállapotot az EGYETLEN Mentés gomb olvassa ki és menti (nincs külön
         # „Órák mentése" gomb). Az „Auto-javasol" is elmaradt: az óránkénti P&L jól

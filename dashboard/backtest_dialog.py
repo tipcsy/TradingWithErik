@@ -965,5 +965,5 @@ class BacktestDialog:
         # Aktuális futás — élénken, felülre.
         if len(ys_cur) >= 2:
             final = ys_cur[-1]
-            line_col = "#3fb950" if final >= ib else "#f85149"
+            line_col = FG_GREEN if final >= ib else FG_RED
             draw(ys_cur, line_col, 2)

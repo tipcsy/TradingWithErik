@@ -35,8 +35,10 @@ from dashboard.theme import (
     BTN_PLAY_BG, BTN_PLAY_FG, BTN_STOP_BG, BTN_STOP_FG, BTN_OPT_BG, BTN_OPT_FG,
     BTN_BT_BG, BTN_BT_FG, BTN_DIS_BG, BTN_DIS_FG,
     CANVAS_BG, CANVAS_LINE, CANVAS_REF,
+    FG_ON_ACCENT, TOOLTIP_BG, TOOLTIP_FG,
     color as sem_color,
 )
+from dashboard import theme as _theme
 from strategy import get_strategy
 from strategy.base import Column
 from strategy.settings import apply_strategy_config, main_config_view
@@ -346,7 +348,7 @@ class PairRow:
         tip.attributes("-topmost", True)
         x = lbl.winfo_rootx()
         y = lbl.winfo_rooty() + lbl.winfo_height() + 2
-        tk.Label(tip, text=text, bg="#2a2a3a", fg="#e0e0f0",
+        tk.Label(tip, text=text, bg=TOOLTIP_BG, fg=TOOLTIP_FG,
                  font=self._mono, padx=6, pady=3, relief="solid", bd=1,
                  justify="left").pack()
         tip.wm_geometry(f"+{x}+{y}")
@@ -487,7 +489,7 @@ class PairRow:
                   "thirds": ("H", FG_PURPLE), "shield_fibo": ("PF", FG_TEAL)}
         if _rp in _rrmap:
             _txt, _col = _rrmap[_rp]
-            self.btn_risky.config(text=_txt, bg=_col, fg="#1e1e2e", state="normal")
+            self.btn_risky.config(text=_txt, bg=_col, fg=FG_ON_ACCENT, state="normal")
         else:
             self.btn_risky.config(text="—", bg=BTN_DIS_BG, fg=FG_GRAY, state="normal")
 
@@ -497,7 +499,7 @@ class PairRow:
         # ── Offline ───────────────────────────────────────────────────────
         if not connected and inst_state not in ("OPTIMIZING", "QUEUED"):
             sym_lbl.config(text=self.symbol, fg=FG_GRAY_DIM,
-                           font=("Courier", 9, "italic"))
+                           font=_theme.fonts()["mono_italic"])
             self._blank_all(FG_GRAY_DIM)
             self._morph_btn(self.btn_run, "▶",   False, BTN_PLAY_BG, BTN_PLAY_FG)
             self._morph_btn(self.btn_opt, "OPT", False, BTN_OPT_BG,  BTN_OPT_FG)
@@ -507,7 +509,7 @@ class PairRow:
         # ── Optimalizálás / sorban áll ──────────────────────────────────────
         if inst_state in ("OPTIMIZING", "QUEUED"):
             sym_lbl.config(text=self.symbol, fg=FG_YELLOW,
-                           font=("Courier", 9, "bold"))
+                           font=_theme.fonts()["mono_bold"])
             self._blank_all(FG_GRAY_DIM, except_keys=("opt",))
             txt, col = _fixed_cell("opt", ds, opt_status, inst_state)
             self.labels["opt"].config(text=txt, fg=sem_color(col))
@@ -524,13 +526,13 @@ class PairRow:
                 # Aktív, de az aktuális (bróker-)óra a stratégia trade_hours-ából
                 # kimarad → "letiltott" kinézet (mint egy disabled gomb) + ⏸ jel.
                 sym_lbl.config(text=f"⏸ {self.symbol}", fg=FG_GRAY,
-                               font=("Courier", 9, "italic"))
+                               font=_theme.fonts()["mono_italic"])
             else:
-                sym_lbl.config(text=self.symbol, fg=FG_WHITE, font=("Courier", 9, "bold"))
+                sym_lbl.config(text=self.symbol, fg=FG_WHITE, font=_theme.fonts()["mono_bold"])
         elif trained:
-            sym_lbl.config(text=self.symbol, fg=FG_GRAY, font=("Courier", 9, "normal"))
+            sym_lbl.config(text=self.symbol, fg=FG_GRAY, font=_theme.fonts()["mono"])
         else:
-            sym_lbl.config(text=self.symbol, fg=FG_GRAY_DIM, font=("Courier", 9, "italic"))
+            sym_lbl.config(text=self.symbol, fg=FG_GRAY_DIM, font=_theme.fonts()["mono_italic"])
 
         for col in self.columns:
             key = col.key
@@ -1325,7 +1327,7 @@ class PortfolioBacktestTab:
         pad = 8
         if not points or len(points) < 2:
             c.create_text(w // 2, h // 2, text="Nincs adat", fill=FG_GRAY,
-                          font=("Courier", 9))
+                          font=_theme.fonts()["mono"])
             return
         balances = [b for _, b in points]
         mn = min(balances + [init_bal])
@@ -1349,14 +1351,14 @@ class PortfolioBacktestTab:
             c.create_line(*coords, fill=col, width=2, smooth=True)
 
         c.create_text(pad + 2, h - pad - 2, text=f"${mn:.0f}", fill=FG_GRAY,
-                      font=("Courier", 7), anchor="sw")
+                      font=_theme.fonts()["tiny"], anchor="sw")
         c.create_text(pad + 2, pad + 2, text=f"${mx:.0f}", fill=FG_GRAY,
-                      font=("Courier", 7), anchor="nw")
+                      font=_theme.fonts()["tiny"], anchor="nw")
         if points:
             c.create_text(w - pad, h - pad - 2, text=str(points[-1][0])[:7],
-                          fill=FG_GRAY, font=("Courier", 7), anchor="se")
+                          fill=FG_GRAY, font=_theme.fonts()["tiny"], anchor="se")
             c.create_text(pad, h - pad - 2, text=str(points[0][0])[:7],
-                          fill=FG_GRAY, font=("Courier", 7), anchor="sw")
+                          fill=FG_GRAY, font=_theme.fonts()["tiny"], anchor="sw")
 
     def _clear_results(self):
         for w in self._res_rows_frame.winfo_children():
@@ -1474,7 +1476,7 @@ class PositionRow:
             "<Button-1>",
             lambda e: self._symbol and self._on_name_click(self._symbol))
         self.btn_be = tk.Button(self.frame, text="BE", width=4, font=small_font,
-                                relief="flat", bg=BTN_OPT_BG, fg="#ffffff",
+                                relief="flat", bg=BTN_OPT_BG, fg=BTN_OPT_FG,
                                 command=lambda: on_be(ticket))
         self.btn_be.pack(side="left", padx=1)
         # A BE-gomb tiltva, ha a profit még nem fedezi a költséget → tooltip mondja meg
@@ -1514,7 +1516,7 @@ class PositionRow:
         self.ent_trail.bind("<Return>",   self._apply_trail_dist)
         self.ent_trail.bind("<FocusOut>", self._apply_trail_dist)
         self.btn_panic = tk.Button(self.frame, text="Zár", width=4, font=small_font,
-                                   relief="flat", bg=BTN_STOP_BG, fg="#ffffff",
+                                   relief="flat", bg=BTN_STOP_BG, fg=BTN_STOP_FG,
                                    command=lambda: on_panic(ticket))
         self.btn_panic.pack(side="left", padx=(1, 4))
 
@@ -1538,7 +1540,7 @@ class PositionRow:
         tip.attributes("-topmost", True)
         x = self.btn_be.winfo_rootx()
         y = self.btn_be.winfo_rooty() + self.btn_be.winfo_height() + 2
-        tk.Label(tip, text=text, bg="#2a2a3a", fg="#e0e0f0", font=self._small,
+        tk.Label(tip, text=text, bg=TOOLTIP_BG, fg=TOOLTIP_FG, font=self._small,
                  padx=6, pady=3, relief="solid", bd=1, justify="left",
                  wraplength=320).pack()
         tip.wm_geometry(f"+{x}+{y}")
@@ -1561,7 +1563,7 @@ class PositionRow:
         tip.attributes("-topmost", True)
         x = self.btn_build.winfo_rootx()
         y = self.btn_build.winfo_rooty() + self.btn_build.winfo_height() + 2
-        tk.Label(tip, text=text, bg="#2a2a3a", fg="#e0e0f0", font=self._small,
+        tk.Label(tip, text=text, bg=TOOLTIP_BG, fg=TOOLTIP_FG, font=self._small,
                  padx=6, pady=3, relief="solid", bd=1, justify="left",
                  wraplength=320).pack()
         tip.wm_geometry(f"+{x}+{y}")
@@ -1649,14 +1651,14 @@ class PositionRow:
         # költséget) — különben TILTVA + tooltip, hogy ne lehessen némán nyomkodni.
         be_feasible = pos.get("be_feasible", True)   # True fallback (demo/régi cache)
         if be_done:
-            self.btn_be.config(text="BE ✓", bg=BTN_PLAY_BG, fg="#ffffff", state="normal")
+            self.btn_be.config(text="BE ✓", bg=BTN_PLAY_BG, fg=BTN_PLAY_FG, state="normal")
             self._be_tip_text = ""
         elif not be_feasible:
             self.btn_be.config(text="BE", bg=BTN_DIS_BG, fg=FG_GRAY, state="disabled")
             self._be_tip_text = ("BE még nem lehetséges — a nyereség nem fedezi a "
                                  "spread + jutalék + swap költséget.")
         else:
-            self.btn_be.config(text="BE", bg=BTN_OPT_BG, fg="#ffffff", state="normal")
+            self.btn_be.config(text="BE", bg=BTN_OPT_BG, fg=BTN_OPT_FG, state="normal")
             self._be_tip_text = ""
 
         # Építés MÓD + „＋" gomb — a motor build_runtime-jából (per szimbólum). A mód
@@ -1678,12 +1680,12 @@ class PositionRow:
             except Exception:
                 _mode = "off"
         _MODE_LBL = {"off": "Ép:Ki", "manual": "Ép:Kézi", "auto": "Ép:Auto"}
-        _MODE_COL = {"off": FG_GRAY, "manual": "#ffffff", "auto": FG_CYAN}
+        _MODE_COL = {"off": FG_GRAY, "manual": FG_WHITE, "auto": FG_CYAN}
         self.btn_bmode.config(text=_MODE_LBL.get(_mode, "Ép:Ki"),
                               fg=_MODE_COL.get(_mode, FG_GRAY),
                               relief="sunken" if _mode in ("manual", "auto") else "flat")
         if _mode == "manual" and _rt and _rt.get("ready"):
-            self.btn_build.config(state="normal", bg=BTN_OPT_BG, fg="#ffffff")
+            self.btn_build.config(state="normal", bg=BTN_OPT_BG, fg=BTN_OPT_FG)
             self._build_tip_text = (f"Ráépítés: +{_rt.get('next_lot', 0):.2f} lot azonos "
                                     f"irányba, az összes stop az átlagárra "
                                     f"(≈{_rt.get('avg_price', 0):.5f}).")
@@ -1713,10 +1715,10 @@ class PositionRow:
                                   bg=BTN_DIS_BG, fg=FG_GRAY)
         elif be_done:
             self.btn_trail.config(text="Trail", relief="sunken",
-                                  bg=FG_GREEN, fg="#1e1e2e")
+                                  bg=FG_GREEN, fg=FG_ON_ACCENT)
         else:
             self.btn_trail.config(text="Trail", relief="sunken",
-                                  bg=FG_ORANGE, fg="#1e1e2e")
+                                  bg=FG_ORANGE, fg=FG_ON_ACCENT)
 
         # Trail távolság mező — PONTBAN, egész szám. A kézi felülírás, ha van;
         # egyébként az optimalizált alapérték. Gépelés közben NEM írjuk felül.
@@ -1763,7 +1765,7 @@ class PositionsTab:
         top = tk.Frame(p, bg=BG, pady=4)
         top.pack(fill="x", padx=8)
         tk.Button(top, text="⚠  ÖSSZES ZÁRÁSA", font=self._small,
-                  bg=BTN_STOP_BG, fg="#ffffff", relief="flat", cursor="hand2",
+                  bg=BTN_STOP_BG, fg=BTN_STOP_FG, relief="flat", cursor="hand2",
                   command=self._on_close_all).pack(side="left")
         self._lbl_total = tk.Label(top, text="Összes P&L: —", bg=BG,
                                    fg=FG_WHITE, font=self._header)
@@ -2038,11 +2040,15 @@ class DashboardWindow:
         self.root.configure(bg=BG)
         self.root.resizable(True, True)
 
-        mono_font   = tkfont.Font(family="Courier New", size=9)
-        header_font = tkfont.Font(family="Courier New", size=9, weight="bold")
-        small_font  = tkfont.Font(family="Courier New", size=8)
-        title_font  = tkfont.Font(family="Courier New", size=10, weight="bold")
-        info_font   = tkfont.Font(family="Courier New", size=9)
+        # A betű-objektumok a témából (config: dashboard.font_family/font_size).
+        # ÉLŐK: a beállító ablak `configure()`-ral azonnal átállítja őket, és minden
+        # widget követi — ezért nem kell újraindítás a betűméret-váltáshoz.
+        self._fonts = _theme.fonts()
+        mono_font   = self._fonts["mono"]
+        header_font = self._fonts["header"]
+        small_font  = self._fonts["small"]
+        title_font  = self._fonts["title"]
+        info_font   = self._fonts["info"]
 
         # ── Globális fejléc ─────────────────────────────────────────────
         top_bar = tk.Frame(self.root, bg=BG_HEADER, pady=5)
@@ -2102,7 +2108,7 @@ class DashboardWindow:
         style.theme_use("clam")
         style.configure("TNotebook", background=BG, borderwidth=0)
         style.configure("TNotebook.Tab", background=BG_HEADER, foreground=FG_GRAY,
-                        padding=[12, 4], font=("Courier New", 9))
+                        padding=[12, 4], font=_theme.fonts()["mono"])
         style.map("TNotebook.Tab", background=[("selected", BG)],
                   foreground=[("selected", FG_BLUE)])
 
@@ -2182,6 +2188,9 @@ class DashboardWindow:
         tk.Button(toolbar, text="  ⚙  Beállítás", font=small_font,
                   bg=BG_INACTIVE, fg=FG_WHITE, relief="flat", cursor="hand2",
                   command=self._show_settings).pack(side="right", padx=4)
+        tk.Button(toolbar, text="  🎨  Megjelenés", font=small_font,
+                  bg=BG_INACTIVE, fg=FG_WHITE, relief="flat", cursor="hand2",
+                  command=self._show_appearance).pack(side="right", padx=4)
 
         legend = tk.Frame(parent, bg=BG, pady=2)
         legend.pack(fill="x", padx=6)
@@ -2549,6 +2558,126 @@ class DashboardWindow:
                 json.dump(main_config_view(self.cfg), f, indent=2, ensure_ascii=False)
         except Exception:
             pass
+
+    # ── Megjelenés (téma + betűtípus) ────────────────────────────────────
+    def _show_appearance(self):
+        """Téma és betűtípus beállítása.
+
+        A BETŰ azonnal érvényesül (a `theme.fonts()` objektumok élők, minden
+        widget követi őket) — a legördülő/méret változtatása egyből látszik, így
+        élőben lehet belőni. A SZÍNEK viszont csak újraindításkor: a modulok
+        `from dashboard.theme import BG, …` formában ÉRTÉK szerint kötik a
+        neveket, így a futásidejű átírás nem propagálna. Az ablak ezt ki is írja.
+
+        A háttér és a betűszínek EGY témából jönnek, ezért nem állítható be
+        „fehér alapon fehér szöveg": nincs olyan állapot, ahol a kettő szétesne."""
+        popup = tk.Toplevel(self.root)
+        popup.title("Megjelenés")
+        popup.configure(bg=BG)
+        popup.resizable(False, False)
+        popup.grab_set()
+
+        # A megnyitáskori állapot — a Mégse ide állít vissza (az élő előnézet miatt).
+        _orig_family = _theme.FONT_FAMILY
+        _orig_size   = _theme.FONT_SIZE
+        _dash0       = (self.cfg.get("dashboard") or {})
+        _orig_theme  = _dash0.get("theme", _theme.ACTIVE_THEME)
+
+        tk.Label(popup, text="Megjelenés", bg=BG, fg=FG_WHITE,
+                 font=self._header_font).pack(anchor="w", padx=12, pady=(12, 6))
+
+        frm = tk.Frame(popup, bg=BG)
+        frm.pack(anchor="w", padx=12)
+
+        # ── Téma ────────────────────────────────────────────────────────────
+        tk.Label(frm, text="Téma:", bg=BG, fg=FG_GRAY,
+                 font=self._small_font).grid(row=0, column=0, sticky="e", pady=3)
+        theme_var = tk.StringVar(value=_orig_theme)
+        _omt = tk.OptionMenu(frm, theme_var, *_theme.THEMES.keys())
+        _omt.config(bg=BG_HEADER, fg=FG_WHITE, font=self._small_font, relief="flat",
+                    highlightthickness=0, activebackground=BG_HEADER, width=18)
+        _omt["menu"].config(bg=BG_HEADER, fg=FG_WHITE)
+        _omt.grid(row=0, column=1, sticky="w", padx=6, pady=3)
+
+        # ── Betűtípus ───────────────────────────────────────────────────────
+        # Csak a rendszeren TÉNYLEGESEN elérhető családokat kínáljuk (a hiányzót a
+        # tkinter némán helyettesítené, ami zavaró: „beállítottam, de nem változott").
+        try:
+            from tkinter import font as _tkf
+            _avail = set(_tkf.families(self.root))
+        except Exception:
+            _avail = set()
+        _fams = [f for f in _theme.FONT_FAMILIES if not _avail or f in _avail]
+        if _orig_family not in _fams:
+            _fams.insert(0, _orig_family)
+        tk.Label(frm, text="Betűtípus:", bg=BG, fg=FG_GRAY,
+                 font=self._small_font).grid(row=1, column=0, sticky="e", pady=3)
+        fam_var = tk.StringVar(value=_orig_family)
+        _omf = tk.OptionMenu(frm, fam_var, *_fams)
+        _omf.config(bg=BG_HEADER, fg=FG_WHITE, font=self._small_font, relief="flat",
+                    highlightthickness=0, activebackground=BG_HEADER, width=18)
+        _omf["menu"].config(bg=BG_HEADER, fg=FG_WHITE)
+        _omf.grid(row=1, column=1, sticky="w", padx=6, pady=3)
+
+        # ── Betűméret ───────────────────────────────────────────────────────
+        tk.Label(frm, text="Betűméret:", bg=BG, fg=FG_GRAY,
+                 font=self._small_font).grid(row=2, column=0, sticky="e", pady=3)
+        size_var = tk.IntVar(value=_orig_size)
+        tk.Spinbox(frm, from_=_theme.FONT_SIZE_MIN, to=_theme.FONT_SIZE_MAX,
+                   textvariable=size_var, width=5, bg=BG_HEADER, fg=FG_WHITE,
+                   font=self._small_font, relief="flat", justify="center",
+                   buttonbackground=BG_INACTIVE,
+                   command=lambda: _preview()).grid(row=2, column=1, sticky="w",
+                                                    padx=6, pady=3)
+
+        lbl_note = tk.Label(popup, text="", bg=BG, fg=FG_YELLOW,
+                            font=self._small_font, wraplength=340, justify="left")
+        lbl_note.pack(anchor="w", padx=12, pady=(8, 0))
+
+        def _preview(*_a):
+            """Betű-előnézet ÉLŐBEN (a méret/típus azonnal átüt a felületen)."""
+            try:
+                _theme.apply_fonts(fam_var.get(), int(size_var.get()))
+            except Exception:
+                pass
+
+        fam_var.trace_add("write", _preview)
+        try:
+            size_var.trace_add("write", _preview)
+        except Exception:
+            pass
+
+        def _save():
+            dash = self.cfg.setdefault("dashboard", {})
+            dash["theme"]       = theme_var.get()
+            dash["font_family"] = fam_var.get()
+            dash["font_size"]   = int(size_var.get())
+            try:
+                self._save_main_config()
+            except Exception as ex:
+                lbl_note.config(text=f"Mentési hiba: {ex}", fg=FG_RED)
+                return
+            _preview()          # a betű már él; a szín csak indítás után
+            if theme_var.get() != _theme.ACTIVE_THEME:
+                lbl_note.config(text="Mentve. A betű azonnal érvényes; a TÉMA SZÍNEI "
+                                     "a program következő indításakor jelennek meg.",
+                                fg=FG_YELLOW)
+            else:
+                lbl_note.config(text="Mentve.", fg=FG_GREEN)
+
+        def _cancel():
+            # Az élő előnézetet vissza kell állítani, különben a Mégse után is
+            # a kipróbált betű maradna a felületen.
+            _theme.apply_fonts(_orig_family, _orig_size)
+            popup.destroy()
+
+        btns = tk.Frame(popup, bg=BG)
+        btns.pack(pady=12)
+        tk.Button(btns, text="Mentés", bg=BTN_PLAY_BG, fg=BTN_PLAY_FG, relief="flat",
+                  font=self._small_font, command=_save).pack(side="left", padx=6)
+        tk.Button(btns, text="Mégse", bg=BTN_DIS_BG, fg=BTN_DIS_FG, relief="flat",
+                  font=self._small_font, command=_cancel).pack(side="left", padx=6)
+        popup.protocol("WM_DELETE_WINDOW", _cancel)
 
     # ── Beállítás-szerkesztő (config.json) ───────────────────────────────
     def _show_settings(self):
