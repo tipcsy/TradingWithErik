@@ -116,6 +116,39 @@ def _attach_tooltip(widget, text):
     widget.bind("<Leave>", hide, add="+")
 
 
+def _scrollable(parent):
+    """Görgethető tartalom-terület: (külső holder, belső frame, canvas).
+
+    Kis képernyőn a sok paraméter miatt az ablak alja (Mentés/Backtest/Mégse)
+    lelógna — ezért a TARTALOM görgethető, a gombsor pedig az ablak alján
+    rögzítve marad. Az egérgörgőt a TOPLEVEL-re kötjük (a Tk bindtags miatt a
+    gyerek-widgetek fölött is működik), így a paraméter-mezők fölött is görget.
+    """
+    holder = tk.Frame(parent, bg=BG)
+    canvas = tk.Canvas(holder, bg=BG, highlightthickness=0)
+    vsb = tk.Scrollbar(holder, orient="vertical", command=canvas.yview)
+    canvas.configure(yscrollcommand=vsb.set)
+    vsb.pack(side="right", fill="y")
+    canvas.pack(side="left", fill="both", expand=True)
+
+    inner = tk.Frame(canvas, bg=BG)
+    win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+    inner.bind("<Configure>",
+               lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+    # A tartalom szélessége kövesse az ablakot (különben nem nyúlnak a mezők)
+    canvas.bind("<Configure>",
+                lambda e: canvas.itemconfigure(win_id, width=e.width))
+
+    def _wheel(e):
+        # Csak ha van mit görgetni (különben „ugrik" a rövid tartalom)
+        lo, hi = canvas.yview()
+        if lo > 0.0 or hi < 1.0:
+            canvas.yview_scroll(int(-e.delta / 120), "units")
+
+    parent.winfo_toplevel().bind("<MouseWheel>", _wheel, add="+")
+    return holder, inner, canvas
+
+
 class InstrumentParamsDialog:
     """Optimalizált paraméterek szerkesztője egy instrumentumhoz."""
 
@@ -240,8 +273,19 @@ class InstrumentParamsDialog:
         popup.configure(bg=BG)
         popup.grab_set()
 
+        # ── Rögzített alsó sáv ELŐSZÖR (side="bottom") ──────────────────────
+        # Kis képernyőn a hosszú paraméterlista miatt a gombok lelógtak; a
+        # pack-sorrend miatt a lentre kötött sáv KAPJA MEG a helyét először, a
+        # görgethető törzs csak a maradékot → a Mentés/Backtest/Mégse MINDIG látszik.
+        footer = tk.Frame(popup, bg=BG)
+        footer.pack(side="bottom", fill="x")
+
+        # Görgethető törzs — innentől MINDEN tartalom ide (`body`) megy.
+        holder, body, self._body_canvas = _scrollable(popup)
+        holder.pack(side="top", fill="both", expand=True)
+
         # Fejléc-sor a tartalomban is (a címsor könnyen elsiklik): instrumentum + stratégia.
-        tk.Label(popup, text=f"{self.symbol}  ·  stratégia: {self.strategy.name}",
+        tk.Label(body, text=f"{self.symbol}  ·  stratégia: {self.strategy.name}",
                  bg=BG, fg=FG_WHITE, font=self._hf, anchor="w").pack(
                  anchor="w", padx=10, pady=(8, 0))
 
@@ -252,11 +296,11 @@ class InstrumentParamsDialog:
         # backtest-sor), más-más sorrendben. Most EGY sáv, ami a PILLANATNYILAG
         # betöltött paraméterkészletet tükrözi (mentett eredmény / #N trials-sor /
         # friss backtest), egységes sorrendben: Trade · Win · MaxDD · P&L · PF.
-        self._grade_lbl = tk.Label(popup, bg=BG, font=self._hf, anchor="w")
+        self._grade_lbl = tk.Label(body, bg=BG, font=self._hf, anchor="w")
         self._grade_lbl.pack(anchor="w", padx=10, pady=(10, 0))
-        self._metrics_frame = tk.Frame(popup, bg=BG)
+        self._metrics_frame = tk.Frame(body, bg=BG)
         self._metrics_frame.pack(anchor="w", padx=10, pady=(0, 1))
-        self._src_lbl = tk.Label(popup, bg=BG, fg=FG_GRAY_DIM, font=self._sf,
+        self._src_lbl = tk.Label(body, bg=BG, fg=FG_GRAY_DIM, font=self._sf,
                                  anchor="w")
         self._src_lbl.pack(anchor="w", padx=10, pady=(0, 4))
         if ts:
@@ -267,18 +311,18 @@ class InstrumentParamsDialog:
                       "lefuttatja a backtestet és eltárolja")
 
         # ── Óra-rács (trade_hours) — a config.json-ba ment ──────────────────
-        self._build_hours(popup, ts)
+        self._build_hours(body, ts)
 
         # ── Kézi paraméter-űrlap ────────────────────────────────────────────
-        tk.Label(popup, text="Kézi módosítás — a következő Play-nél lép életbe:",
+        tk.Label(body, text="Kézi módosítás — a következő Play-nél lép életbe:",
                  bg=BG, fg=FG_GRAY, font=self._sf).pack(anchor="w", padx=10)
 
         # ── Sorszám-választó (csak ha van trials CSV) ───────────────────────
         self.lbl_rank = None
         if self._ranks:
-            self._build_rank_selector(popup)
+            self._build_rank_selector(body)
 
-        form = tk.Frame(popup, bg=BG)
+        form = tk.Frame(body, bg=BG)
         form.pack(fill="both", expand=True, padx=10, pady=6)
         self.entries = {}
         self._comment_entries = {}
@@ -336,7 +380,9 @@ class InstrumentParamsDialog:
                 self._comment_entries[k] = ce
                 _r += 1
 
-        self.lbl_err = tk.Label(popup, text="", bg=BG, fg=FG_RED, font=self._sf)
+        # A hibaüzenet a RÖGZÍTETT alsó sávba kerül (a görgethető törzsben
+        # elgörgetve nem látszana — pedig épp a Mentés hibáját mondja).
+        self.lbl_err = tk.Label(footer, text="", bg=BG, fg=FG_RED, font=self._sf)
         self.lbl_err.pack(anchor="w", padx=10)
 
         # ── Vezérlő-csoportok: Kockázatcsökkentés + Pozícióépítés ───────────
@@ -362,7 +408,7 @@ class InstrumentParamsDialog:
             "div_pivot": "Pivot-szélesség — hány gyertya erősíti meg a csúcsot/mélyet.",
         }
 
-        ctl = tk.Frame(popup, bg=BG)
+        ctl = tk.Frame(body, bg=BG)
         ctl.pack(anchor="w", fill="x", padx=10, pady=(6, 0))
 
         # ── 1. csoport: Kockázatcsökkentés (ha már bent vagy) ────────────────
@@ -534,14 +580,15 @@ class InstrumentParamsDialog:
 
         # Lot-létra tipp (a részleges záráshoz ≥2× min_lot kell)
         _ml = (self.cfg.get("pairs", {}).get(self.symbol, {}) or {}).get("min_lot", 0.01)
-        tk.Label(popup, text=f"(A Felező/Pajzs részleges záráshoz ≥2× min_lot ({_ml}) "
+        tk.Label(body, text=f"(A Felező/Pajzs részleges záráshoz ≥2× min_lot ({_ml}) "
                              f"kell; kisebbnél Risky/BE-re esik vissza. A Backtest a "
                              f"ténylegesen alkalmazott technikát mutatja.)",
                  bg=BG, fg=FG_GRAY_DIM, font=self._sf, justify="left",
                  wraplength=560).pack(anchor="w", padx=10, pady=(1, 0))
 
-        # ── Backtest-eredmény sor (a Backtest gomb tölti) ───────────────────
-        self.lbl_bt = tk.Label(popup, text="", bg=BG, fg=FG_GRAY_DIM, font=self._sf,
+        # ── Backtest-eredmény sor (a Backtest gomb tölti) — a rögzített sávban,
+        #    hogy a futás állapota („Backtest fut…", letöltés) mindig látszódjon.
+        self.lbl_bt = tk.Label(footer, text="", bg=BG, fg=FG_GRAY_DIM, font=self._sf,
                                justify="left", wraplength=560)
         self.lbl_bt.pack(anchor="w", padx=10, pady=(0, 2))
 
@@ -551,7 +598,7 @@ class InstrumentParamsDialog:
         # beírja — kötelezően backtest-eredménnyel (ha nincs friss eredmény, a
         # Mentés magától lefuttatja a backtestet, majd ment). A régi „Ment új
         # sorszámként" így feleslegessé vált (a CSV-be írás automatikus).
-        btns = tk.Frame(popup, bg=BG)
+        btns = tk.Frame(footer, bg=BG)
         btns.pack(pady=10)
         self._btn_save = tk.Button(btns, text="Mentés", bg=BTN_PLAY_BG,
                                    fg=BTN_PLAY_FG, relief="flat", font=self._sf,
@@ -565,6 +612,24 @@ class InstrumentParamsDialog:
                   font=self._sf, command=self._open_trials).pack(side="left", padx=6)
         tk.Button(btns, text="Mégse", bg=BTN_DIS_BG, fg=BTN_DIS_FG, relief="flat",
                   font=self._sf, command=popup.destroy).pack(side="left", padx=6)
+
+        self._fit_to_screen(popup, body, footer)
+
+    def _fit_to_screen(self, popup, body, footer):
+        """Az ablak méretezése a KÉPERNYŐHÖZ: ha a tartalom elfér, minden látszik
+        (mint eddig); ha nem, a törzs görgethetővé zsugorodik, a gombsor pedig
+        marad az alján. A canvas magától nem kér magasságot (create_window), ezért
+        a belső frame igényéből — a képernyőre vágva — állítjuk be."""
+        try:
+            popup.update_idletasks()
+            need_h = body.winfo_reqheight()
+            need_w = body.winfo_reqwidth()
+            # Ennyi marad a törzsnek: a képernyő 85%-a mínusz a gombsor + ablakkeret
+            avail = int(popup.winfo_screenheight() * 0.85) - footer.winfo_reqheight() - 80
+            self._body_canvas.config(height=max(240, min(need_h, avail)),
+                                     width=need_w)
+        except Exception:
+            pass
 
     # ── EGYETLEN metrika-sáv renderelése ────────────────────────────────────
     # (label, érték-formázó, metrika-kulcs vagy None). A None kulcs = fehér
@@ -1264,6 +1329,13 @@ class InstrumentParamsDialog:
             self._render_metrics(
                 None, "paraméterek a Backtest-ablakból — a Mentés lefuttatja a backtestet")
 
+    def _bt_status(self, text: str):
+        """Háttérszálról biztonságos státusz a backtest-sorba (adat-letöltés stb.)."""
+        try:
+            self.popup.after(0, lambda: self.lbl_bt.config(text=text, fg=FG_GRAY))
+        except Exception:
+            pass
+
     # ── Backtest inline (a Mentés auto-útja: gyors, ablak nélkül) ────────────
     def _run_backtest(self):
         if self._bt_running:
@@ -1291,11 +1363,12 @@ class InstrumentParamsDialog:
         def work():
             summary, err = None, None
             try:
-                from trading.backtest import load_data, run_pair
-                df15, df1 = load_data(self.symbol)
-                if df15 is None:
-                    err = "Nincs letöltött adat (data/m15, data/m1) ehhez a párhoz."
-                else:
+                from trading.backtest import load_data_ensure, run_pair
+                # Hiányzó előzmény → MAGÁTÓL letölti (frissen felvett instrumentum)
+                df15, df1, err = load_data_ensure(
+                    self.symbol, self.cfg,
+                    status=lambda m: self._bt_status(f"Előzmény: {m}"))
+                if df15 is not None:
                     ib = float(self.cfg.get("ml", {}).get("starting_balance_eur", 1000.0))
                     res = run_pair(self.symbol, df15, df1, params, pair_cfg,
                                    self.cfg["trading"], ib, strategy=self.strategy,

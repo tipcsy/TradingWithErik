@@ -12,6 +12,7 @@ Futtatás: python tools/download_history.py
 import json
 import logging
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -253,6 +254,88 @@ def download_pair(symbol: str, tf_str: str, start: datetime, overwrite: bool, en
              symbol, tf_str, len(ohlcv), out_file.name,
              str(ohlcv.index[0])[:10], str(ohlcv.index[-1])[:10])
     return True
+
+
+# ---------------------------------------------------------------------------
+# Egy instrumentum előzményeinek biztosítása (GUI + CLI közös útja)
+# ---------------------------------------------------------------------------
+
+# Per-szimbólum zár: a GUI-ban két út is kérhet letöltést UGYANARRA a párra
+# (új instrumentum auto-letöltése + Opt/Backtest) — ugyanazt a parquet-et írnák
+# egyszerre. A zár sorba állítja őket (a második már a kész fájlt találja).
+_HISTORY_LOCKS: dict = {}
+_HISTORY_LOCKS_GUARD = threading.Lock()
+
+
+def _history_lock(symbol: str) -> threading.Lock:
+    with _HISTORY_LOCKS_GUARD:
+        return _HISTORY_LOCKS.setdefault(symbol, threading.Lock())
+
+
+def ensure_history(symbol: str, cfg: dict, tf_labels=("M15", "M1"),
+                   status=None) -> tuple[bool, str]:
+    """Gondoskodik róla, hogy `symbol`-nak legyen letöltött előzmény-adata.
+
+    Meglévő parquet → gap feltöltés; hiányzó → TELJES letöltés a config
+    `data.history_start_date`-jétől. EGY hely, amit a GUI (új instrumentum
+    felvétele, Opt, Backtest) és a CLI is hív — így nem csúszhat szét, MIKOR
+    töltünk le adatot.
+
+    Szimbólumonként SOROSÍTVA fut (lásd `_history_lock`).
+
+    `status`: opcionális callback(str) a haladás visszajelzéséhez (GUI-sor).
+    Visszaad: (van-e MOST már adat minden kért TF-hez, rövid üzenet).
+    """
+    with _history_lock(symbol):
+        return _ensure_history(symbol, cfg, tf_labels, status)
+
+
+def _ensure_history(symbol, cfg, tf_labels, status) -> tuple[bool, str]:
+    def _say(msg):
+        if status is not None:
+            try:
+                status(msg)
+            except Exception:
+                pass
+
+    def _pq(tf):
+        return ROOT / "data" / tf.lower() / f"{symbol}.parquet"
+
+    end_dt  = datetime.now(timezone.utc)
+    missing = [tf for tf in tf_labels if not _pq(tf).exists()]
+
+    # MINDENKI ugyanazt a connect()-et használja → egységes terminál (config
+    # mt5.path) + fiók-ellenőrzés. (A connect() maga foglalja a MT5_LOCK-ot,
+    # ezért NEM tesszük külön lock-blokkba — az deadlock lenne.)
+    if not mt5_connector.connect(cfg):
+        if missing:
+            return False, (f"MT5 offline — {symbol}: nincs letöltött adat "
+                           f"({', '.join(missing)}).")
+        return True, "MT5 offline — a meglévő adatokkal."
+
+    hs = datetime.strptime(
+        (cfg.get("data") or {}).get("history_start_date", "2024-10-01"),
+        "%Y-%m-%d",
+    ).replace(tzinfo=timezone.utc)
+
+    for tf in tf_labels:
+        pq = _pq(tf)
+        try:
+            if pq.exists():
+                _say(f"Gap-fill {tf}...")
+                _fill_gap(pq, symbol, tf, end_dt)
+            else:
+                _say(f"Letöltés {tf}...")
+                download_pair(symbol, tf, hs, overwrite=False, end=end_dt)
+        except Exception as ex:
+            log.warning("%s %s — előzmény-letöltés hiba: %s", symbol, tf, ex)
+
+    failed = [tf for tf in tf_labels if not _pq(tf).exists()]
+    if failed:
+        return False, (f"{symbol}: nem sikerült az előzmény-letöltés "
+                       f"({', '.join(failed)}) — nem érhető el ezen a "
+                       f"brókerszerveren?")
+    return True, f"{symbol}: adat kész."
 
 
 # ---------------------------------------------------------------------------

@@ -154,6 +154,28 @@ def load_data(symbol: str) -> tuple[Optional[pd.DataFrame], Optional[pd.DataFram
     return df_m15, df_m1
 
 
+def load_data_ensure(symbol: str, cfg: dict, status=None):
+    """`load_data`, de ha hiányzik a parquet, ELŐBB letölti MT5-ből.
+
+    A GUI backtest-útjai ezt hívják: egy frissen felvett instrumentumnál az első
+    backtest ne „nincs letöltött adat"-tal álljon meg, hanem töltse le magától.
+    `status`: opcionális callback(str) a haladáshoz.
+    Visszaad: (df_m15, df_m1, hibaüzenet|None)."""
+    df15, df1 = load_data(symbol)
+    if df15 is not None:
+        return df15, df1, None
+    try:
+        from tools.download_history import ensure_history
+        ok, msg = ensure_history(symbol, cfg, status=status)
+    except Exception as ex:
+        return None, None, f"Nincs letöltött adat, és a letöltés sem sikerült: {ex}"
+    df15, df1 = load_data(symbol)
+    if df15 is None:
+        return None, None, (msg if not ok else
+                            "Nincs letöltött adat (data/m15, data/m1) ehhez a párhoz.")
+    return df15, df1, None
+
+
 def pip_to_price(pips: float, pip_size: float) -> float:
     return pips * pip_size
 

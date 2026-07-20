@@ -832,37 +832,22 @@ class OptimizerController:
             opt_cfg     = self.cfg["optimizer"]
             initial_bal = self.cfg.get("ml", {}).get("starting_balance_eur", 1000.0)
 
-            # ── Adat előkészítés (háttérszálon) ───────────────────────────
-            from core import mt5_connector as _mt5c
-            from tools.download_history import download_pair, _fill_gap
-            from datetime import datetime as _dt, timezone as _tz
+            # ── Adat előkészítés (háttérszálon) — a KÖZÖS letöltő úton ────
+            from tools.download_history import ensure_history
 
-            end_dt = _dt.now(_tz.utc)
-            # MINDENKI ugyanazt a connect()-et használja → egységes terminál
-            # (config mt5.path) + fiók-ellenőrzés. (A connect() maga foglalja a
-            # MT5_LOCK-ot, ezért NEM tesszük külön lock-blokkba — az deadlock lenne.)
-            connected = _mt5c.connect(self.cfg)
+            def _st(msg):
+                self.optimizer_status[symbol] = msg
 
-            if connected:
-                for tf in (t.label for t in job_strat.timeframes()):
-                    pq = ROOT / "data" / tf.lower() / f"{symbol}.parquet"
-                    if pq.exists():
-                        self.optimizer_status[symbol] = f"Gap-fill {tf}..."
-                        _fill_gap(pq, symbol, tf, end_dt)
-                    else:
-                        hs = _dt.strptime(
-                            self.cfg["data"].get("history_start_date", "2024-10-01"),
-                            "%Y-%m-%d",
-                        ).replace(tzinfo=_tz.utc)
-                        self.optimizer_status[symbol] = f"Letöltés {tf}..."
-                        download_pair(symbol, tf, hs, overwrite=False, end=end_dt)
-                self.optimizer_status[symbol] = "Adat kész, optimalizálás..."
-            else:
-                self.optimizer_status[symbol] = "MT5 offline, meglévő adatok..."
+            ok, msg = ensure_history(
+                symbol, self.cfg,
+                tuple(t.label for t in job_strat.timeframes()), status=_st)
+            self.optimizer_status[symbol] = (
+                "Adat kész, optimalizálás..." if ok else msg)
 
             df_m15, df_m1 = load_data(symbol)
             if df_m15 is None:
-                self.optimizer_status[symbol] = "Hiba: nincs adat"
+                self.optimizer_status[symbol] = f"Hiba: nincs adat — {msg}"
+                self._log_error(symbol, f"nincs letöltött adat: {msg}")
                 return
 
             # ── KÖZÖS dispatch: az optimize_job (→ optimize_symbol) dönt a
@@ -2538,6 +2523,48 @@ class DashboardWindow:
             on_tfalign=self._show_tfalign_settings)
         self._bind_ctrl_width_sync(self.rows[symbol])
         self._apply_filter_sort()
+
+        # Frissen felvett instrumentum → AZONNAL töltsük le az előzmény-adatot.
+        # Enélkül az első Backtest/Opt „nincs letöltött adat"-tal állna meg (a
+        # letöltés eddig csak az Opt indításakor futott le).
+        self._start_history_download(symbol)
+
+    def _start_history_download(self, symbol: str, on_done=None):
+        """Előzmény-adat (M15/M1…) letöltése HÁTTÉRSZÁLON, a sor Opt-státuszában
+        visszajelezve. Az engedélyezett stratégiák időkereteit tölti (union), hogy
+        minden stratégia backtestje/optimalizálása futtatható legyen.
+
+        `on_done`: opcionális callback(ok: bool, msg: str) a FŐ szálon."""
+        try:
+            from strategy import enabled_strategy_names, get_strategy_by_name
+            tfs = []
+            for nm in enabled_strategy_names(self.cfg, symbol) or [self.strategy.name]:
+                for t in get_strategy_by_name(nm).timeframes():
+                    if t.label not in tfs:
+                        tfs.append(t.label)
+        except Exception:
+            tfs = ["M15", "M1"]
+
+        def _work():
+            from tools.download_history import ensure_history
+
+            def _st(msg):
+                self.optimizer_status[symbol] = msg
+
+            try:
+                ok, msg = ensure_history(symbol, self.cfg, tuple(tfs), status=_st)
+            except Exception as ex:
+                ok, msg = False, f"letöltési hiba: {ex}"
+            self.optimizer_status[symbol] = ("Adat kész ✓" if ok else f"Hiba: {msg}")
+            if on_done is not None:
+                try:
+                    self.root.after(0, lambda: on_done(ok, msg))
+                except Exception:
+                    pass
+
+        self.optimizer_status[symbol] = "Előzmény letöltése..."
+        threading.Thread(target=_work, daemon=True,
+                         name=f"History-{symbol}").start()
 
     # ── JSON szintaxis-színezés (Text widgethez) ─────────────────────────
     @staticmethod

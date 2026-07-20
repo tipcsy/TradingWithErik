@@ -692,10 +692,15 @@ class BacktestDialog:
             df15 = df1 = None
             err = None
             try:
-                from trading.backtest import load_data
-                df15, df1 = load_data(self.symbol)
-                if df15 is None:
-                    err = "Nincs letöltött adat (data/m15, data/m1) ehhez a párhoz."
+                from trading.backtest import load_data_ensure
+                # Hiányzó előzmény → MAGÁTÓL letölti (frissen felvett instrumentum)
+                def _st(msg):
+                    try:
+                        self.win.after(0, lambda: self._span_lbl.config(
+                            text=f"Előzmény: {msg}", fg=FG_GRAY_DIM))
+                    except Exception:
+                        pass
+                df15, df1, err = load_data_ensure(self.symbol, self.cfg, status=_st)
             except Exception as ex:
                 err = str(ex)
             try:

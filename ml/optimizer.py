@@ -10,6 +10,7 @@ Működés:
 Futtatás: python ml/optimizer.py
 """
 
+import csv
 import json
 import logging
 import math
@@ -770,6 +771,47 @@ def optimize_pair(
 # Fő belépési pont
 # ---------------------------------------------------------------------------
 
+def _no_result_reason(symbol, df_m15, opt_cfg: dict, strategy) -> str:
+    """A „nincs eredmény" OKA — a puszta tény helyett a TEENDŐ.
+
+    Két tipikus ok van, és a kettő teljesen más lépést kíván:
+      • kevés adat → nincs egyetlen walk-forward ablak sem (tölts le hosszabb
+        előzményt / csökkentsd a wf_* hónapokat),
+      • van adat, de MINDEN trial elbukott → az elbukás okát a trials CSV `note`
+        oszlopa tartalmazza (kényszer, kivétel, kevés kötés) → azt összegezzük.
+    """
+    train_m = int(opt_cfg.get("wf_train_months", 6))
+    test_m  = int(opt_cfg.get("wf_test_months", 2))
+    try:
+        span_m = (df_m15.index[-1] - df_m15.index[0]).days / 30.44
+    except Exception:
+        span_m = 0.0
+    if span_m < train_m + test_m:
+        return (f"kevés adat: {span_m:.1f} hónap a train_start után, a "
+                f"walk-forwardhoz legalább {train_m + test_m} hónap kell "
+                f"(train {train_m} + test {test_m}). Tölts le hosszabb "
+                f"előzményt (data.history_start_date), vagy csökkentsd a "
+                f"wf_train_months/wf_test_months értékét.")
+
+    # A trials CSV `note` oszlopa: mi bukott el a legtöbbször?
+    try:
+        import collections
+        with open(trials_file(symbol, strategy.name), encoding="utf-8-sig",
+                  newline="") as f:
+            rows = list(csv.DictReader(f, delimiter=";"))
+        notes = collections.Counter((r.get("note") or "").strip()
+                                    for r in rows if (r.get("note") or "").strip())
+        if notes:
+            top, cnt = notes.most_common(1)[0]
+            return (f"mind a(z) {len(rows)} trial érvénytelen — leggyakoribb ok: "
+                    f"{top} ({cnt}×). Nézd meg a trials CSV `note` oszlopát.")
+    except Exception:
+        pass
+    return ("egyetlen paraméterkészlet sem hozott értékelhető kötést a TEST "
+            "ablakokban (ablakonként min. 5 kötés kell) — lazíts a "
+            "paraméter-tartományokon vagy az órakapun.")
+
+
 def optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance, progress=None,
                     strategy=None) -> dict:
     """EGYSÉGES optimalizálási belépési pont — a CLI és a GUI-processz is EZT hívja.
@@ -902,7 +944,7 @@ def optimize_symbol(symbol, df_m15, df_m1, cfg, initial_balance, progress=None,
         return {"error": "megszakítva", "stopped": True}
 
     if result is None:
-        return {"error": "nincs eredmény"}
+        return {"error": _no_result_reason(symbol, df_m15, opt_cfg, strategy)}
 
     # Out-of-sample (TEST) validálás — szintén itt, egységesen. A nyertes rr-rel
     # (ha volt rr-optimalizálás), hogy a mentett test_summary konzisztens legyen.
