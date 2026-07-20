@@ -43,6 +43,7 @@ from strategy import get_strategy
 from strategy.base import Column
 from strategy.settings import apply_strategy_config, main_config_view
 from core import risky_mode
+from core import adopted as _adopted
 from version import APP_NAME, APP_VERSION
 
 
@@ -1452,13 +1453,14 @@ POSITION_COLUMNS = [
 class PositionRow:
     def __init__(self, parent, ticket, mono_font, small_font,
                  on_be, on_trail, on_panic, on_name_click, on_trail_dist,
-                 on_build=None, on_build_mode=None):
+                 on_build=None, on_build_mode=None, on_strategy_click=None):
         self.ticket = ticket
         self._small = small_font
         self._symbol = None
         self._on_name_click = on_name_click
         self._on_trail_dist = on_trail_dist
         self._on_build_mode = on_build_mode
+        self._on_strategy_click = on_strategy_click
         self.frame = tk.Frame(parent, bg=BG_ROW_EVEN)
         self.labels = {}
         for key, hdr, w, anchor in POSITION_COLUMNS:
@@ -1471,6 +1473,15 @@ class PositionRow:
         self.labels["symbol"].bind(
             "<Button-1>",
             lambda e: self._symbol and self._on_name_click(self._symbol))
+        # Stratégia-cella: KATTINTHATÓ — kézzel nyitott pozíciót itt lehet
+        # stratégiához rendelni (a motor onnantól sajátjaként kezeli), illetve
+        # a hozzárendelést visszavonni.
+        if on_strategy_click is not None:
+            self.labels["strategy"].config(cursor="hand2")
+            self.labels["strategy"].bind(
+                "<Button-1>",
+                lambda e: self._symbol and on_strategy_click(
+                    self.ticket, self._symbol, e.widget))
         self.btn_be = tk.Button(self.frame, text="BE", width=4, font=small_font,
                                 relief="flat", bg=BTN_OPT_BG, fg=BTN_OPT_FG,
                                 command=lambda: on_be(ticket))
@@ -1574,10 +1585,14 @@ class PositionRow:
             self._build_tip = None
 
     def update(self, pos, pstate, digits, trail_default=None, point=None,
-               strategy_name="—"):
+               strategy_name="—", adopted=False):
         self._symbol = pos["symbol"]
         self.labels["symbol"].config(text=pos["symbol"])
-        self.labels["strategy"].config(text=strategy_name or "—", fg=FG_GRAY)
+        # Örökbefogadott (kézzel nyitott, utólag hozzárendelt) pozíció: „⇩" jelöli
+        # és cián, hogy egy pillantással megkülönböztethető a bot sajátjától.
+        self.labels["strategy"].config(
+            text=(f"⇩{strategy_name}" if adopted else (strategy_name or "—")),
+            fg=FG_CYAN if adopted else FG_GRAY)
         t = pos["type"]
         self.labels["type"].config(text=t, fg=FG_GREEN if t == "BUY" else FG_RED)
         self.labels["volume"].config(text=f'{pos["volume"]:.2f}', fg=FG_WHITE)
@@ -1736,7 +1751,7 @@ class PositionsTab:
                  on_be, on_trail, on_panic, on_close_all,
                  on_name_click, on_trail_dist, trail_default_provider,
                  point_provider, strategy_provider=None, on_build=None,
-                 on_build_mode=None):
+                 on_build_mode=None, on_strategy_click=None):
         self.parent = parent
         self.cfg = cfg
         self._mono, self._small, self._header = mono_font, small_font, header_font
@@ -1750,6 +1765,7 @@ class PositionsTab:
         self._on_trail_dist = on_trail_dist
         self._on_build = on_build
         self._on_build_mode = on_build_mode
+        self._on_strategy_click = on_strategy_click
         self._trail_default_provider = trail_default_provider
         self._point_provider = point_provider
         self._rows: dict[int, PositionRow] = {}
@@ -1781,6 +1797,11 @@ class PositionsTab:
         tk.Label(legend, text="   SL ⇘T = trailing mozgatta   |   Belépő táv = pont a belépőtől "
                               "(+ = javamra)   |   SL P&L = eredmény, ha az SL bekövetkezik",
                  bg=BG, fg=FG_GRAY, font=self._small).pack(side="left")
+        tk.Label(p, text="A Stratégia cellára kattintva egy KÉZZEL nyitott pozíció "
+                         "stratégiához rendelhető (⇩) — a motor onnantól sajátjaként "
+                         "kezeli: breakeven, trailing, kockázatcsökkentés, kiszállási jel.",
+                 bg=BG, fg=FG_GRAY_DIM, font=self._small, anchor="w",
+                 justify="left").pack(fill="x", padx=10, pady=(0, 4))
 
         # Fejléc
         hdr = tk.Frame(p, bg=BG_HEADER)
@@ -1807,14 +1828,17 @@ class PositionsTab:
                                   self._on_be, self._on_trail, self._on_panic,
                                   self._on_name_click, self._on_trail_dist,
                                   on_build=self._on_build,
-                                  on_build_mode=self._on_build_mode)
+                                  on_build_mode=self._on_build_mode,
+                                  on_strategy_click=self._on_strategy_click)
                 self._rows[tid] = row
             trail_def = self._trail_default_provider(pos["symbol"])
             point     = self._point_provider(pos["symbol"])
-            strat     = self._strategy_provider(pos.get("magic")) if self._strategy_provider else "—"
+            strat     = (self._strategy_provider(pos.get("magic"), tid)
+                         if self._strategy_provider else "—")
             row.update(pos, self._pos_state.get(tid),
                        self._digits_provider(pos["symbol"]), trail_def, point,
-                       strategy_name=strat)
+                       strategy_name=strat,
+                       adopted=_adopted.is_open_adopted(tid))
 
         for tid in list(self._rows):
             if tid not in seen:
@@ -1952,7 +1976,8 @@ class ClosedTab:
 
         by_strat: dict = {}
         for c in closed:
-            nm = self._strategy_provider(c.get("magic")) if self._strategy_provider else "—"
+            nm = (self._strategy_provider(c.get("magic"), c.get("position"))
+                  if self._strategy_provider else "—")
             a = by_strat.setdefault(nm, [0.0, 0])
             a[0] += c["pnl"]
             a[1] += 1
@@ -1964,7 +1989,8 @@ class ClosedTab:
 
     def _make_row(self, c):
         digits = self._digits_provider(c["symbol"])
-        strat  = self._strategy_provider(c.get("magic")) if self._strategy_provider else "—"
+        strat  = (self._strategy_provider(c.get("magic"), c.get("position"))
+                  if self._strategy_provider else "—")
         t      = c["type"]
         pnl    = c["pnl"]
         r      = _r_multiple(c)
@@ -2131,7 +2157,8 @@ class DashboardWindow:
             point_provider=lambda sym: getattr(self.dashboard_ref.get(sym), "point", None),
             strategy_provider=self._strategy_by_magic,
             on_build=self._pos_build,
-            on_build_mode=self._pos_build_mode)
+            on_build_mode=self._pos_build_mode,
+            on_strategy_click=self._pos_strategy_menu)
 
         closed_frame = tk.Frame(self._notebook, bg=BG)
         self._notebook.add(closed_frame, text="  Lezárt (ma)  ")
@@ -3487,15 +3514,112 @@ class DashboardWindow:
         self.optimizer_status.pop(symbol, None)
         self._apply_filter_sort()
 
-    def _strategy_by_magic(self, magic) -> str:
-        """magic → stratégianév (Pozíciók / Lezárt fül). Jelenleg egy stratégia
-        van; több stratégiánál itt bővül a leképezés (magic-onként egyedi)."""
+    def _strategy_by_magic(self, magic, ticket=None) -> str:
+        """magic (+ ticket) → stratégianév a Pozíciók / Lezárt fülre.
+
+        ELSŐ a ticket-alapú hozzárendelés (örökbefogadott KÉZI pozíció): a magic
+        utólag nem írható át az MT5-ben, ezért a kézzel nyitott pozíció stratégiáját
+        csak a saját nyilvántartásunk (core.adopted) tudja. Utána a magic → az
+        elérhető stratégiák magicjeinek leképezése."""
+        nm = _adopted.strategy_of(ticket)
+        if nm:
+            return nm
         try:
-            if magic is not None and int(magic) == self.strategy.magic(self.cfg):
-                return self.strategy.name
+            if magic is not None:
+                from strategy import available_strategy_names, get_strategy_by_name
+                m = int(magic)
+                for name in available_strategy_names(self.cfg):
+                    if get_strategy_by_name(name).magic(self.cfg) == m:
+                        return name
         except Exception:
             pass
         return "—"
+
+    # ── Kézi pozíció → stratégiához rendelés (örökbefogadás) ─────────────
+    def _pos_strategy_menu(self, ticket, symbol, widget):
+        """A Pozíciók fül Stratégia-cellájára kattintva: melyik stratégia kezelje
+        ezt a (kézzel nyitott) pozíciót?
+
+        Az MT5-ben a magic és a comment az order elküldésekor dől el és utólag NEM
+        módosítható — ezért a hozzárendelést a `core.adopted` tartja nyilván
+        (ticket → stratégia), és a motor onnantól sajátjaként kezeli a pozíciót
+        (BE, trailing, kockázatcsökkentés, kiszállási jel, cost-cut, építés)."""
+        from strategy import enabled_strategy_names
+
+        cur_adopted = _adopted.strategy_of(ticket) if _adopted.is_open_adopted(ticket) else None
+        native = self._strategy_by_magic(
+            next((p.get("magic") for p in
+                  getattr(self, "_mt5_cache", {}).get("positions_detail", [])
+                  if p.get("ticket") == ticket), None))
+        menu = tk.Menu(self.root, tearoff=0, bg=BG_HEADER, fg=FG_WHITE,
+                       activebackground=BTN_OPT_BG, activeforeground=FG_ON_ACCENT)
+        if native != "—" and not cur_adopted:
+            # A bot SAJÁT (magicjével nyitott) pozíciója — nincs mit hozzárendelni.
+            menu.add_command(label=f"A(z) {native} nyitotta (magic) — nem módosítható",
+                             state="disabled")
+        else:
+            menu.add_command(label="Kezelje ez a stratégia:", state="disabled")
+            for name in enabled_strategy_names(self.cfg, symbol):
+                menu.add_command(
+                    label=("✓ " if name == cur_adopted else "    ") + name,
+                    command=lambda n=name: self._adopt_position(ticket, symbol, n))
+            if cur_adopted:
+                menu.add_separator()
+                menu.add_command(label="Hozzárendelés visszavonása (kézi marad)",
+                                 command=lambda: self._release_position(ticket))
+        try:
+            menu.tk_popup(widget.winfo_rootx(),
+                          widget.winfo_rooty() + widget.winfo_height())
+        finally:
+            menu.grab_release()
+
+    def _adopt_position(self, ticket, symbol, strategy_name):
+        """Örökbefogadás: a kézi pozíciót a motor ettől kezdve sajátjaként kezeli."""
+        from tkinter import messagebox
+        from core.params_store import params_file
+        if not params_file(symbol, strategy_name).exists():
+            messagebox.showwarning(
+                "Nincs paraméter",
+                f"A(z) {symbol} / {strategy_name} nincs optimalizálva (nincs mentett "
+                f"paraméter), így a motor nem tudja kezelni a pozíciót.\n\n"
+                f"Előbb futtasd az optimalizálást (Opt), vagy mentsd el kézzel a "
+                f"paramétereket.")
+            return
+        pos = next((p for p in getattr(self, "_mt5_cache", {}).get("positions_detail", [])
+                    if p.get("ticket") == ticket), None)
+        warn = ""
+        if pos is not None and not pos.get("sl"):
+            warn = ("\n\nFIGYELEM: ennek a pozíciónak NINCS stop-lossa. A kockázat-"
+                    "csökkentés (1R-es részleges zárás, Fibo/Harmados stop-lépcsők) "
+                    "az eredeti SL-távolságból számol — SL nélkül ezek nem lépnek "
+                    "működésbe, csak a TP-alapú breakeven és a trailing.")
+        if not messagebox.askyesno(
+                "Pozíció hozzárendelése",
+                f"A(z) #{ticket} ({symbol}) pozíciót a(z) {strategy_name} stratégia "
+                f"kezelje ezentúl?\n\n"
+                f"A motor ugyanúgy bánik vele, mintha ő nyitotta volna: breakeven, "
+                f"trailing, kockázatcsökkentés, kiszállási jel, cost-cut, "
+                f"pozícióépítés — és foglal egy slotot.\n\n"
+                f"A bróker oldalán a pozíció magicje/megjegyzése VÁLTOZATLAN marad "
+                f"(az MT5 ezt utólag nem engedi átírni) — a hozzárendelést a program "
+                f"tartja nyilván.{warn}"):
+            return
+        _adopted.adopt(ticket, strategy_name, symbol)
+        # Ha a pár áll, a live loop KIVEZETÉS-be teszi (kezeli a pozíciót, de új
+        # belépőt nem nyit) — a szándékot nem írjuk felül.
+        self._pos_tab.refresh()
+
+    def _release_position(self, ticket):
+        """A hozzárendelés visszavonása — a motor elengedi a pozíciót."""
+        from tkinter import messagebox
+        if not messagebox.askyesno(
+                "Hozzárendelés visszavonása",
+                f"A(z) #{ticket} pozíciót a motor NE kezelje tovább?\n\n"
+                f"A pozíció NEM zárul be — csak magára marad (a bróker SL/TP-je védi). "
+                f"A már elmozgatott stop ott marad, ahol most van."):
+            return
+        _adopted.release(ticket)
+        self._pos_tab.refresh()
 
     # ── Pozíciókezelő handlerek (Pozíciók fül) ──────────────────────────
     def _pos_panic(self, ticket: int):

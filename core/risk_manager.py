@@ -93,6 +93,16 @@ class SlotManager:
     def add(self, ticket: int):
         self._positions[ticket] = False
 
+    def ensure(self, ticket: int) -> bool:
+        """Nyomon követésbe vétel, ha még nem ismert — a MEGLÉVŐ kockázatmentes
+        jelölést nem írja felül (ellentétben az `add`-del). Az utólag stratégiához
+        rendelt (kézzel nyitott) pozíciók így nem maradnak ki a slot-számlálásból.
+        True, ha most került be."""
+        if ticket in self._positions:
+            return False
+        self._positions[ticket] = False
+        return True
+
     def set_risk_free(self, ticket: int):
         if ticket in self._positions:
             self._positions[ticket] = True

@@ -38,6 +38,7 @@ from core import exit_signal
 from core import position_build as _position_build
 from core import viz_prefs as _vp
 from core import trade_mode as _tmode
+from core import adopted
 from core.indicator_engine import atr as atr_indicator
 from core.risk_manager import calc_lot, calc_effective_slots, SlotManager
 from strategy import get_strategy
@@ -274,11 +275,25 @@ def modify_sl(ticket: int, new_sl: float) -> bool:
     return ok
 
 
-def get_open_positions(magic: int) -> list:
+def get_open_positions(magic: int, strategy_name: str | None = None) -> list:
+    """A stratégia „sajátjai": a MAGIC-jével nyitott pozíciók + a felületről
+    hozzárendelt (örökbefogadott) KÉZI pozíciók.
+
+    A magic utólag nem módosítható az MT5-ben, ezért a kézzel nyitott pozíció
+    nem kaphat magicet — a hozzárendelést a `core.adopted` tartja nyilván
+    (ticket → stratégia). Innentől a motor számára ugyanaz a két halmaz."""
     positions = mt5.positions_get()
     if positions is None:
         return []
-    return [p for p in positions if p.magic == magic]
+    own = [p for p in positions if p.magic == magic]
+    if not strategy_name:
+        return own
+    extra = adopted.tickets_for(strategy_name)
+    if not extra:
+        return own
+    seen = {p.ticket for p in own}
+    return own + [p for p in positions
+                  if p.ticket in extra and p.ticket not in seen]
 
 
 def pip_to_price(pips: float, pip_size: float) -> float:
@@ -894,7 +909,7 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
         if _preset in (_rr.PRESET_OFF, _rr.PRESET_RISKY):
             try:
                 _sinfo = mt5.symbol_info(symbol)
-                for _p in get_open_positions(magic):
+                for _p in get_open_positions(magic, _sn):
                     if _p.symbol != symbol:
                         continue
                     _ps = position_state.setdefault(_p.ticket, {
@@ -1014,7 +1029,9 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
                       symbol, current_spread_pts, max_spread_pts)
 
     # --- Pozíció menedzsment ---
-    open_positions = get_open_positions(magic)
+    # A magicjével nyitottak MELLETT a felületről hozzárendelt (örökbefogadott)
+    # kézi pozíciók is ide tartoznak — ugyanaz a kezelés vonatkozik rájuk.
+    open_positions = get_open_positions(magic, strategy.name)
     symbol_positions = [p for p in open_positions if p.symbol == symbol]
 
     # Cost-cut (idő-stop, tananyag 2.6): ha bekapcsolt, a nyitás után N fő-tf
@@ -1040,6 +1057,13 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
     for pos in symbol_positions:
         ticket = pos.ticket
         pnl    = pos.profit
+        # Örökbefogadott (kézzel nyitott) pozíció: vegyük fel a slot-kezelőbe, hogy
+        # FOGLALJA a helyét — különben a motor a limit fölé nyithatna. A meglévő
+        # kockázatmentes jelölést nem bántja.
+        if slot_mgr.ensure(ticket):
+            log.info("⇩ %s #%d — pozíció felvéve a slot-kezelőbe (%s%s)",
+                     symbol, ticket, strategy.name,
+                     ", örökbefogadott" if adopted.is_open_adopted(ticket) else "")
         is_rf  = slot_mgr.is_risk_free(ticket)
 
         if _cc_on and pnl < 0 and _tick is not None \
@@ -1391,6 +1415,9 @@ def process_pair(state: LivePairState, slot_mgr: SlotManager, balance: float,
                 ds.risk_free      = False
                 slot_mgr.remove(ticket)
                 position_state.pop(ticket, None)
+                # Örökbefogadott pozíció: a bejegyzés lezártként megjelölve (a
+                # „Lezárt ma" fül még a stratégiához köti; a prune takarítja).
+                adopted.mark_closed(ticket)
                 log.info("📋 [%s] %s #%d zárt | P&L: %.2f$",
                          strategy.name, symbol, ticket, pnl)
                 log_trade({
@@ -1578,12 +1605,18 @@ def manual_build(symbol: str) -> bool:
         build_runtime.pop(symbol, None)
         return False
     magic = positions[0].magic
+    # Ha az alap-pozíció ÖRÖKBEFOGADOTT (kézzel nyitott), a magicje nem a stratégiáé
+    # — az adalék ugyanazt a magicet örökli, tehát önmagában kimaradna a stratégia
+    # pozícióiból. Ezért az új lábat is hozzárendeljük ugyanahhoz a stratégiához.
+    _base_strat = adopted.strategy_of(positions[0].ticket)
 
     # 1) Az adalék megnyitása (nincs fix TP; az SL-t mindjárt az átlagárra tesszük).
     ticket = open_position(symbol, direction, add_lot, sl=0.0, tp=0.0, magic=magic,
                            comment="build", strategy_name="build")
     if not ticket:
         return False
+    if _base_strat:
+        adopted.adopt(ticket, _base_strat, symbol)
     if _run_slot_mgr is not None:
         _run_slot_mgr.add(ticket)
         _run_slot_mgr.set_risk_free(ticket)   # a build kockázatmentes (SL az átlagáron)
@@ -1718,9 +1751,18 @@ def run(cfg: dict, slot_mgr: SlotManager):
     #      (ha az SL már az entry-n túl van profit-irányban → risk-free),
     #   3) a nyitott pozíciójú párokat LIVE-ba teszi, hogy a motor tovább
     #      kezelje őket (breakeven, trailing, zárás-detektálás).
+    # Az örökbefogadott (kézzel nyitott, utólag stratégiához rendelt) pozíciók
+    # UGYANÍGY helyreállnak: a `get_open_positions` a stratégia nevével azokat is
+    # visszaadja. Előbb takarítás: a program állása közben lezárt bejegyzések.
+    try:
+        _all_now = mt5.positions_get() or []
+        adopted.prune({p.ticket for p in _all_now})
+    except Exception:
+        pass
+
     recovered: set = set()   # (symbol, strat_name) — magic alapján stratégiához kötve
     for _m, _st in magic_to_strat.items():
-        for _p in get_open_positions(_m):
+        for _p in get_open_positions(_m, _st.name):
             slot_mgr.add(_p.ticket)
             if _p.sl and _p.sl != 0.0:
                 if _p.type == mt5.ORDER_TYPE_BUY and _p.sl >= _p.price_open:
@@ -1758,6 +1800,8 @@ def run(cfg: dict, slot_mgr: SlotManager):
         log.info("Induláskor %d nyitott pozíció helyreállítva (%d kockázatmentes).",
                  len(slot_mgr.all_tickets()), rf)
 
+    _adopt_warned: set = set()   # (symbol, strat) — a „nincs params" figyelmeztetés egyszer
+
     log.info("Élő kereskedés indul | %d LIVE pár (%d stratégia-állapot)",
              len({_s for (_s, _n) in pair_states}), len(pair_states))
 
@@ -1776,6 +1820,39 @@ def run(cfg: dict, slot_mgr: SlotManager):
                 _pos_by_sym = mt5_connector.open_positions_by_symbol()
             except Exception:
                 _pos_by_sym = {}
+
+            # ── Örökbefogadott (kézzel nyitott) pozíciók bekapcsolása ────────
+            # A felületen bármikor hozzárendelhető egy kézi pozíció egy stratégiához.
+            # Ilyenkor a párnak feldolgozás alá kell kerülnie, hogy a motor kezelje
+            # (BE, trailing, kockázatcsökkentés, kiszállási jel). Ha a pár ÁLLÓ, a
+            # KIVEZETÉS állapotba tesszük: a pozíciót menedzseljük, de ÚJ belépőt
+            # NEM nyitunk — az örökbefogadás sosem indít el magától kereskedést.
+            for _asym, _aname in adopted.pairs():
+                _apcfg = all_pairs.get(_asym)
+                if not isinstance(_apcfg, dict):
+                    continue
+                if (_asym, _aname) not in pair_states:
+                    try:
+                        _ast = get_strategy_by_name(_aname)
+                    except Exception:
+                        continue
+                    _aprim = strats_by_symbol.get(_asym) or []
+                    _aps = _make_state(_asym, _apcfg, _ast,
+                                       is_display=(bool(_aprim)
+                                                   and _aprim[0].name == _aname))
+                    if _aps is None:
+                        # Csak EGYSZER naplózzuk (a ciklus 10 mp-enként fut)
+                        if (_asym, _aname) not in _adopt_warned:
+                            _adopt_warned.add((_asym, _aname))
+                            log.warning("%s/%s — örökbefogadott pozíció, de nincs "
+                                        "params! A motor nem tudja kezelni.",
+                                        _asym, _aname)
+                        continue
+                    pair_states[(_asym, _aname)] = _aps
+                if instrument_state.get(_asym, "STOPPED") == "STOPPED":
+                    instrument_state[_asym] = "CLOSING"
+                    log.info("%s/%s — örökbefogadott pozíció → KIVEZETÉS "
+                             "(kezeljük, de új belépő nem nyílik)", _asym, _aname)
 
             for symbol, pair_cfg in all_pairs.items():
                 state_now = instrument_state.get(symbol, "STOPPED")
