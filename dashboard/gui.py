@@ -1436,12 +1436,11 @@ class PortfolioBacktestTab:
 POSITION_COLUMNS = [
     ("symbol",  "Symbol",     10, "w"),
     ("strategy","Stratégia",   9, "center"),
-    ("exit",    "Kiszállás",  15, "w"),        # a preset szerinti kiszállási terv
+    ("exit",    "Kiszállás",  18, "w"),        # a kiszállási terv: hol tart + mi jön
     ("type",    "Irány",       6, "center"),
     ("volume",  "Lot",         6, "center"),
     ("open",    "Nyitó",      10, "center"),
     ("current", "Akt.",       10, "center"),
-    ("dist",    "Belépő táv",  9, "center"),   # pont a belépőtől (profit-irányban)
     ("sl",      "SL",         10, "center"),
     ("sl_pnl",  "SL P&L",      9, "center"),   # lekötött eredmény, ha az SL bekövetkezik
     ("tp",      "TP",         10, "center"),
@@ -1452,95 +1451,174 @@ POSITION_COLUMNS = [
 ]
 
 
-def _exit_plan(symbol: str, pstate: dict | None) -> dict:
-    """A pozíció KISZÁLLÁSI TERVE a per-pár kockázatcsökkentő preset alapján.
+def _exit_plan(symbol: str, pstate: dict | None, ctx: dict | None = None) -> dict:
+    """A pozíció KISZÁLLÁSI TERVE — HOL TART most és MI TÖRTÉNIK a következő
+    triggernél (mennyit zár, mivel megy tovább).
 
-    A pozíció sorsát a `rr_state` preset dönti el (nem a Pozíciók fül gombjai) —
-    ez a helper egy helyen fejti meg, MI történik: a kiszállás-oszlop szövege/színe
-    ÉS a Trail gomb valódi állapota is ebből jön (hogy a kettő sose mondjon mást,
-    mint a motor). Visszaad:
-      text/color : a Kiszállás-cella;
-      trails      : trailel-e EGYÁLTALÁN ezzel a beállítással (a motor
-                    `_do_trailing` feltételének kijelzés-oldali mása);
-      note        : a preset rövid magyarázata (a Trail-tooltiphez)."""
+    A pozíció sorsát a `rr_state` preset dönti el (nem a Pozíciók fül gombjai). Ez
+    a helper egy helyen fejti meg az egészet, így a Kiszállás-oszlop szövege, a
+    Trail gomb állapota és a részletes tooltip mind ugyanabból a forrásból jön.
+
+    ctx (opcionális, a soron kiszámolt számok — enélkül csak a preset-terv, „hol
+    tart" nélkül):  cur_r, risk_price, risk_usd, entry, cur, tp, dir_s, be_pct.
+
+    Visszaad:
+      text/color : a Kiszállás-cella (rövid: fázis + következő lépés);
+      trails     : trailel-e a preset (a motor `_do_trailing`-jének kijelzés-mása);
+      tooltip    : a teljes életciklus (trigger, hány %-ot zár, mivel megy tovább,
+                   most hol tart)."""
     from core import rr_state as _rrs
     from core import risk_reduction as _rrx
 
     try:
-        preset = _rrs.effective_preset(symbol)
-        runner = (pstate or {}).get("runner_mode") or _rrs.get_runner(symbol)
-        cost_cut  = _rrs.get_cost_cut(symbol)
-        cc_bars   = _rrs.get_cost_cut_bars(symbol)
-        exind     = (_rrs.get_exit_config(symbol) or {}).get("indicator", "supertrend")
+        preset  = _rrs.effective_preset(symbol)
+        runner  = (pstate or {}).get("runner_mode") or _rrs.get_runner(symbol)
+        cost_cut = _rrs.get_cost_cut(symbol)
+        cc_bars  = _rrs.get_cost_cut_bars(symbol)
+        spec     = _rrs.spec_for(symbol)
+        exind    = (spec.get("exit") or {}).get("indicator", "supertrend")
     except Exception:
-        preset, runner, cost_cut, cc_bars, exind = "off", "trailing", False, 12, "supertrend"
+        preset, runner, cost_cut, cc_bars = "off", "trailing", False, 12
+        spec, exind = {}, "supertrend"
 
-    _RUNSHORT = {_rrx.RUNNER_TRAILING: "Trail", _rrx.RUNNER_KEEP: "Marad",
-                 _rrx.RUNNER_BREAKEVEN: "BE", _rrx.RUNNER_EXIT: "Jel"}
-    _INDSHORT = {"supertrend": "ST", "wpr": "WPR", "divergence": "Div"}
+    ps = pstate or {}
+    ctx = ctx or {}
+    cur_r   = ctx.get("cur_r")
+    risk    = ctx.get("risk_price") or 0.0
+    risk_usd = ctx.get("risk_usd")
+    entry   = ctx.get("entry"); cur = ctx.get("cur"); tp = ctx.get("tp")
+    dir_s   = ctx.get("dir_s", 1)
+    be_pct  = ctx.get("be_pct", 0.5)
 
-    # Pajzs↔Fibo: a hatásos ág pozíciónként dől el (a motor a pstate-be cache-eli)
-    eff = preset
-    undecided_sf = False
+    _IND = {"supertrend": "ST", "wpr": "WPR", "divergence": "Div"}
+    _RUNNER_DESC = {
+        _rrx.RUNNER_TRAILING: "a maradék trailinggel fut",
+        _rrx.RUNNER_KEEP:     "a stop a távoli (eredeti) helyén marad",
+        _rrx.RUNNER_BREAKEVEN: "a stop a belépőre (BE) kerül",
+        _rrx.RUNNER_EXIT:     f"kiszállási jelre zár ({_IND.get(exind, exind)})",
+    }
+    _RUNSH = {_rrx.RUNNER_TRAILING: "Trail", _rrx.RUNNER_KEEP: "Marad",
+              _rrx.RUNNER_BREAKEVEN: "BE",
+              _rrx.RUNNER_EXIT: f"Jel({_IND.get(exind, exind)})"}
+    runsh    = _RUNSH.get(runner, runner)
+    run_desc = _RUNNER_DESC.get(runner, runner)
+
+    def r_to(target):
+        """Hány R kell még, hogy az ár elérje a `target` árszintet (profit-irány)."""
+        if not target or risk <= 0 or cur is None:
+            return None
+        return (target - cur) / risk * dir_s
+
+    def usd(frac):
+        """A pozíció `frac` részének realizált $-a a triggernél (≈ frac × 1R $)."""
+        return (frac * risk_usd) if risk_usd else None
+
+    def prog(rem):
+        return (f" Most {cur_r:+.2f}R, a triggerig +{rem:.2f}R."
+                if (cur_r is not None and rem is not None and rem > 0) else
+                (f" Most {cur_r:+.2f}R." if cur_r is not None else ""))
+
+    # Pajzs↔Fibo: a hatásos ág pozíciónként dől el (a motor pstate-be cache-eli)
+    eff, undecided_sf = preset, False
     if preset == _rrx.PRESET_SHIELD_FIBO:
-        _m = (pstate or {}).get("sf_mode")
+        _m = ps.get("sf_mode")
         if _m in (_rrx.PRESET_SHIELD, _rrx.PRESET_FIBO):
             eff = _m
         else:
             undecided_sf = True
-
-    is_fibo    = eff == _rrx.PRESET_FIBO
-    is_thirds  = eff == _rrx.PRESET_THIRDS
+    is_fibo   = eff == _rrx.PRESET_FIBO
+    is_thirds = eff == _rrx.PRESET_THIRDS
     is_partial = eff in (_rrx.PRESET_HALVING, _rrx.PRESET_SHIELD)
 
-    # Trailel-e? — a motor `_do_trailing`-jével azonos feltétel (a is_rf/enabled
-    # kaput a hívó adja hozzá; itt a PRESET-függő rész van).
+    # Trailel-e a preset? (a is_rf/enabled kaput a hívó adja hozzá)
     if undecided_sf:
-        # Még nem dőlt el: ha Fibo lesz, nem trailel — óvatosan „függő"-ként kezeljük
         trails = (runner == _rrx.RUNNER_TRAILING)
     else:
         trails = (not is_fibo) and (not is_thirds) and \
                  (not is_partial or runner == _rrx.RUNNER_TRAILING)
 
-    # ── Szöveg + szín + magyarázat ────────────────────────────────────────
-    runsh = _RUNSHORT.get(runner, runner)
-    if runner == _rrx.RUNNER_EXIT:
-        runsh = f"Jel({_INDSHORT.get(exind, exind)})"
+    reduced   = bool(ps.get("rr_reduced"))
+    be_done   = bool(ps.get("be_done"))
 
-    if preset == _rrx.PRESET_OFF:
-        text, color = "BE→Trail", FG_GRAY
-        note = "Ki: költség-tudatos breakeven (a TP-táv részénél), utána trailing, a TP-ig."
-    elif preset == _rrx.PRESET_RISKY:
-        text, color = "Risky→Trail", FG_ORANGE
-        note = "Risky: felezett méret, azonnali BE 1R-nél, azonnali (feleződő) trailing."
-    elif preset == _rrx.PRESET_HALVING:
-        text, color = f"Felező→{runsh}", (FG_TEAL if runner == _rrx.RUNNER_EXIT else FG_CYAN)
-        note = f"Felező: 1R-nél 50% zár, a maradék (runner) = {_rrs.RUNNER_NAME.get(runner, runner)}."
-    elif preset == _rrx.PRESET_SHIELD:
-        text, color = f"Pajzs→{runsh}", (FG_TEAL if runner == _rrx.RUNNER_EXIT else FG_CYAN)
-        note = f"Pajzs: 1R-nél 75% zár, a maradék (runner) = {_rrs.RUNNER_NAME.get(runner, runner)}."
-    elif preset == _rrx.PRESET_FIBO:
-        _lvl = int(round(_rrs.spec_for(symbol).get("fibo_level", 0.618) * 100))
-        text, color = f"Fibo {_lvl}%", FG_PURPLE
-        note = (f"Fibo: a belépő→TP táv {_lvl}%-ánál a stop a megadott szintre áll és "
-                f"OTT MARAD — nincs részleges zárás, NINCS trailing; a TP fut.")
-    elif preset == _rrx.PRESET_THIRDS:
-        text, color = "Harmados ⅓⅔", FG_PURPLE
-        note = ("Harmados: az alap-táv (1R) megtételekor a stop az 1/3-ra, célárnál a "
-                "2/3-ra — stop-létra, NINCS trailing.")
-    elif preset == _rrx.PRESET_SHIELD_FIBO:
-        text, color = "Pajzs↔Fibo", FG_CYAN
-        note = ("Pajzs↔Fibo: belépéskor dől el — nagy mozgásnál Fibo (nem trailel), "
-                "különben Pajzs.")
+    # ── Fázis-tudatos szöveg + tooltip presetenként ─────────────────────────
+    if eff == _rrx.PRESET_OFF:
+        color = FG_GRAY
+        be_price = (entry + be_pct * (tp - entry)) if (entry and tp) else None
+        if not be_done:
+            rem = r_to(be_price)
+            text = "Ki →BE"
+            tip = (f"Ki (alap kezelés): amikor az ár a belépő→TP táv {be_pct*100:.0f}%-át "
+                   f"megteszi, a stop a költség-tudatos breakevenre kerül, utána a "
+                   f"trailing követi az árat a TP-ig." + prog(rem))
+        else:
+            text = "Ki: Trail fut"
+            tip = "A BE megvolt — a trailing követi az árat a TP-ig."
+    elif eff == _rrx.PRESET_RISKY:
+        color = FG_ORANGE
+        rem = (1.0 - cur_r) if cur_r is not None else None
+        if not be_done:
+            text = "Risky →1R"
+            tip = ("Risky: felezett belépő-méret; 1R-nél a stop a belépőre, és azonnal "
+                   "(feleződő) trailing indul." + prog(rem))
+        else:
+            text = "Risky: Trail fut"
+            tip = "1R megvolt — a stop a belépőn, a trailing követi az árat."
+    elif is_partial:
+        frac = 0.75 if eff == _rrx.PRESET_SHIELD else 0.5
+        pname = "Pajzs" if eff == _rrx.PRESET_SHIELD else "Felező"
+        color = FG_TEAL if runner == _rrx.RUNNER_EXIT else FG_CYAN
+        if not reduced:
+            rem = (1.0 - cur_r) if cur_r is not None else None
+            text = f"{pname} →1R {frac*100:.0f}%"
+            _u = usd(frac)
+            _ur = f" (≈{_u:.0f}$ realizál)" if _u is not None else ""
+            tip = (f"{pname}: 1R-nél a pozíció {frac*100:.0f}%-át lezárja{_ur}, a maradék "
+                   f"{(1-frac)*100:.0f}% a runner szerint fut: {run_desc}." + prog(rem))
+        else:
+            text = f"{pname}✓ →{runsh}"
+            tip = (f"A részleges zárás ({frac*100:.0f}%) megtörtént — a maradék a runner "
+                   f"({_rrs.RUNNER_NAME.get(runner, runner)}) szerint fut: {run_desc}.")
+    elif is_fibo:
+        color = FG_PURPLE
+        lvl = spec.get("fibo_level", 0.618)
+        stop_lvl = spec.get("fibo_stop_level", 0.0)
+        stop_desc = "BE" if abs(stop_lvl) < 1e-9 else f"{stop_lvl*100:.0f}%"
+        trig_price = (entry + lvl * (tp - entry)) if (entry and tp) else None
+        if not ps.get("rr_fibo_done"):
+            rem = r_to(trig_price)
+            text = f"Fibo →{lvl*100:.0f}% ⇒{stop_desc}"
+            tip = (f"Fibo: amikor az ár a belépő→TP táv {lvl*100:.0f}%-át megteszi, a stop a "
+                   f"{stop_desc} szintre áll és OTT MARAD — nincs részleges zárás, nincs "
+                   f"trailing; a TP fut." + prog(rem))
+        else:
+            text = "Fibo ✓ · TP fut"
+            tip = "A Fibo-stop beállt (rögzítve) — a TP fut."
+    elif is_thirds:
+        color = FG_PURPLE
+        if not ps.get("rr_thirds1"):
+            rem = (1.0 - cur_r) if cur_r is not None else None
+            text = "Harmados →1R ⅓"
+            tip = ("Harmados: 1R-nél a stop az alap-táv 1/3-ára (profitban); a célárnál a "
+                   "2/3-ra lép. Nincs részleges zárás, nincs trailing." + prog(rem))
+        elif not ps.get("rr_thirds2"):
+            text = "Harmados ⅓ →TP ⅔"
+            tip = "Az 1/3-stop beállt — a célár érintésekor a stop a 2/3-ra lép."
+        else:
+            text = "Harmados ⅔ · TP fut"
+            tip = "A 2/3-stop beállt — a TP fut."
+    elif undecided_sf:
+        color = FG_CYAN
+        text = "Pajzs↔Fibo ?"
+        tip = ("Pajzs↔Fibo: belépéskor dől el — nagy mozgásnál (ATR) Fibo (nem trailel), "
+               "különben Pajzs (1R-nél 75% zár).")
     else:
-        text, color = preset, FG_GRAY
-        note = ""
+        color, text, tip = FG_GRAY, str(preset), ""
 
     if cost_cut:
-        text += f" +CC{cc_bars}"
-        note += (f"  Cost-cut: {cc_bars} fő-gyertya után veszteségben piaci zárás.")
+        text += " +CC"
+        tip += f"  Cost-cut: {cc_bars} fő-gyertya után, ha még veszteséges, piaci zárás."
 
-    return {"text": text, "color": color, "trails": trails, "note": note}
+    return {"text": text, "color": color, "trails": trails, "tooltip": tip}
 
 
 class PositionRow:
@@ -1576,9 +1654,12 @@ class PositionRow:
                 "<Button-1>",
                 lambda e: self._symbol and on_strategy_click(
                     self.ticket, self._symbol, e.widget))
-        # Kiszállás-cella: KATTINTHATÓ — a per-instrumentum kockázatcsökkentő preset
-        # (és runner / cost-cut) itt a soron állítható; a menü kiírja, hogy MINDEN
-        # pozíciójára hat, nem csak erre.
+        # Kiszállás-cella: KATTINTHATÓ (a preset állítása) + HOVER-tooltip (a teljes
+        # életciklus: trigger, hány %-ot zár, mivel megy tovább, most hol tart).
+        self._exit_tip_text = ""
+        self._exit_tip = None
+        self.labels["exit"].bind("<Enter>", self._exit_tip_show)
+        self.labels["exit"].bind("<Leave>", self._exit_tip_hide)
         if on_exit_click is not None:
             self.labels["exit"].config(cursor="hand2")
             self.labels["exit"].bind(
@@ -1718,8 +1799,32 @@ class PositionRow:
                 pass
             self._trail_tip = None
 
+    def _exit_tip_show(self, _event=None):
+        text = (self._exit_tip_text or "").strip()
+        if not text or self._exit_tip is not None:
+            return
+        w = self.labels["exit"]
+        tip = tk.Toplevel(w)
+        tip.wm_overrideredirect(True)
+        tip.attributes("-topmost", True)
+        x = w.winfo_rootx()
+        y = w.winfo_rooty() + w.winfo_height() + 2
+        tk.Label(tip, text=text, bg=TOOLTIP_BG, fg=TOOLTIP_FG, font=self._small,
+                 padx=6, pady=3, relief="solid", bd=1, justify="left",
+                 wraplength=420).pack()
+        tip.wm_geometry(f"+{x}+{y}")
+        self._exit_tip = tip
+
+    def _exit_tip_hide(self, _event=None):
+        if self._exit_tip is not None:
+            try:
+                self._exit_tip.destroy()
+            except Exception:
+                pass
+            self._exit_tip = None
+
     def update(self, pos, pstate, digits, trail_default=None, point=None,
-               strategy_name="—", adopted=False):
+               strategy_name="—", adopted=False, params=None):
         self._symbol = pos["symbol"]
         self.labels["symbol"].config(text=pos["symbol"])
         # Örökbefogadott (kézzel nyitott, utólag hozzárendelt) pozíció: „⇩" jelöli
@@ -1727,11 +1832,6 @@ class PositionRow:
         self.labels["strategy"].config(
             text=(f"⇩{strategy_name}" if adopted else (strategy_name or "—")),
             fg=FG_CYAN if adopted else FG_GRAY)
-
-        # ── Kiszállási terv (a preset szerint) — a cella szövege/színe ÉS a Trail
-        #    gomb valódi állapota is ebből jön (egy forrás, sose mondanak mást).
-        plan = _exit_plan(pos["symbol"], pstate)
-        self.labels["exit"].config(text=plan["text"], fg=plan["color"])
 
         t = pos["type"]
         self.labels["type"].config(text=t, fg=FG_GREEN if t == "BUY" else FG_RED)
@@ -1744,14 +1844,6 @@ class PositionRow:
         sl_lvl  = pos["sl"]
         profit  = pos["profit"]
         dir_s   = 1 if t == "BUY" else -1   # a profit iránya
-
-        # Belépő táv PONTBAN, a profit irányában előjelezve (+ = javamra mozdult)
-        if point and point > 0:
-            dist_pts = int(round((cur - entry) / point * dir_s))
-            self.labels["dist"].config(text=f"{dist_pts:+d}",
-                                       fg=FG_GREEN if dist_pts >= 0 else FG_RED)
-        else:
-            self.labels["dist"].config(text="—", fg=FG_GRAY)
 
         # P&L, ha az AKTUÁLIS SL bekövetkezik. A profit lineáris az árban, így a
         # jelenlegi lebegő P&L-ből arányosítható: pnl_sl = P&L × (SL−entry)/(ár−entry).
@@ -1803,12 +1895,24 @@ class PositionRow:
         # állás = (ár − belépő)/R a profit irányában. Egy mércén látod, „hány R-nél"
         # tartasz (a kockázatcsökkentés is 1R-nél lép). — üres, ha nincs eredeti SL.
         r_price = abs(entry - orig) if orig else 0.0
+        cur_r = None
         if r_price > (point or 1e-9):
-            r_mult = (cur - entry) / r_price * dir_s
-            self.labels["r_mult"].config(text=f"{r_mult:+.2f}R",
-                                         fg=FG_GREEN if r_mult >= 0 else FG_RED)
+            cur_r = (cur - entry) / r_price * dir_s
+            self.labels["r_mult"].config(text=f"{cur_r:+.2f}R",
+                                         fg=FG_GREEN if cur_r >= 0 else FG_RED)
         else:
             self.labels["r_mult"].config(text="—", fg=FG_GRAY)
+
+        # ── Kiszállási terv: HOL TART + MI JÖN (mennyit zár, mivel megy tovább) ──
+        # Egy forrás hajtja a Kiszállás-cellát, a Trail gomb állapotát ÉS a
+        # részletes tooltipet — így sose mondanak mást, mint a motor.
+        _risk_usd = abs(profit / cur_r) if (cur_r not in (None, 0)) else None
+        _ctx = {"cur_r": cur_r, "risk_price": _risk_price, "risk_usd": _risk_usd,
+                "entry": entry, "cur": cur, "tp": tp, "dir_s": dir_s,
+                "be_pct": (params or {}).get("breakeven_pct", 0.5)}
+        plan = _exit_plan(pos["symbol"], pstate, _ctx)
+        self.labels["exit"].config(text=plan["text"], fg=plan["color"])
+        self._exit_tip_text = plan["tooltip"]
 
         # Gombok állapota (aktív-e?). A kézi BE csak akkor engedélyezett, ha a
         # költség-tudatos BE MOST mozgatható (a profit fedezi a spread+jutalék+swap
@@ -1872,7 +1976,8 @@ class PositionRow:
         # Trail gomb — a MOTOR valódi feltételét tükrözi (nem csak a be_done-t):
         #   • KI (lapos, szürke):        kézzel kikapcsoltad (trailing_enabled=False)
         #   • NEM TRAILEL (lapos, lila): a preset szerint a stop a kijelölt szinten
-        #     marad (Fibo/Harmados, vagy Felező/Pajzs runner≠Trailing) → „Trail ✗"
+        #     marad (Fibo/Harmados, vagy Felező/Pajzs runner≠Trailing) — a szín (lila)
+        #     jelzi (a legenda magyarázza), a szöveg marad „Trail", hogy ne vágódjon le
         #   • VÁR (benyomott, narancs):  trailelne, de még nem kockázatmentes (1R/BE
         #     előtt) → még nem húz
         #   • HÚZ (benyomott, zöld):     kockázatmentes ÉS a preset trailel → húz
@@ -1887,7 +1992,7 @@ class PositionRow:
             _trail_state = ("Kikapcsolva (a Trail gombbal visszakapcsolható). "
                             "A stop ott marad, ahol most van.")
         elif not plan["trails"]:
-            self.btn_trail.config(text="Trail ✗", relief="flat",
+            self.btn_trail.config(text="Trail", relief="flat",
                                   bg=BTN_DIS_BG, fg=FG_PURPLE)
             _trail_state = ("Ennél a beállításnál NINCS trailing — a stop a kijelölt "
                             "szinten marad (Fibo/Harmados, vagy a runner nem Trailing).")
@@ -1934,7 +2039,7 @@ class PositionRow:
             _tip += f"  ({_rr_txt.strip()})"
         _tip += (".\nAkkor húz, ha a pozíció kockázatmentes ÉS az ár tovább mozdul a "
                  "javadra; a bróker minimum stop-távolságánál közelebb nem tud húzni.\n"
-                 f"Most: {_trail_state}\nKiszállás: {plan['note']}")
+                 f"Most: {_trail_state}\nKiszállás: {plan['tooltip']}")
         self._trail_tip_text = _tip
 
 
@@ -1944,7 +2049,8 @@ class PositionsTab:
                  on_be, on_trail, on_panic, on_close_all,
                  on_name_click, on_trail_dist, trail_default_provider,
                  point_provider, strategy_provider=None, on_build=None,
-                 on_build_mode=None, on_strategy_click=None, on_exit_click=None):
+                 on_build_mode=None, on_strategy_click=None, on_exit_click=None,
+                 params_provider=None):
         self.parent = parent
         self.cfg = cfg
         self._mono, self._small, self._header = mono_font, small_font, header_font
@@ -1960,6 +2066,7 @@ class PositionsTab:
         self._on_build_mode = on_build_mode
         self._on_strategy_click = on_strategy_click
         self._on_exit_click = on_exit_click
+        self._params_provider = params_provider
         self._trail_default_provider = trail_default_provider
         self._point_provider = point_provider
         self._rows: dict[int, PositionRow] = {}
@@ -1993,11 +2100,11 @@ class PositionsTab:
                               "eredmény, ha az SL / a TP bekövetkezik   |   a Trail-mező "
                               "melletti ≈R/$ = a követési táv a kockázathoz mérve",
                  bg=BG, fg=FG_GRAY, font=self._small).pack(side="left")
-        tk.Label(p, text="Kiszállás = a kockázatcsökkentő preset szerinti terv (Ki→BE, "
-                         "Felező/Pajzs→runner, Fibo, Harmados, +CC=cost-cut) — a CELLÁRA "
-                         "KATTINTVA állítható (a pár minden pozíciójára).  ·  A Stratégia "
-                         "cellára kattintva egy KÉZZEL nyitott pozíció stratégiához "
-                         "rendelhető (⇩).",
+        tk.Label(p, text="Kiszállás = hol tart a terv és mi jön (pl. „Pajzs →1R 75%" +
+                         "” = 1R-nél 75% zár).  A cellára ÁLLVA a teljes életciklus "
+                         "(mennyit zár, mivel megy tovább, most hol tart); a cellára "
+                         "KATTINTVA a preset állítható (a pár minden pozíciójára).  ·  A "
+                         "Stratégia cellára kattintva kézi pozíció stratégiához rendelhető (⇩).",
                  bg=BG, fg=FG_GRAY_DIM, font=self._small, anchor="w",
                  justify="left").pack(fill="x", padx=10, pady=(0, 4))
 
@@ -2034,10 +2141,13 @@ class PositionsTab:
             point     = self._point_provider(pos["symbol"])
             strat     = (self._strategy_provider(pos.get("magic"), tid)
                          if self._strategy_provider else "—")
+            params    = (self._params_provider(pos["symbol"])
+                         if self._params_provider else None)
             row.update(pos, self._pos_state.get(tid),
                        self._digits_provider(pos["symbol"]), trail_def, point,
                        strategy_name=strat,
-                       adopted=_adopted.is_open_adopted(tid))
+                       adopted=_adopted.is_open_adopted(tid),
+                       params=params)
 
         for tid in list(self._rows):
             if tid not in seen:
@@ -2364,7 +2474,8 @@ class DashboardWindow:
             on_build=self._pos_build,
             on_build_mode=self._pos_build_mode,
             on_strategy_click=self._pos_strategy_menu,
-            on_exit_click=self._pos_exit_menu)
+            on_exit_click=self._pos_exit_menu,
+            params_provider=self._pos_params)
 
         closed_frame = tk.Frame(self._notebook, bg=BG)
         self._notebook.add(closed_frame, text="  Lezárt (ma)  ")
@@ -3991,20 +4102,26 @@ class DashboardWindow:
         st = position_state.setdefault(ticket, dict(self._DEFAULT_PSTATE))
         st["trail_points"] = points
 
-    def _trail_default(self, symbol: str) -> Optional[int]:
-        """Egy szimbólum optimalizált trail-távolsága PONTBAN (a Pozíciók fül
-        mezőjéhez). A paraméter pipben van tárolva → pont = pip × pip_size / point.
-        Ha a 'point' még nem ismert (MT5 adat nélkül), None-t ad."""
+    def _pos_params(self, symbol: str) -> dict:
+        """Egy szimbólum optimalizált paraméterei (a Pozíciók fül kiszállás-
+        progressziójához, pl. breakeven_pct). A tickethez rendelt stratégia
+        (örökbefogadás) paramétereit preferálja, különben az elsődlegesét. Rövid
+        életű, olcsó JSON-olvasás; ha nincs fájl, üres dict."""
         from core.params_store import params_file
-        pips = None
         pf = params_file(symbol)
         if pf.exists():
             try:
                 with open(pf, encoding="utf-8") as f:
-                    params = json.load(f).get("params", {})
-                pips = params.get("trail_distance_pips")
+                    return json.load(f).get("params", {}) or {}
             except Exception:
                 pass
+        return {}
+
+    def _trail_default(self, symbol: str) -> Optional[int]:
+        """Egy szimbólum optimalizált trail-távolsága PONTBAN (a Pozíciók fül
+        mezőjéhez). A paraméter pipben van tárolva → pont = pip × pip_size / point.
+        Ha a 'point' még nem ismert (MT5 adat nélkül), None-t ad."""
+        pips = self._pos_params(symbol).get("trail_distance_pips")
         if pips is None:
             pips = self.cfg.get("position_mgmt", {}).get("trail_distance_pips")
         if pips is None:
