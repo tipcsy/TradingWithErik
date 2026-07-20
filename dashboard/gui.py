@@ -1436,6 +1436,7 @@ class PortfolioBacktestTab:
 POSITION_COLUMNS = [
     ("symbol",  "Symbol",     10, "w"),
     ("strategy","Stratégia",   9, "center"),
+    ("exit",    "Kiszállás",  15, "w"),        # a preset szerinti kiszállási terv
     ("type",    "Irány",       6, "center"),
     ("volume",  "Lot",         6, "center"),
     ("open",    "Nyitó",      10, "center"),
@@ -1444,10 +1445,102 @@ POSITION_COLUMNS = [
     ("sl",      "SL",         10, "center"),
     ("sl_pnl",  "SL P&L",      9, "center"),   # lekötött eredmény, ha az SL bekövetkezik
     ("tp",      "TP",         10, "center"),
+    ("tp_pnl",  "TP cél",     12, "center"),   # a TP-nél várható eredmény: R + $
     ("orig_sl", "Er. SL",     10, "center"),
     ("pnl",     "P&L",         9, "center"),
     ("r_mult",  "R",           6, "center"),   # folyó R-szorzó: (ár−belépő)/|belépő−er.SL|
 ]
+
+
+def _exit_plan(symbol: str, pstate: dict | None) -> dict:
+    """A pozíció KISZÁLLÁSI TERVE a per-pár kockázatcsökkentő preset alapján.
+
+    A pozíció sorsát a `rr_state` preset dönti el (nem a Pozíciók fül gombjai) —
+    ez a helper egy helyen fejti meg, MI történik: a kiszállás-oszlop szövege/színe
+    ÉS a Trail gomb valódi állapota is ebből jön (hogy a kettő sose mondjon mást,
+    mint a motor). Visszaad:
+      text/color : a Kiszállás-cella;
+      trails      : trailel-e EGYÁLTALÁN ezzel a beállítással (a motor
+                    `_do_trailing` feltételének kijelzés-oldali mása);
+      note        : a preset rövid magyarázata (a Trail-tooltiphez)."""
+    from core import rr_state as _rrs
+    from core import risk_reduction as _rrx
+
+    try:
+        preset = _rrs.effective_preset(symbol)
+        runner = (pstate or {}).get("runner_mode") or _rrs.get_runner(symbol)
+        cost_cut  = _rrs.get_cost_cut(symbol)
+        cc_bars   = _rrs.get_cost_cut_bars(symbol)
+        exind     = (_rrs.get_exit_config(symbol) or {}).get("indicator", "supertrend")
+    except Exception:
+        preset, runner, cost_cut, cc_bars, exind = "off", "trailing", False, 12, "supertrend"
+
+    _RUNSHORT = {_rrx.RUNNER_TRAILING: "Trail", _rrx.RUNNER_KEEP: "Marad",
+                 _rrx.RUNNER_BREAKEVEN: "BE", _rrx.RUNNER_EXIT: "Jel"}
+    _INDSHORT = {"supertrend": "ST", "wpr": "WPR", "divergence": "Div"}
+
+    # Pajzs↔Fibo: a hatásos ág pozíciónként dől el (a motor a pstate-be cache-eli)
+    eff = preset
+    undecided_sf = False
+    if preset == _rrx.PRESET_SHIELD_FIBO:
+        _m = (pstate or {}).get("sf_mode")
+        if _m in (_rrx.PRESET_SHIELD, _rrx.PRESET_FIBO):
+            eff = _m
+        else:
+            undecided_sf = True
+
+    is_fibo    = eff == _rrx.PRESET_FIBO
+    is_thirds  = eff == _rrx.PRESET_THIRDS
+    is_partial = eff in (_rrx.PRESET_HALVING, _rrx.PRESET_SHIELD)
+
+    # Trailel-e? — a motor `_do_trailing`-jével azonos feltétel (a is_rf/enabled
+    # kaput a hívó adja hozzá; itt a PRESET-függő rész van).
+    if undecided_sf:
+        # Még nem dőlt el: ha Fibo lesz, nem trailel — óvatosan „függő"-ként kezeljük
+        trails = (runner == _rrx.RUNNER_TRAILING)
+    else:
+        trails = (not is_fibo) and (not is_thirds) and \
+                 (not is_partial or runner == _rrx.RUNNER_TRAILING)
+
+    # ── Szöveg + szín + magyarázat ────────────────────────────────────────
+    runsh = _RUNSHORT.get(runner, runner)
+    if runner == _rrx.RUNNER_EXIT:
+        runsh = f"Jel({_INDSHORT.get(exind, exind)})"
+
+    if preset == _rrx.PRESET_OFF:
+        text, color = "BE→Trail", FG_GRAY
+        note = "Ki: költség-tudatos breakeven (a TP-táv részénél), utána trailing, a TP-ig."
+    elif preset == _rrx.PRESET_RISKY:
+        text, color = "Risky→Trail", FG_ORANGE
+        note = "Risky: felezett méret, azonnali BE 1R-nél, azonnali (feleződő) trailing."
+    elif preset == _rrx.PRESET_HALVING:
+        text, color = f"Felező→{runsh}", (FG_TEAL if runner == _rrx.RUNNER_EXIT else FG_CYAN)
+        note = f"Felező: 1R-nél 50% zár, a maradék (runner) = {_rrs.RUNNER_NAME.get(runner, runner)}."
+    elif preset == _rrx.PRESET_SHIELD:
+        text, color = f"Pajzs→{runsh}", (FG_TEAL if runner == _rrx.RUNNER_EXIT else FG_CYAN)
+        note = f"Pajzs: 1R-nél 75% zár, a maradék (runner) = {_rrs.RUNNER_NAME.get(runner, runner)}."
+    elif preset == _rrx.PRESET_FIBO:
+        _lvl = int(round(_rrs.spec_for(symbol).get("fibo_level", 0.618) * 100))
+        text, color = f"Fibo {_lvl}%", FG_PURPLE
+        note = (f"Fibo: a belépő→TP táv {_lvl}%-ánál a stop a megadott szintre áll és "
+                f"OTT MARAD — nincs részleges zárás, NINCS trailing; a TP fut.")
+    elif preset == _rrx.PRESET_THIRDS:
+        text, color = "Harmados ⅓⅔", FG_PURPLE
+        note = ("Harmados: az alap-táv (1R) megtételekor a stop az 1/3-ra, célárnál a "
+                "2/3-ra — stop-létra, NINCS trailing.")
+    elif preset == _rrx.PRESET_SHIELD_FIBO:
+        text, color = "Pajzs↔Fibo", FG_CYAN
+        note = ("Pajzs↔Fibo: belépéskor dől el — nagy mozgásnál Fibo (nem trailel), "
+                "különben Pajzs.")
+    else:
+        text, color = preset, FG_GRAY
+        note = ""
+
+    if cost_cut:
+        text += f" +CC{cc_bars}"
+        note += (f"  Cost-cut: {cc_bars} fő-gyertya után veszteségben piaci zárás.")
+
+    return {"text": text, "color": color, "trails": trails, "note": note}
 
 
 class PositionRow:
@@ -1513,7 +1606,12 @@ class PositionRow:
                                    relief="flat", bg=BTN_DIS_BG, fg=FG_GRAY,
                                    command=lambda: on_trail(ticket))
         self.btn_trail.pack(side="left", padx=1)
-        # Trail távolság (pip) — kézzel szerkeszthető; Enter/fókuszvesztés menti
+        # A Trail gomb ÉS a táv-mező közös tooltipje: mikor húz a trailing.
+        self._trail_tip_text = ""
+        self._trail_tip = None
+        self.btn_trail.bind("<Enter>", self._trail_tip_show)
+        self.btn_trail.bind("<Leave>", self._trail_tip_hide)
+        # Trail távolság (pont) — kézzel szerkeszthető; Enter/fókuszvesztés menti
         self._trail_var = tk.StringVar()
         self.ent_trail = tk.Entry(self.frame, textvariable=self._trail_var, width=4,
                                   font=small_font, bg=BG_HEADER, fg=FG_WHITE,
@@ -1522,6 +1620,13 @@ class PositionRow:
         self.ent_trail.pack(side="left", padx=1)
         self.ent_trail.bind("<Return>",   self._apply_trail_dist)
         self.ent_trail.bind("<FocusOut>", self._apply_trail_dist)
+        self.ent_trail.bind("<Enter>", self._trail_tip_show)
+        self.ent_trail.bind("<Leave>", self._trail_tip_hide)
+        # A táv R/$ ekvivalense (a nyers pont-szám önmagában keveset mond)
+        self.lbl_trail_rr = tk.Label(self.frame, text="", bg=BG_ROW_EVEN,
+                                     fg=FG_GRAY_DIM, font=small_font, width=9,
+                                     anchor="w")
+        self.lbl_trail_rr.pack(side="left", padx=(0, 1))
         self.btn_panic = tk.Button(self.frame, text="Zár", width=4, font=small_font,
                                    relief="flat", bg=BTN_STOP_BG, fg=BTN_STOP_FG,
                                    command=lambda: on_panic(ticket))
@@ -1584,6 +1689,29 @@ class PositionRow:
                 pass
             self._build_tip = None
 
+    def _trail_tip_show(self, _event=None):
+        text = (self._trail_tip_text or "").strip()
+        if not text or self._trail_tip is not None:
+            return
+        tip = tk.Toplevel(self.btn_trail)
+        tip.wm_overrideredirect(True)
+        tip.attributes("-topmost", True)
+        x = self.btn_trail.winfo_rootx()
+        y = self.btn_trail.winfo_rooty() + self.btn_trail.winfo_height() + 2
+        tk.Label(tip, text=text, bg=TOOLTIP_BG, fg=TOOLTIP_FG, font=self._small,
+                 padx=6, pady=3, relief="solid", bd=1, justify="left",
+                 wraplength=360).pack()
+        tip.wm_geometry(f"+{x}+{y}")
+        self._trail_tip = tip
+
+    def _trail_tip_hide(self, _event=None):
+        if self._trail_tip is not None:
+            try:
+                self._trail_tip.destroy()
+            except Exception:
+                pass
+            self._trail_tip = None
+
     def update(self, pos, pstate, digits, trail_default=None, point=None,
                strategy_name="—", adopted=False):
         self._symbol = pos["symbol"]
@@ -1593,6 +1721,12 @@ class PositionRow:
         self.labels["strategy"].config(
             text=(f"⇩{strategy_name}" if adopted else (strategy_name or "—")),
             fg=FG_CYAN if adopted else FG_GRAY)
+
+        # ── Kiszállási terv (a preset szerint) — a cella szövege/színe ÉS a Trail
+        #    gomb valódi állapota is ebből jön (egy forrás, sose mondanak mást).
+        plan = _exit_plan(pos["symbol"], pstate)
+        self.labels["exit"].config(text=plan["text"], fg=plan["color"])
+
         t = pos["type"]
         self.labels["type"].config(text=t, fg=FG_GREEN if t == "BUY" else FG_RED)
         self.labels["volume"].config(text=f'{pos["volume"]:.2f}', fg=FG_WHITE)
@@ -1641,6 +1775,19 @@ class PositionRow:
         else:
             self.labels["sl"].config(text="—", fg=FG_WHITE)
         self.labels["tp"].config(text=_fmt_price(tp, digits) if tp else "—", fg=FG_GRAY)
+        # TP cél: mennyit ér a TP R-ben és $-ban. Az R = |TP−belépő| / |belépő−er.SL|
+        # (a kezdeti kockázathoz mérve); a $ ugyanaz a lineáris arányosítás, mint az
+        # SL P&L-nél (profit × (TP−belépő)/(ár−belépő)). Így egy pillantással látod,
+        # megéri-e a TP-ig kivárni. „—", ha nincs TP.
+        _risk_price = abs(entry - orig) if orig else 0.0
+        if tp and abs(cur - entry) > (point or 1e-9):
+            tp_pnl = profit * (tp - entry) / (cur - entry)
+            tp_r   = (abs(tp - entry) / _risk_price) if _risk_price > (point or 1e-9) else None
+            _rtxt  = f"{tp_r:.1f}R " if tp_r is not None else ""
+            self.labels["tp_pnl"].config(text=f"{_rtxt}{tp_pnl:+.0f}$",
+                                         fg=FG_GREEN if tp_pnl >= 0 else FG_RED)
+        else:
+            self.labels["tp_pnl"].config(text="—", fg=FG_GRAY)
         # Eredeti SL: fehér, de ha a trailing már elmozdította → szürke
         self.labels["orig_sl"].config(text=_fmt_price(orig, digits) if orig else "—",
                                       fg=FG_GRAY if moved else FG_WHITE)
@@ -1716,20 +1863,37 @@ class PositionRow:
                                     "kapcsold Kézi vagy Auto módba. Kézinél a +gomb "
                                     "hozzáad még egy pozíciót a jel-gyertyán.")
 
-        # Trail gomb — 3 állapot, "benyomott" (sunken) ha be van kapcsolva:
-        #   • KI:            lapos, szürke
-        #   • BE, de VÁR:    benyomott, NARANCS (nincs még BE/kockázatmentes → nem húz)
-        #   • BE és AKTÍV:   benyomott, ZÖLD (BE megvolt → a trailing húzhat/húz)
+        # Trail gomb — a MOTOR valódi feltételét tükrözi (nem csak a be_done-t):
+        #   • KI (lapos, szürke):        kézzel kikapcsoltad (trailing_enabled=False)
+        #   • NEM TRAILEL (lapos, lila): a preset szerint a stop a kijelölt szinten
+        #     marad (Fibo/Harmados, vagy Felező/Pajzs runner≠Trailing) → „Trail ✗"
+        #   • VÁR (benyomott, narancs):  trailelne, de még nem kockázatmentes (1R/BE
+        #     előtt) → még nem húz
+        #   • HÚZ (benyomott, zöld):     kockázatmentes ÉS a preset trailel → húz
         trail_on = bool(pstate.get("trailing_enabled", True)) if pstate else True
+        # A motor is_rf-jének kijelzés-oldali mása: SL a belépőn túl (ár-igazság),
+        # vagy a motor már BE-kész, vagy volt részleges zárás.
+        rf_now = (bool(pos.get("risk_free")) or be_done
+                  or bool(pstate and pstate.get("rr_reduced")))
         if not trail_on:
             self.btn_trail.config(text="Trail", relief="flat",
                                   bg=BTN_DIS_BG, fg=FG_GRAY)
-        elif be_done:
+            _trail_state = ("Kikapcsolva (a Trail gombbal visszakapcsolható). "
+                            "A stop ott marad, ahol most van.")
+        elif not plan["trails"]:
+            self.btn_trail.config(text="Trail ✗", relief="flat",
+                                  bg=BTN_DIS_BG, fg=FG_PURPLE)
+            _trail_state = ("Ennél a beállításnál NINCS trailing — a stop a kijelölt "
+                            "szinten marad (Fibo/Harmados, vagy a runner nem Trailing).")
+        elif rf_now:
             self.btn_trail.config(text="Trail", relief="sunken",
                                   bg=FG_GREEN, fg=FG_ON_ACCENT)
+            _trail_state = "HÚZ: a pozíció kockázatmentes, a stop követi az árat."
         else:
             self.btn_trail.config(text="Trail", relief="sunken",
                                   bg=FG_ORANGE, fg=FG_ON_ACCENT)
+            _trail_state = ("VÁR: amint a pozíció kockázatmentes lesz (BE megvan / 1R "
+                            "részleges zárás), a trailing elindul.")
 
         # Trail távolság mező — PONTBAN, egész szám. A kézi felülírás, ha van;
         # egyébként az optimalizált alapérték. Gépelés közben NEM írjuk felül.
@@ -1743,6 +1907,30 @@ class PositionRow:
             self._trail_var.set(str(int(eff)) if eff is not None else "")
         # Vizuális jelzés: kézi felülírás = cián, alapérték = halványabb
         self.ent_trail.config(fg=FG_CYAN if override is not None else FG_GRAY)
+
+        # A táv R/$ ekvivalense — a nyers pont-szám (pl. „600") önmagában keveset
+        # mond; itt látod, a kockázat hányad része (R) és kb. hány $ a követési táv.
+        # R = trail_táv / kezdeti kockázat (pontban); $ = R × (a kezdeti kockázat $-a),
+        # ahol a kezdeti kockázat $-a a lebegő P&L-ből arányosítva (mint az SL P&L).
+        _rr_txt = ""
+        if eff and point and point > 0 and _risk_price > (point or 1e-9):
+            _risk_pts = _risk_price / point
+            _r_of_trail = eff / _risk_pts
+            _rr_txt = f"≈{_r_of_trail:.2f}R"
+            if abs(cur - entry) > (point or 1e-9):
+                _risk_usd = abs(profit * (_risk_price) / (cur - entry))
+                _rr_txt += f" / {_r_of_trail * _risk_usd:.0f}$"
+        self.lbl_trail_rr.config(text=_rr_txt)
+
+        # A Trail gomb + táv-mező közös tooltipje: a távolság ÉS mikor húz.
+        _tip = f"Trailing követési távolság: {int(eff)} pont" if eff else \
+               "Trailing követés (nincs beállított távolság)."
+        if _rr_txt:
+            _tip += f"  ({_rr_txt.strip()})"
+        _tip += (".\nAkkor húz, ha a pozíció kockázatmentes ÉS az ár tovább mozdul a "
+                 "javadra; a bróker minimum stop-távolságánál közelebb nem tud húzni.\n"
+                 f"Most: {_trail_state}\nKiszállás: {plan['note']}")
+        self._trail_tip_text = _tip
 
 
 class PositionsTab:
@@ -1791,15 +1979,18 @@ class PositionsTab:
         legend = tk.Frame(p, bg=BG)
         legend.pack(fill="x", padx=10, pady=(0, 4))
         tk.Label(legend, text="Trail:", bg=BG, fg=FG_GRAY, font=self._small).pack(side="left")
-        for txt, col in [("■ aktív", FG_GREEN), ("■ vár (nincs BE)", FG_ORANGE),
+        for txt, col in [("■ húz", FG_GREEN), ("■ vár (kockázatmentesre)", FG_ORANGE),
+                         ("■ nem trailel (Fibo/Harmados…)", FG_PURPLE),
                          ("■ kikapcsolva", FG_GRAY)]:
             tk.Label(legend, text=txt, bg=BG, fg=col, font=self._small, padx=4).pack(side="left")
-        tk.Label(legend, text="   SL ⇘T = trailing mozgatta   |   Belépő táv = pont a belépőtől "
-                              "(+ = javamra)   |   SL P&L = eredmény, ha az SL bekövetkezik",
+        tk.Label(legend, text="   SL ⇘T = trailing mozgatta   |   SL P&L / TP cél = "
+                              "eredmény, ha az SL / a TP bekövetkezik   |   a Trail-mező "
+                              "melletti ≈R/$ = a követési táv a kockázathoz mérve",
                  bg=BG, fg=FG_GRAY, font=self._small).pack(side="left")
-        tk.Label(p, text="A Stratégia cellára kattintva egy KÉZZEL nyitott pozíció "
-                         "stratégiához rendelhető (⇩) — a motor onnantól sajátjaként "
-                         "kezeli: breakeven, trailing, kockázatcsökkentés, kiszállási jel.",
+        tk.Label(p, text="Kiszállás = a kockázatcsökkentő preset szerinti terv (Ki→BE, "
+                         "Felező/Pajzs→runner, Fibo, Harmados, +CC=cost-cut) — a "
+                         "pár-soron állítható a Live fülön.  ·  A Stratégia cellára "
+                         "kattintva egy KÉZZEL nyitott pozíció stratégiához rendelhető (⇩).",
                  bg=BG, fg=FG_GRAY_DIM, font=self._small, anchor="w",
                  justify="left").pack(fill="x", padx=10, pady=(0, 4))
 
