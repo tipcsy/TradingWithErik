@@ -1446,8 +1446,7 @@ POSITION_COLUMNS = [
     ("tp",      "TP",         10, "center"),
     ("tp_pnl",  "TP cél",     12, "center"),   # a TP-nél várható eredmény: R + $
     ("orig_sl", "Er. SL",     10, "center"),
-    ("pnl",     "P&L",         9, "center"),
-    ("r_mult",  "R",           6, "center"),   # folyó R-szorzó: (ár−belépő)/|belépő−er.SL|
+    ("pnl",     "P&L",        13, "center"),   # folyó eredmény: $ + R (egy cellában)
 ]
 
 
@@ -1896,18 +1895,19 @@ class PositionRow:
         # Eredeti SL: fehér, de ha a trailing már elmozdította → szürke
         self.labels["orig_sl"].config(text=_fmt_price(orig, digits) if orig else "—",
                                       fg=FG_GRAY if moved else FG_WHITE)
-        pnl = pos["profit"]
-        self.labels["pnl"].config(text=f"{pnl:+.2f}$", fg=FG_GREEN if pnl >= 0 else FG_RED)
-        # Folyó R-szorzó: a jelen állás = (ár − belépő)/kockázat a profit irányában.
-        # Egy mércén látod, „hány R-nél" tartasz (a kockázatcsökkentés 1R-nél lép). A
+        # Folyó eredmény EGY cellában: $ ELÖL, R HÁTUL — a projekciók (SL P&L / TP cél
+        # = R elöl, $ hátul) FORDÍTOTT párja, hogy minden kimenet mindkét mértékben
+        # látszódjon. A folyó R = (ár − belépő)/kockázat a profit irányában; a
         # kockázat (_risk_price) ugyanaz, amivel az SL P&L / TP cél R-je is számol.
+        pnl = pos["profit"]
         cur_r = None
         if _risk_price > (point or 1e-9):
             cur_r = (cur - entry) / _risk_price * dir_s
-            self.labels["r_mult"].config(text=f"{cur_r:+.2f}R",
-                                         fg=FG_GREEN if cur_r >= 0 else FG_RED)
+            self.labels["pnl"].config(text=f"{pnl:+.2f}$ {cur_r:+.2f}R",
+                                      fg=FG_GREEN if pnl >= 0 else FG_RED)
         else:
-            self.labels["r_mult"].config(text="—", fg=FG_GRAY)
+            self.labels["pnl"].config(text=f"{pnl:+.2f}$",
+                                      fg=FG_GREEN if pnl >= 0 else FG_RED)
 
         # ── Kiszállási terv: HOL TART + MI JÖN (mennyit zár, mivel megy tovább) ──
         # Egy forrás hajtja a Kiszállás-cellát, a Trail gomb állapotát ÉS a
@@ -2103,9 +2103,9 @@ class PositionsTab:
                          ("■ kikapcsolva", FG_GRAY)]:
             tk.Label(legend, text=txt, bg=BG, fg=col, font=self._small, padx=4).pack(side="left")
         tk.Label(legend, text="   SL ⇘T = trailing mozgatta   |   SL P&L / TP cél = "
-                              "R + $, ha az SL / a TP bekövetkezik   |   P&L + R = a "
-                              "folyó eredmény ($ és R)   |   a Trail-tooltip ≈R/$ = "
-                              "a követési táv a kockázathoz mérve",
+                              "R + $, ha az SL / a TP bekövetkezik   |   P&L = a folyó "
+                              "eredmény ($ + R)   |   a Trail-tooltip ≈R/$ = a követési "
+                              "táv a kockázathoz mérve",
                  bg=BG, fg=FG_GRAY, font=self._small).pack(side="left")
         tk.Label(p, text="Kiszállás = hol tart a terv és mi jön (pl. „Pajzs →1R 75%" +
                          "” = 1R-nél 75% zár).  A cellára ÁLLVA a teljes életciklus "
