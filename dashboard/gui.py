@@ -1895,15 +1895,15 @@ class PositionRow:
         # Eredeti SL: fehér, de ha a trailing már elmozdította → szürke
         self.labels["orig_sl"].config(text=_fmt_price(orig, digits) if orig else "—",
                                       fg=FG_GRAY if moved else FG_WHITE)
-        # Folyó eredmény EGY cellában: $ ELÖL, R HÁTUL — a projekciók (SL P&L / TP cél
-        # = R elöl, $ hátul) FORDÍTOTT párja, hogy minden kimenet mindkét mértékben
-        # látszódjon. A folyó R = (ár − belépő)/kockázat a profit irányában; a
-        # kockázat (_risk_price) ugyanaz, amivel az SL P&L / TP cél R-je is számol.
+        # Folyó eredmény EGY cellában: R ELÖL, $ HÁTUL — pontosan úgy, mint az SL P&L
+        # és a TP cél (mindenhol egységes sorrend). A folyó R = (ár − belépő)/kockázat
+        # a profit irányában; a kockázat (_risk_price) ugyanaz, amivel az SL P&L / TP
+        # cél R-je is számol.
         pnl = pos["profit"]
         cur_r = None
         if _risk_price > (point or 1e-9):
             cur_r = (cur - entry) / _risk_price * dir_s
-            self.labels["pnl"].config(text=f"{pnl:+.2f}$ {cur_r:+.2f}R",
+            self.labels["pnl"].config(text=f"{cur_r:+.2f}R {pnl:+.2f}$",
                                       fg=FG_GREEN if pnl >= 0 else FG_RED)
         else:
             self.labels["pnl"].config(text=f"{pnl:+.2f}$",
