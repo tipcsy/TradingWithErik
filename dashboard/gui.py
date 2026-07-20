@@ -1442,7 +1442,7 @@ POSITION_COLUMNS = [
     ("open",    "Nyitó",      10, "center"),
     ("current", "Akt.",       10, "center"),
     ("sl",      "SL",         10, "center"),
-    ("sl_pnl",  "SL P&L",      9, "center"),   # lekötött eredmény, ha az SL bekövetkezik
+    ("sl_pnl",  "SL P&L",     12, "center"),   # ha az SL bekövetkezik: R + $
     ("tp",      "TP",         10, "center"),
     ("tp_pnl",  "TP cél",     12, "center"),   # a TP-nél várható eredmény: R + $
     ("orig_sl", "Er. SL",     10, "center"),
@@ -1845,18 +1845,26 @@ class PositionRow:
         profit  = pos["profit"]
         dir_s   = 1 if t == "BUY" else -1   # a profit iránya
 
-        # P&L, ha az AKTUÁLIS SL bekövetkezik. A profit lineáris az árban, így a
-        # jelenlegi lebegő P&L-ből arányosítható: pnl_sl = P&L × (SL−entry)/(ár−entry).
-        # Ahogy a trailing emeli az SL-t, ez az érték egyre nyereségesebb lesz.
+        sl, tp = pos["sl"], pos["tp"]
+        orig = pstate.get("original_sl", sl) if pstate else sl
+        # A kezdeti kockázat árban (1R): |belépő − EREDETI SL|. Ehhez mérünk minden
+        # R-értéket (SL P&L, TP cél, folyó R) — így egységes az egész sor.
+        _risk_price = abs(entry - orig) if orig else 0.0
+
+        # P&L, ha az AKTUÁLIS SL bekövetkezik — R ÉS $ (mint a TP cél). A profit
+        # lineáris az árban, így a lebegő P&L-ből arányosítható: pnl_sl =
+        # P&L × (SL−entry)/(ár−entry); a lekötött R = (SL−belépő)/kockázat (előjeles:
+        # −1R = teljes veszteség, 0 = BE, + = profitba húzott stop).
         if sl_lvl and abs(cur - entry) > (point or 1e-9):
             sl_pnl = profit * (sl_lvl - entry) / (cur - entry)
-            self.labels["sl_pnl"].config(text=f"{sl_pnl:+.2f}$",
+            sl_r   = ((sl_lvl - entry) / _risk_price * dir_s
+                      if _risk_price > (point or 1e-9) else None)
+            _slr   = f"{sl_r:+.1f}R " if sl_r is not None else ""
+            self.labels["sl_pnl"].config(text=f"{_slr}{sl_pnl:+.0f}$",
                                          fg=FG_GREEN if sl_pnl >= 0 else FG_RED)
         else:
             self.labels["sl_pnl"].config(text="—", fg=FG_GRAY)
 
-        sl, tp = pos["sl"], pos["tp"]
-        orig = pstate.get("original_sl", sl) if pstate else sl
         be_done = bool(pstate and pstate.get("be_done"))
         trail_moved = bool(pstate and pstate.get("trail_moved"))
         moved = bool(sl and orig and abs(sl - orig) > 1e-9)
@@ -1877,7 +1885,6 @@ class PositionRow:
         # (a kezdeti kockázathoz mérve); a $ ugyanaz a lineáris arányosítás, mint az
         # SL P&L-nél (profit × (TP−belépő)/(ár−belépő)). Így egy pillantással látod,
         # megéri-e a TP-ig kivárni. „—", ha nincs TP.
-        _risk_price = abs(entry - orig) if orig else 0.0
         if tp and abs(cur - entry) > (point or 1e-9):
             tp_pnl = profit * (tp - entry) / (cur - entry)
             tp_r   = (abs(tp - entry) / _risk_price) if _risk_price > (point or 1e-9) else None
@@ -1891,13 +1898,12 @@ class PositionRow:
                                       fg=FG_GRAY if moved else FG_WHITE)
         pnl = pos["profit"]
         self.labels["pnl"].config(text=f"{pnl:+.2f}$", fg=FG_GREEN if pnl >= 0 else FG_RED)
-        # Folyó R-szorzó: R = |belépő − EREDETI SL| (a kezdeti kockázat árban); a jelen
-        # állás = (ár − belépő)/R a profit irányában. Egy mércén látod, „hány R-nél"
-        # tartasz (a kockázatcsökkentés is 1R-nél lép). — üres, ha nincs eredeti SL.
-        r_price = abs(entry - orig) if orig else 0.0
+        # Folyó R-szorzó: a jelen állás = (ár − belépő)/kockázat a profit irányában.
+        # Egy mércén látod, „hány R-nél" tartasz (a kockázatcsökkentés 1R-nél lép). A
+        # kockázat (_risk_price) ugyanaz, amivel az SL P&L / TP cél R-je is számol.
         cur_r = None
-        if r_price > (point or 1e-9):
-            cur_r = (cur - entry) / r_price * dir_s
+        if _risk_price > (point or 1e-9):
+            cur_r = (cur - entry) / _risk_price * dir_s
             self.labels["r_mult"].config(text=f"{cur_r:+.2f}R",
                                          fg=FG_GREEN if cur_r >= 0 else FG_RED)
         else:
@@ -2097,8 +2103,9 @@ class PositionsTab:
                          ("■ kikapcsolva", FG_GRAY)]:
             tk.Label(legend, text=txt, bg=BG, fg=col, font=self._small, padx=4).pack(side="left")
         tk.Label(legend, text="   SL ⇘T = trailing mozgatta   |   SL P&L / TP cél = "
-                              "eredmény, ha az SL / a TP bekövetkezik   |   a Trail-mező "
-                              "melletti ≈R/$ = a követési táv a kockázathoz mérve",
+                              "R + $, ha az SL / a TP bekövetkezik   |   P&L + R = a "
+                              "folyó eredmény ($ és R)   |   a Trail-tooltip ≈R/$ = "
+                              "a követési táv a kockázathoz mérve",
                  bg=BG, fg=FG_GRAY, font=self._small).pack(side="left")
         tk.Label(p, text="Kiszállás = hol tart a terv és mi jön (pl. „Pajzs →1R 75%" +
                          "” = 1R-nél 75% zár).  A cellára ÁLLVA a teljes életciklus "
