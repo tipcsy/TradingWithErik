@@ -1546,7 +1546,8 @@ def _exit_plan(symbol: str, pstate: dict | None) -> dict:
 class PositionRow:
     def __init__(self, parent, ticket, mono_font, small_font,
                  on_be, on_trail, on_panic, on_name_click, on_trail_dist,
-                 on_build=None, on_build_mode=None, on_strategy_click=None):
+                 on_build=None, on_build_mode=None, on_strategy_click=None,
+                 on_exit_click=None):
         self.ticket = ticket
         self._small = small_font
         self._symbol = None
@@ -1575,6 +1576,14 @@ class PositionRow:
                 "<Button-1>",
                 lambda e: self._symbol and on_strategy_click(
                     self.ticket, self._symbol, e.widget))
+        # Kiszállás-cella: KATTINTHATÓ — a per-instrumentum kockázatcsökkentő preset
+        # (és runner / cost-cut) itt a soron állítható; a menü kiírja, hogy MINDEN
+        # pozíciójára hat, nem csak erre.
+        if on_exit_click is not None:
+            self.labels["exit"].config(cursor="hand2")
+            self.labels["exit"].bind(
+                "<Button-1>",
+                lambda e: self._symbol and on_exit_click(self._symbol, e.widget))
         self.btn_be = tk.Button(self.frame, text="BE", width=4, font=small_font,
                                 relief="flat", bg=BTN_OPT_BG, fg=BTN_OPT_FG,
                                 command=lambda: on_be(ticket))
@@ -1620,13 +1629,10 @@ class PositionRow:
         self.ent_trail.pack(side="left", padx=1)
         self.ent_trail.bind("<Return>",   self._apply_trail_dist)
         self.ent_trail.bind("<FocusOut>", self._apply_trail_dist)
+        # A táv R/$ ekvivalense a HOVER-tooltipben (inline elférne, de a keskeny
+        # vezérlő-sávban levágódott) — a mezőre/gombra állva látszik.
         self.ent_trail.bind("<Enter>", self._trail_tip_show)
         self.ent_trail.bind("<Leave>", self._trail_tip_hide)
-        # A táv R/$ ekvivalense (a nyers pont-szám önmagában keveset mond)
-        self.lbl_trail_rr = tk.Label(self.frame, text="", bg=BG_ROW_EVEN,
-                                     fg=FG_GRAY_DIM, font=small_font, width=9,
-                                     anchor="w")
-        self.lbl_trail_rr.pack(side="left", padx=(0, 1))
         self.btn_panic = tk.Button(self.frame, text="Zár", width=4, font=small_font,
                                    relief="flat", bg=BTN_STOP_BG, fg=BTN_STOP_FG,
                                    command=lambda: on_panic(ticket))
@@ -1909,9 +1915,9 @@ class PositionRow:
         self.ent_trail.config(fg=FG_CYAN if override is not None else FG_GRAY)
 
         # A táv R/$ ekvivalense — a nyers pont-szám (pl. „600") önmagában keveset
-        # mond; itt látod, a kockázat hányad része (R) és kb. hány $ a követési táv.
-        # R = trail_táv / kezdeti kockázat (pontban); $ = R × (a kezdeti kockázat $-a),
-        # ahol a kezdeti kockázat $-a a lebegő P&L-ből arányosítva (mint az SL P&L).
+        # mond; a tooltipben látod, a kockázat hányad része (R) és kb. hány $ a
+        # követési táv. R = trail_táv / kezdeti kockázat (pontban); $ = R × (a
+        # kezdeti kockázat $-a a lebegő P&L-ből arányosítva, mint az SL P&L).
         _rr_txt = ""
         if eff and point and point > 0 and _risk_price > (point or 1e-9):
             _risk_pts = _risk_price / point
@@ -1920,7 +1926,6 @@ class PositionRow:
             if abs(cur - entry) > (point or 1e-9):
                 _risk_usd = abs(profit * (_risk_price) / (cur - entry))
                 _rr_txt += f" / {_r_of_trail * _risk_usd:.0f}$"
-        self.lbl_trail_rr.config(text=_rr_txt)
 
         # A Trail gomb + táv-mező közös tooltipje: a távolság ÉS mikor húz.
         _tip = f"Trailing követési távolság: {int(eff)} pont" if eff else \
@@ -1939,7 +1944,7 @@ class PositionsTab:
                  on_be, on_trail, on_panic, on_close_all,
                  on_name_click, on_trail_dist, trail_default_provider,
                  point_provider, strategy_provider=None, on_build=None,
-                 on_build_mode=None, on_strategy_click=None):
+                 on_build_mode=None, on_strategy_click=None, on_exit_click=None):
         self.parent = parent
         self.cfg = cfg
         self._mono, self._small, self._header = mono_font, small_font, header_font
@@ -1954,6 +1959,7 @@ class PositionsTab:
         self._on_build = on_build
         self._on_build_mode = on_build_mode
         self._on_strategy_click = on_strategy_click
+        self._on_exit_click = on_exit_click
         self._trail_default_provider = trail_default_provider
         self._point_provider = point_provider
         self._rows: dict[int, PositionRow] = {}
@@ -1988,9 +1994,10 @@ class PositionsTab:
                               "melletti ≈R/$ = a követési táv a kockázathoz mérve",
                  bg=BG, fg=FG_GRAY, font=self._small).pack(side="left")
         tk.Label(p, text="Kiszállás = a kockázatcsökkentő preset szerinti terv (Ki→BE, "
-                         "Felező/Pajzs→runner, Fibo, Harmados, +CC=cost-cut) — a "
-                         "pár-soron állítható a Live fülön.  ·  A Stratégia cellára "
-                         "kattintva egy KÉZZEL nyitott pozíció stratégiához rendelhető (⇩).",
+                         "Felező/Pajzs→runner, Fibo, Harmados, +CC=cost-cut) — a CELLÁRA "
+                         "KATTINTVA állítható (a pár minden pozíciójára).  ·  A Stratégia "
+                         "cellára kattintva egy KÉZZEL nyitott pozíció stratégiához "
+                         "rendelhető (⇩).",
                  bg=BG, fg=FG_GRAY_DIM, font=self._small, anchor="w",
                  justify="left").pack(fill="x", padx=10, pady=(0, 4))
 
@@ -2020,7 +2027,8 @@ class PositionsTab:
                                   self._on_name_click, self._on_trail_dist,
                                   on_build=self._on_build,
                                   on_build_mode=self._on_build_mode,
-                                  on_strategy_click=self._on_strategy_click)
+                                  on_strategy_click=self._on_strategy_click,
+                                  on_exit_click=self._on_exit_click)
                 self._rows[tid] = row
             trail_def = self._trail_default_provider(pos["symbol"])
             point     = self._point_provider(pos["symbol"])
@@ -2036,11 +2044,17 @@ class PositionsTab:
                 self._rows[tid].frame.destroy()
                 del self._rows[tid]
 
-        # Rendezett újracsomagolás (szimbólum szerint)
-        for r in self._rows.values():
-            r.frame.pack_forget()
-        for pos in sorted(positions, key=lambda x: (x["symbol"], x["ticket"])):
-            self._rows[pos["ticket"]].frame.pack(fill="x", padx=2)
+        # Rendezett csomagolás (szimbólum szerint) — CSAK ha a sorrend változott.
+        # Enélkül minden ciklusban (~1 mp) újracsomagolnánk, ami a kurzor alatt
+        # álló sorból is Enter/Leave eseményt vált ki → a hover-tooltip villog.
+        order = [pos["ticket"] for pos in
+                 sorted(positions, key=lambda x: (x["symbol"], x["ticket"]))]
+        if order != getattr(self, "_order", None):
+            for r in self._rows.values():
+                r.frame.pack_forget()
+            for tid in order:
+                self._rows[tid].frame.pack(fill="x", padx=2)
+            self._order = order
 
         # Összesítés + instrumentumonkénti bontás
         total = sum(p["profit"] for p in positions)
@@ -2349,7 +2363,8 @@ class DashboardWindow:
             strategy_provider=self._strategy_by_magic,
             on_build=self._pos_build,
             on_build_mode=self._pos_build_mode,
-            on_strategy_click=self._pos_strategy_menu)
+            on_strategy_click=self._pos_strategy_menu,
+            on_exit_click=self._pos_exit_menu)
 
         closed_frame = tk.Frame(self._notebook, bg=BG)
         self._notebook.add(closed_frame, text="  Lezárt (ma)  ")
@@ -3810,6 +3825,77 @@ class DashboardWindow:
                 f"A már elmozgatott stop ott marad, ahol most van."):
             return
         _adopted.release(ticket)
+        self._pos_tab.refresh()
+
+    # ── Kiszállás (kockázatcsökkentő preset) a soron ────────────────────
+    def _pos_exit_menu(self, symbol, widget):
+        """A Kiszállás-cellára kattintva: a per-INSTRUMENTUM kockázatcsökkentő
+        preset (+ runner + cost-cut) gyorsan állítható a soron.
+
+        FONTOS: a preset PER INSTRUMENTUM él (nem per pozíció) — a(z) {symbol}
+        MINDEN mostani ÉS jövőbeli pozíciójára hat. A menü fejléce ezt kiírja. A
+        finomabb beállítás (Óvatos méret, Exit-indikátor, kalibráció) a Stratégia
+        Paraméterek ablakban van — ide egy gyors mutató is kerül."""
+        from core import rr_state as _rrs
+        from core import risk_reduction as _rrx
+
+        cur_preset = _rrs.effective_preset(symbol)
+        cur_runner = _rrs.get_runner(symbol)
+        menu = tk.Menu(self.root, tearoff=0, bg=BG_HEADER, fg=FG_WHITE,
+                       activebackground=BTN_OPT_BG, activeforeground=FG_ON_ACCENT)
+        menu.add_command(label=f"Kiszállás — a(z) {symbol} MINDEN pozíciójára hat:",
+                         state="disabled")
+        for preset in _rrs.CYCLE:
+            menu.add_command(
+                label=("● " if preset == cur_preset else "    ") + _rrs.NAME[preset],
+                command=lambda p=preset: self._set_exit_preset(symbol, p))
+
+        # Runner-almenü — csak Felező/Pajzs presetnél van értelme (a részleges
+        # zárás UTÁNI maradék stopja). Az „exit" (Kiszállási jel) indikátorát a
+        # Stratégia Paraméterek ablak állítja.
+        if cur_preset in (_rrx.PRESET_HALVING, _rrx.PRESET_SHIELD, _rrx.PRESET_SHIELD_FIBO):
+            menu.add_separator()
+            rsub = tk.Menu(menu, tearoff=0, bg=BG_HEADER, fg=FG_WHITE,
+                           activebackground=BTN_OPT_BG, activeforeground=FG_ON_ACCENT)
+            for r in _rrs.RUNNERS:
+                rsub.add_command(
+                    label=("● " if r == cur_runner else "    ") + _rrs.RUNNER_NAME[r],
+                    command=lambda rr=r: self._set_exit_runner(symbol, rr))
+            menu.add_cascade(label="Runner (a maradék stopja)", menu=rsub)
+
+        menu.add_separator()
+        _cc = _rrs.get_cost_cut(symbol)
+        menu.add_command(
+            label=("✓ " if _cc else "    ") + f"Cost-cut (idő-stop, {_rrs.get_cost_cut_bars(symbol)} gyertya)",
+            command=lambda: self._toggle_exit_cost_cut(symbol))
+        menu.add_separator()
+        menu.add_command(label="Részletes… (Stratégia paraméterek)",
+                         command=lambda: self._show_instrument_params(symbol))
+        try:
+            menu.tk_popup(widget.winfo_rootx(),
+                          widget.winfo_rooty() + widget.winfo_height())
+        finally:
+            menu.grab_release()
+
+    def _set_exit_preset(self, symbol, preset):
+        from core import rr_state as _rrs
+        from core import risky_mode, risk_reduction as _rrx
+        _rrs.set_preset(symbol, preset)
+        # A régi risky_mode-ot szinkronban tartjuk (mint a Stratégia-ablak / R gomb).
+        try:
+            risky_mode.set_risky(symbol, preset == _rrx.PRESET_RISKY)
+        except Exception:
+            pass
+        self._pos_tab.refresh()
+
+    def _set_exit_runner(self, symbol, runner):
+        from core import rr_state as _rrs
+        _rrs.set_runner(symbol, runner)
+        self._pos_tab.refresh()
+
+    def _toggle_exit_cost_cut(self, symbol):
+        from core import rr_state as _rrs
+        _rrs.set_cost_cut(symbol, not _rrs.get_cost_cut(symbol))
         self._pos_tab.refresh()
 
     # ── Pozíciókezelő handlerek (Pozíciók fül) ──────────────────────────
