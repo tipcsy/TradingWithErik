@@ -8,13 +8,18 @@ Szabványos, önálló ablak egy paraméterkészlet backtesteléséhez:
   • állítható időszak (kezdő/záró dátum; üresen = a teljes letöltött history),
   • választható óra-kapu: „Csak a kereskedési órákban" (trade_hours, mint élesben) —
     ekkor a `no_trade_resets_signal` param is életbe lép (a szünet reseteli az M15-öt),
-  • állítható Kockázatcsökkentés + Óvatos méret + Runner + Exit (indikátor+paraméterek)
-    + Építés (Ki/Kézi/Auto + méret-faktor) — mind FELTÁRÓ (nem ment, nem érinti a live-ot),
+  • állítható Kockázatcsökkentés + Óvatos méret + Runner + Exit (indikátor+paraméterek),
+    ALATTA az Építés (Ki/Kézi/Auto + méret-faktor + trigger) — mind FELTÁRÓ
+    (nem ment, nem érinti a live-ot),
+  • a TÖRZS görgethető, a gombsor (Backtest indítása / Mentés a Paraméterekhez /
+    Bezárás) az ablak alján RÖGZÍTVE — sok paraméternél is elérhető,
   • progress bar + százalék a futás közben,
   • élő kijelzés: aktuális szimulált idő, egyenleg, nyitott/lezárt kötések,
     és a ténylegesen alkalmazott kockázati technikák (Felező/Pajzs/Risky) száma,
-  • a végén: minősítés + metrikák (Trade·Win·MaxDD·P&L·PF) és egy egyszerű
-    egyenleg-görbe (sparkline) — az ELŐZŐ / EREDETI futás halványan összevethető.
+  • a végén: minősítés + metrikák (Trade·Win·MaxDD·P&L·PF), a POZÍCIÓÉPÍTÉS
+    hozadéka (hány ráépítés hány kötésen + R/$; tételesen az „Építés CSV"
+    gombbal) és egy egyszerű egyenleg-görbe (sparkline) — az ELŐZŐ / EREDETI
+    futás halványan összevethető.
 
 A futás a `trading.backtest.run_pair`-t hívja külön szálon; a `progress_callback`
 a fő (UI) szálra marshalol (`after(0, …)`) — az UI SOHA nem blokkol. A végeredményt
@@ -36,7 +41,7 @@ from dashboard.theme import (
     BTN_PLAY_BG, BTN_PLAY_FG, BTN_BT_BG, BTN_BT_FG, BTN_DIS_BG, BTN_DIS_FG,
     color as sem_color,
 )
-from dashboard.instrument_dialog import _attach_tooltip, _style_om
+from dashboard.instrument_dialog import _attach_tooltip, _style_om, _scrollable
 from core.quality import metric_colors
 from core.params_store import resolve_trade_hours
 from core import rr_state as _rrs
@@ -137,6 +142,7 @@ class BacktestDialog:
 
         self._df15 = None
         self._df1  = None
+        self._build_csv = None      # a legutóbbi futás Építés CSV-je (gomb)
         self._running = False
         self._summary = None
         self._build()
@@ -235,11 +241,23 @@ class BacktestDialog:
         win.title(f"{self.symbol} — {self.strategy.name} Backtest")
         win.configure(bg=BG)
 
-        tk.Label(win, text=f"{self.symbol}  ·  {self.strategy.name} — Backtest",
+        # ── Rögzített alsó sáv ELŐSZÖR (side="bottom") ──────────────────────
+        # A pack-sorrend miatt a lentre kötött sáv kapja meg a helyét először, a
+        # görgethető törzs csak a maradékot → a Backtest indítása / Mentés a
+        # Paraméterekhez / Bezárás gombok kis képernyőn is MINDIG látszanak.
+        footer = tk.Frame(win, bg=BG)
+        footer.pack(side="bottom", fill="x")
+
+        # Görgethető törzs — innentől MINDEN tartalom ide (`body`) megy.
+        holder, body, self._body_canvas = _scrollable(win)
+        holder.pack(side="top", fill="both", expand=True)
+        self._body = body
+
+        tk.Label(body, text=f"{self.symbol}  ·  {self.strategy.name} — Backtest",
                  bg=BG, fg=FG_WHITE, font=self._hf).pack(anchor="w", padx=12, pady=(12, 2))
 
         # ── Időszak ─────────────────────────────────────────────────────────
-        rng = tk.Frame(win, bg=BG)
+        rng = tk.Frame(body, bg=BG)
         rng.pack(anchor="w", padx=12, pady=(4, 0))
         tk.Label(rng, text="Időszak (YYYY-MM-DD, üresen = teljes):", bg=BG,
                  fg=FG_GRAY, font=self._sf).pack(side="left")
@@ -254,7 +272,7 @@ class BacktestDialog:
                       fg=FG_WHITE, font=self._sf, insertbackground=FG_WHITE,
                       justify="center")
         e2.pack(side="left", padx=(2, 0))
-        self._span_lbl = tk.Label(win, text="Adat betöltése…", bg=BG,
+        self._span_lbl = tk.Label(body, text="Adat betöltése…", bg=BG,
                                   fg=FG_GRAY_DIM, font=self._sf)
         self._span_lbl.pack(anchor="w", padx=12, pady=(1, 4))
 
@@ -263,7 +281,7 @@ class BacktestDialog:
         # mint a live) nyit — a többi óra kimarad, és ha a `no_trade_resets_signal`
         # param be van kapcsolva, a szünet reseteli az M15 ablakot (mint élesben).
         # Alap: KI → minden órában kereskedik (a korábbi backtest-ablak viselkedése).
-        hrow = tk.Frame(win, bg=BG)
+        hrow = tk.Frame(body, bg=BG)
         hrow.pack(anchor="w", padx=12, pady=(0, 4))
         self._hours_filter_var = tk.BooleanVar(value=False)
         tk.Checkbutton(hrow, text="Csak a kereskedési órákban (trade_hours, mint élesben)",
@@ -291,14 +309,14 @@ class BacktestDialog:
                              "trading.max_open_slots értéke.")
 
         # ── Paraméterek (SZERKESZTHETŐ — feltáró) ───────────────────────────
-        phdr = tk.Frame(win, bg=BG)
+        phdr = tk.Frame(body, bg=BG)
         phdr.pack(fill="x", padx=12, pady=(2, 0))
         tk.Label(phdr, text="Paraméterek (szerkeszthető — feltáró):", bg=BG,
                  fg=FG_GRAY, font=self._sf).pack(side="left")
         tk.Button(phdr, text="Vissza", bg=BG_HEADER, fg=FG_WHITE, relief="flat",
                   font=self._sf, cursor="hand2", command=self._reset_params).pack(
                   side="left", padx=(8, 0))
-        pform = tk.Frame(win, bg=BG)
+        pform = tk.Frame(body, bg=BG)
         pform.pack(anchor="w", padx=12, pady=(2, 2))
         self._pentries = {}
         _COLS = 2
@@ -316,13 +334,15 @@ class BacktestDialog:
 
         # ── Vezérlő-csoportok: Kockázatcsökkentés + Pozícióépítés (FELTÁRÓ) ──
         # Ugyanaz a logikai tiltás, mint az instrumentum-ablakban: a nem releváns
-        # vezérlők ELREJTVE a preset/runner/építés szerint.
-        ctl = tk.Frame(win, bg=BG)
+        # vezérlők ELREJTVE a preset/runner/építés szerint. A két csoport EGYMÁS
+        # ALATT (nem egymás mellett): a kockázatcsökkentés sora hosszú, mellette a
+        # Pozícióépítés kilógott az ablakból.
+        ctl = tk.Frame(body, bg=BG)
         ctl.pack(anchor="w", fill="x", padx=12, pady=(2, 0))
 
         rrg = tk.LabelFrame(ctl, text=" Kockázatcsökkentés (feltáró) ",
                             bg=BG, fg=FG_BLUE, font=self._sf, labelanchor="nw")
-        rrg.pack(side="left", anchor="n")
+        rrg.pack(anchor="w", fill="x")
         row = tk.Frame(rrg, bg=BG)
         row.pack(anchor="w", padx=6, pady=4)
         tk.Label(row, text="Preset:", bg=BG, fg=FG_GRAY, font=self._sf).grid(row=0, column=0, sticky="w")
@@ -397,7 +417,7 @@ class BacktestDialog:
 
         bldg = tk.LabelFrame(ctl, text=" Pozícióépítés (feltáró) ",
                              bg=BG, fg=FG_BLUE, font=self._sf, labelanchor="nw")
-        bldg.pack(side="left", anchor="n", padx=(12, 0))
+        bldg.pack(anchor="w", fill="x", pady=(6, 0))
         brow = tk.Frame(bldg, bg=BG)
         brow.pack(anchor="w", padx=6, pady=4)
         tk.Label(brow, text="Építés:", bg=BG, fg=FG_GRAY, font=self._sf).pack(side="left")
@@ -407,9 +427,11 @@ class BacktestDialog:
                             command=self._on_build_mode_change_local)
         _style_om(omb, self._sf)
         omb.pack(side="left", padx=(4, 0))
-        _attach_tooltip(omb, "Ki / Kézi / Auto (Ki-preset mellett modellez). Auto: mindig; "
-                             "Kézi: CSAK R-alapú triggernél (determinisztikus). Gyertyás Kézi "
-                             "→ nem modellezhető.")
+        _attach_tooltip(omb, "Ki / Kézi / Auto. Auto: bármely preset mellett modellez "
+                             "(a kockázatmentes runnerre is épít, mint élesben). Kézi: CSAK "
+                             "R-alapú triggernél (determinisztikus) — a gyertyás Kézi "
+                             "user-kattintás, azt nem modellezzük. Épített csomagnál nincs "
+                             "TP: az átlagár-stopig / kiszállási jelig fut (mint élesben).")
         self._build_faktor_frame = tk.Frame(brow, bg=BG)
         tk.Label(self._build_faktor_frame, text="Faktor:", bg=BG, fg=FG_GRAY,
                  font=self._sf).pack(side="left")
@@ -451,14 +473,15 @@ class BacktestDialog:
 
         self._update_rr_visibility()
 
-        tk.Label(win, text="(feltáró — nem ment; az Építés csak Auto+Ki-preset esetén "
-                           "modelleződik. A főképernyőre csak az eredeti rr eredménye "
-                           "íródik vissza.)", bg=BG, fg=FG_GRAY_DIM,
+        tk.Label(body, text="(feltáró — nem ment; az Építés Auto módban BÁRMELY presettel "
+                           "modelleződik (a kockázatmentes runnerre is, mint élesben), "
+                           "Kéziben csak R-alapú triggernél. A főképernyőre csak az "
+                           "eredeti rr eredménye íródik vissza.)", bg=BG, fg=FG_GRAY_DIM,
                  font=self._sf, justify="left", wraplength=620).pack(
                  anchor="w", padx=12, pady=(1, 4))
 
         # ── Progress ────────────────────────────────────────────────────────
-        pf = tk.Frame(win, bg=BG)
+        pf = tk.Frame(body, bg=BG)
         pf.pack(fill="x", padx=12, pady=(2, 2))
         self._pbar = ttk.Progressbar(pf, orient="horizontal", mode="determinate",
                                      maximum=100.0, length=380)
@@ -468,7 +491,7 @@ class BacktestDialog:
         self._pct_lbl.pack(side="left", padx=(8, 0))
 
         # ── Élő kijelzés ────────────────────────────────────────────────────
-        live = tk.Frame(win, bg=BG)
+        live = tk.Frame(body, bg=BG)
         live.pack(anchor="w", padx=12, pady=(2, 2))
         self._live = {}
         for key, label in (("time", "Idő "), ("balance", "Egyenleg "),
@@ -480,12 +503,12 @@ class BacktestDialog:
             v = tk.Label(cell, text="—", bg=BG, fg=FG_WHITE, font=self._sf)
             v.pack(side="left")
             self._live[key] = v
-        self._tech_lbl = tk.Label(win, text="", bg=BG, fg=FG_GRAY_DIM,
+        self._tech_lbl = tk.Label(body, text="", bg=BG, fg=FG_GRAY_DIM,
                                   font=self._sf)
         self._tech_lbl.pack(anchor="w", padx=12, pady=(0, 2))
 
         # ── Összevetés-választó (előző/eredeti futás halvány overlay) ───────
-        cmp_bar = tk.Frame(win, bg=BG)
+        cmp_bar = tk.Frame(body, bg=BG)
         cmp_bar.pack(anchor="w", padx=12, pady=(2, 0))
         tk.Label(cmp_bar, text="Összevetés:", bg=BG, fg=FG_GRAY,
                  font=self._sf).pack(side="left")
@@ -501,22 +524,27 @@ class BacktestDialog:
         self._ref_metrics_lbl.pack(side="left", padx=(10, 0))
 
         # ── Egyenleg-görbe (sparkline) ──────────────────────────────────────
-        self._canvas = tk.Canvas(win, width=400, height=90, bg=BG_HEADER,
+        self._canvas = tk.Canvas(body, width=400, height=90, bg=BG_HEADER,
                                  highlightthickness=0)
         self._canvas.pack(anchor="w", padx=12, pady=(4, 4))
 
         # ── Eredmény-sáv (minősítés + metrikák) ─────────────────────────────
-        self._grade_lbl = tk.Label(win, bg=BG, font=self._hf, anchor="w",
+        self._grade_lbl = tk.Label(body, bg=BG, font=self._hf, anchor="w",
                                    text="")
         self._grade_lbl.pack(anchor="w", padx=12, pady=(2, 0))
-        self._metrics_frame = tk.Frame(win, bg=BG)
+        self._metrics_frame = tk.Frame(body, bg=BG)
         self._metrics_frame.pack(anchor="w", padx=12, pady=(0, 4))
 
-        self._status = tk.Label(win, text="", bg=BG, fg=FG_GRAY, font=self._sf)
-        self._status.pack(anchor="w", padx=12)
+        # Pozícióépítés hozadéka (hány ráépítés + mennyit hozott R-ben és $-ban)
+        self._build_lbl = tk.Label(body, text="", bg=BG, fg=FG_GRAY_DIM,
+                                   font=self._sf, anchor="w", justify="left")
+        self._build_lbl.pack(anchor="w", padx=12, pady=(0, 4))
 
-        # ── Gombok ──────────────────────────────────────────────────────────
-        btns = tk.Frame(win, bg=BG)
+        self._status = tk.Label(body, text="", bg=BG, fg=FG_GRAY, font=self._sf)
+        self._status.pack(anchor="w", padx=12, pady=(0, 6))
+
+        # ── Gombok (a RÖGZÍTETT alsó sávban — mindig látszanak) ─────────────
+        btns = tk.Frame(footer, bg=BG)
         btns.pack(pady=10)
         self._btn_start = tk.Button(btns, text="Backtest indítása", bg=BTN_BT_BG,
                                     fg=BTN_BT_FG, relief="flat", font=self._sf,
@@ -528,6 +556,12 @@ class BacktestDialog:
         if self._on_apply_params is None:
             self._btn_apply.config(state="disabled")
         self._btn_apply.pack(side="left", padx=6)
+        # Építés CSV — a ráépítések TÉTELESEN (mint a Trials CSV). Csak akkor él,
+        # ha a futásban volt ráépítés (a fájl ilyenkor készül el).
+        self._btn_build_csv = tk.Button(btns, text="Építés CSV", bg=BTN_BT_BG,
+                                        fg=BTN_BT_FG, relief="flat", font=self._sf,
+                                        state="disabled", command=self._open_build_csv)
+        self._btn_build_csv.pack(side="left", padx=6)
         tk.Button(btns, text="Bezárás", bg=BTN_DIS_BG, fg=BTN_DIS_FG, relief="flat",
                   font=self._sf, command=self._close).pack(side="left", padx=6)
 
@@ -536,6 +570,23 @@ class BacktestDialog:
         # visszaadjuk a szülőnek.
         win.grab_set()
         win.protocol("WM_DELETE_WINDOW", self._close)
+
+        self._fit_to_screen(win, body, footer)
+
+    def _fit_to_screen(self, win, body, footer):
+        """Az ablak méretezése a KÉPERNYŐHÖZ: ha a tartalom elfér, minden látszik;
+        ha nem, a törzs görgethetővé zsugorodik, a gombsor pedig marad az alján.
+        A canvas magától nem kér magasságot (create_window), ezért a belső frame
+        igényéből — a képernyőre vágva — állítjuk be. (Mint az instrumentum-ablak.)"""
+        try:
+            win.update_idletasks()
+            need_h = body.winfo_reqheight()
+            need_w = body.winfo_reqwidth()
+            avail = int(win.winfo_screenheight() * 0.85) - footer.winfo_reqheight() - 80
+            self._body_canvas.config(height=max(240, min(need_h, avail)),
+                                     width=need_w)
+        except Exception:
+            pass
 
     def _close(self):
         try:
@@ -593,6 +644,20 @@ class BacktestDialog:
                 self._build_rstep_frame.pack(side="left", padx=(8, 0))
             if trig == _pb.TRIGGER_R_CONVERGE:
                 self._build_rshrink_frame.pack(side="left", padx=(8, 0))
+        self._refit_width()
+
+    def _refit_width(self):
+        """A törzs szélessége kövesse az ELŐBUKKANÓ vezérlőket: a kockázatcsökkentés
+        sora Pajzs + Kiszállási jelnél jóval szélesebb, mint Ki-nél — különben a jobb
+        széle levágódna. Csak NŐ (nem ugrál vissza), a képernyőre vágva."""
+        try:
+            cv = self._body_canvas
+            cv.update_idletasks()
+            need = self._body.winfo_reqwidth()
+            cap  = int(self.win.winfo_screenwidth() * 0.95)
+            cv.config(width=max(int(cv.cget("width")), min(need, cap)))
+        except Exception:
+            pass
 
     def _rebuild_exit_params(self):
         """Az exit-indikátor SZERKESZTHETŐ mezőinek újraépítése (a kiválasztott
@@ -751,6 +816,9 @@ class BacktestDialog:
         for w in self._metrics_frame.winfo_children():
             w.destroy()
         self._grade_lbl.config(text="")
+        self._build_lbl.config(text="")
+        self._build_csv = None
+        self._btn_build_csv.config(state="disabled")
 
         start = self._start_var.get().strip() or None
         end   = self._end_var.get().strip() or None
@@ -794,6 +862,17 @@ class BacktestDialog:
                         summary["_mt5_csv"] = _p.name
                 except Exception:
                     pass
+                # Pozícióépítés — tételes CSV (csak ha volt ráépítés). Az ablak
+                # „Építés CSV" gombja ezt nyitja meg (mint a Trials CSV).
+                try:
+                    from tools.build_export import export_build_csv
+                    from version import BASE_DIR
+                    _bp = export_build_csv(result, self.symbol,
+                                           BASE_DIR / "data" / "build_csv")
+                    if _bp and summary is not None:
+                        summary["_build_csv"] = str(_bp)
+                except Exception:
+                    pass
             except Exception as ex:
                 err = str(ex)
             try:
@@ -834,6 +913,8 @@ class BacktestDialog:
         if tech:
             _tech_txt = "Ténylegesen alkalmazott technika: " + ", ".join(
                 f"{_TECH_NAMES.get(k, k)}×{v}" for k, v in tech.items())
+        # Építés-CSV útvonala (a metrikák közül kivéve) — a gomb ezt nyitja.
+        self._build_csv = (summary or {}).pop("_build_csv", None)
         # MT5 backtest-reprodukció CSV neve (a metrikák közül kivéve).
         _mt5 = (summary or {}).pop("_mt5_csv", None)
         if _mt5:
@@ -851,6 +932,7 @@ class BacktestDialog:
             self._orig_result, self._orig_summary = result, summary
 
         self._render_metrics(summary)
+        self._render_build(summary)
         self._redraw()
         # Visszaírás a főképernyőre CSAK ha ugyanazt az rr-t mértük, mint a mentett
         # (fő ablak) rr — különben ez feltáró futtatás, nem szennyezi a mentendőt.
@@ -889,6 +971,46 @@ class BacktestDialog:
                      font=self._sf).pack(side="left")
             tk.Label(cell, text=fn(summary), bg=BG, fg=sem_color(color),
                      font=self._sf).pack(side="left")
+
+    # ── Pozícióépítés hozadéka ───────────────────────────────────────────────
+    def _open_build_csv(self):
+        """Az Építés CSV megnyitása az alap alkalmazásban (Windows: Excel) —
+        ugyanúgy, mint az optimalizálás Trials CSV-je."""
+        if not self._build_csv:
+            self._status.config(text="Nincs Építés CSV — ebben a futásban nem volt "
+                                     "ráépítés.", fg=FG_YELLOW)
+            return
+        try:
+            import os
+            os.startfile(str(self._build_csv))
+        except Exception as ex:
+            self._status.config(text=f"Megnyitási hiba: {ex}", fg=FG_RED)
+
+    def _render_build(self, summary):
+        """Hány ráépítés (adalék-láb) nyílt az Építés hatására, hány kötésen, és
+        mennyit hozott KIZÁRÓLAG az adalék — R-ben (az induló láb kockázatához
+        mérve) és $-ban. Ha az Építés be volt kapcsolva, de nem lett adalék, azt
+        is kiírjuk (a modellezés csak Ki-preset + Auto / R-alapú Kézi mellett fut)."""
+        adds = int((summary or {}).get("build_adds", 0) or 0)
+        self._btn_build_csv.config(state=("normal" if self._build_csv else "disabled"))
+        if not adds:
+            on = self._build_mode_name.get() != _bst.NAME[_bst.MODE_OFF]
+            self._build_lbl.config(
+                text=("Építés: 0 ráépítés — nem tüzelt építés-jel (Kézi módban csak "
+                      "R-alapú trigger modellezhető)." if on else ""),
+                fg=FG_GRAY_DIM)
+            return
+        n_tr = int(summary.get("build_trades", 0) or 0)
+        pkg  = float(summary.get("build_pkg_pnl", 0.0) or 0.0)
+        pkgr = float(summary.get("build_pkg_r", 0.0) or 0.0)
+        r    = float(summary.get("build_r", 0.0) or 0.0)
+        pnl  = float(summary.get("build_pnl", 0.0) or 0.0)
+        per  = (pkgr / n_tr) if n_tr else 0.0
+        self._build_lbl.config(
+            text=f"Építés: {adds} ráépítés {n_tr} kötésen  ·  az épített kötések: "
+                 f"{pkg:+.0f}$ / {pkgr:+.1f} R ({per:+.2f} R/kötés)  ·  ebből az "
+                 f"adalékok: {pnl:+.0f}$ / {r:+.1f} R   (tételesen: Építés CSV)",
+            fg=(FG_GREEN if pkg > 0 else (FG_RED if pkg < 0 else FG_YELLOW)))
 
     # ── Összevetés (előző/eredeti) ────────────────────────────────────────────
     def _reference(self):

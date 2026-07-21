@@ -75,6 +75,12 @@ class Trade:
     legs: list = field(default_factory=list)   # [(price, lot), …]; üres → egyleges
     build_ref: float = 0.0      # a következő ráépítés referencia-záróára
 
+    @property
+    def built(self) -> bool:
+        """Épített (több lábú) csomag-e? A live ilyenkor TÖRLI a TP-t (minden láb
+        SL-je az átlagáron, TP nélkül fut) — a backtest ezt modellezi."""
+        return len(self.legs) > 1
+
 
 @dataclass
 class BacktestResult:
@@ -120,6 +126,35 @@ class BacktestResult:
         for b in hourly.values():
             b["pnl"] = round(b["pnl"], 2)
 
+        # ── Pozícióépítés (ráépítés) hozadéka ────────────────────────────────
+        # Kétféle nézet, mert kétféle kérdés van:
+        #   • `build_pkg_pnl/_r` — az ÉPÍTETT KÖTÉSEK teljes eredménye (ez a
+        #     „mennyit hoztak az épített csomagok"); ez a gyakorlati hozadék,
+        #   • `build_pnl/_r` — KIZÁRÓLAG az adalék-lábak (legs[1:]) része a
+        #     záróáron. FIGYELEM: ha a csomag az ÁTLAGÁR-stopon zár, ez definíció
+        #     szerint az induló láb nyereségének a mínusza (nulla összegű) — a
+        #     bontás a CSV-hez/diagnosztikához hasznos, nem „profit"-mérőszám.
+        # Az igazi A/B a két futás (Építés Ki ↔ Auto) össz-P&L-jének különbsége.
+        b_adds = b_trades = 0
+        b_pnl = b_r = b_pkg_pnl = b_pkg_r = 0.0
+        for t in closed:
+            legs = getattr(t, "legs", None) or []
+            if len(legs) < 2 or t.close_price is None:
+                continue
+            b_trades += 1
+            b_adds   += len(legs) - 1
+            b_pkg_pnl += t.pnl_usd
+            p = 0.0
+            for price, lot in legs[1:]:
+                diff = t.close_price - price
+                if t.direction == "SELL":
+                    diff = -diff
+                p += (diff / t.pip_size) * lot * t.pv1_usd
+            b_pnl += p
+            if t.risk_usd:
+                b_r += p / t.risk_usd
+                b_pkg_r += t.pnl_usd / t.risk_usd
+
         return {
             "symbol":        self.symbol,
             "trades":        len(closed),
@@ -134,6 +169,13 @@ class BacktestResult:
             "be_trail_count": len(be_tr),
             "final_balance": initial_balance + sum(pnl_list),
             "hourly_pnl":    hourly,
+            # Pozícióépítés (ráépítés) — 0/0.0, ha nem volt építés
+            "build_trades":  b_trades,   # hány kötésre épült rá
+            "build_adds":    b_adds,     # összesen hány adalék (láb) nyílt
+            "build_pkg_pnl": round(b_pkg_pnl, 2),  # az ÉPÍTETT kötések teljes P&L-je ($)
+            "build_pkg_r":   round(b_pkg_r, 2),    # ugyanaz R-ben
+            "build_pnl":     round(b_pnl, 2),   # ebből az adalék-lábak része ($)
+            "build_r":       round(b_r, 2),     # ugyanaz R-ben (induló kockázathoz mérve)
         }
 
 
@@ -368,7 +410,16 @@ def _manage_position(trade: "Trade", high: float, low: float, params: dict,
             if plan.close_lot > 0.0:
                 # a lezárt lot +1R-t realizál (a 1R áron zárunk részlegesen)
                 trade.booked_pnl += trade.sl_pips * plan.close_lot * trade.pv1_usd
-                trade.lot = round(trade.lot - plan.close_lot, 8)
+                _new_lot = round(trade.lot - plan.close_lot, 8)
+                # A LÁBAKAT is arányosan zsugorítjuk: a P&L a lábakon számolódik
+                # (calc_pnl), így a részleges zárás nélkülük „elveszne" — az épített
+                # csomag a zárás után is a teljes mérettel számolna. (A ráépítés csak
+                # kockázatmentes pozícióra jön, ami épp ITT keletkezik → a részleges
+                # zárás pillanatában a csomag még egyleges.)
+                if trade.legs and trade.lot > 0:
+                    _f = _new_lot / trade.lot
+                    trade.legs = [(p, round(l * _f, 8)) for p, l in trade.legs]
+                trade.lot = _new_lot
                 # A trade mostantól KOCKÁZATMENTES: a lezárt (≥50%) profit fedezi a
                 # runner max veszteségét (nettó ≥ 0). Ezért felszabadítja a slotot
                 # (mint az OFF-nál a BE 1R-nél) — a runner "house money".
@@ -562,8 +613,11 @@ def run_pair(
     _cc_on    = bool(rr_spec.get("cost_cut"))
     _cc_delta = pd.Timedelta(minutes=strategy.timeframes()[0].minutes *
                              int(rr_spec.get("cost_cut_bars", 12)))
-    # Pozícióépítés modellezése — CSAK AUTO módban (determinista; a Kézi user-vezérelt)
-    # és CSAK OFF presetnél (nincs részleges zárás, tiszta eset). None → nincs építés.
+    # Pozícióépítés modellezése. BÁRMELY presettel (ahogy élesben is: a live minden
+    # KOCKÁZATMENTES pozícióra épít — a Felező/Pajzs runnerére is, nem csak az OFF
+    # preset breakeven-jére); a részleges zárás a lábakat arányosan zsugorítja.
+    # Mód szerint: Auto MINDIG, Kézi CSAK R-alapú triggernél (az determinisztikus →
+    # backtestelhető; a gyertyás Kézi user-kattintás, azt nem modellezzük).
     # A `build` override (a Backtest-ablak FELTÁRÓ Építés-beállítása) elsőbbséget élvez
     # a globális/live build_state fölött → az ablakban kísérletezhetünk anélkül, hogy a
     # live-ot piszkálnánk. None → a per-pár mentett állapot (mint eddig).
@@ -574,12 +628,8 @@ def run_pair(
         _bmode = _bc.get("mode")
         _btrig = _bc.get("trigger", _posbuild.TRIGGER_CANDLE)
         _r_based = _btrig in (_posbuild.TRIGGER_R_FIXED, _posbuild.TRIGGER_R_CONVERGE)
-        # Modellezés CSAK OFF presetnél (nincs részleges zárás), ÉS: Auto módban MINDIG,
-        # Kézi módban CSAK R-alapú triggernél (az determinisztikus → backtestelhető; a
-        # gyertyás Kézi user-kattintás, azt nem modellezzük).
-        if (rr_spec.get("preset", "off") == "off"
-                and (_bmode == _posbuild.MODE_AUTO
-                     or (_bmode == _posbuild.MODE_MANUAL and _r_based))):
+        if (_bmode == _posbuild.MODE_AUTO
+                or (_bmode == _posbuild.MODE_MANUAL and _r_based)):
             _build_cfg = {**_posbuild.default_config(), **_bc}
     except Exception:
         _build_cfg = None
@@ -648,8 +698,10 @@ def run_pair(
             closed = False
 
             if trade.direction == "BUY":
-                # TP ellenőrzés
-                if m1_row["high"] >= trade.tp:
+                # TP ellenőrzés — ÉPÍTETT csomagnál NINCS TP (a live a ráépítéskor
+                # törli minden láb TP-jét, hogy az induló láb ne zárjon önállóan;
+                # a csomag az átlagár-stopig / kiszállási jelig fut).
+                if not trade.built and m1_row["high"] >= trade.tp:
                     trade.close_price = trade.tp
                     trade.close_time  = m1_time
                     trade.pnl_usd     = calc_pnl(trade, trade.tp)
@@ -667,7 +719,7 @@ def run_pair(
                                      params, pip_size, min_lot, lot_step, rr_spec)
 
             elif trade.direction == "SELL":
-                if m1_row["low"] <= trade.tp:
+                if not trade.built and m1_row["low"] <= trade.tp:
                     trade.close_price = trade.tp
                     trade.close_time  = m1_time
                     trade.pnl_usd     = calc_pnl(trade, trade.tp)
@@ -1249,7 +1301,8 @@ def run_portfolio_backtest(
             closed   = False
 
             if trade.direction == "BUY":
-                if row["high"] >= trade.tp:
+                # Épített csomagnál NINCS TP (mint a run_pair-ben / élesben)
+                if not trade.built and row["high"] >= trade.tp:
                     trade.close_price = trade.tp
                     trade.close_time  = m1_time
                     trade.pnl_usd     = calc_pnl(trade, trade.tp)
@@ -1266,7 +1319,7 @@ def run_portfolio_backtest(
                                      pip_size, _minlot, _lotstep, rr_spec)
 
             else:  # SELL
-                if row["low"] <= trade.tp:
+                if not trade.built and row["low"] <= trade.tp:
                     trade.close_price = trade.tp
                     trade.close_time  = m1_time
                     trade.pnl_usd     = calc_pnl(trade, trade.tp)

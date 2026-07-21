@@ -283,6 +283,7 @@ class InstrumentParamsDialog:
         # Görgethető törzs — innentől MINDEN tartalom ide (`body`) megy.
         holder, body, self._body_canvas = _scrollable(popup)
         holder.pack(side="top", fill="both", expand=True)
+        self._body = body
 
         # Fejléc-sor a tartalomban is (a címsor könnyen elsiklik): instrumentum + stratégia.
         tk.Label(body, text=f"{self.symbol}  ·  stratégia: {self.strategy.name}",
@@ -414,7 +415,7 @@ class InstrumentParamsDialog:
         # ── 1. csoport: Kockázatcsökkentés (ha már bent vagy) ────────────────
         rrg = tk.LabelFrame(ctl, text=" Kockázatcsökkentés (ha már bent vagy egy pozícióban) ",
                             bg=BG, fg=FG_BLUE, font=self._sf, labelanchor="nw")
-        rrg.pack(side="left", anchor="n")
+        rrg.pack(anchor="w", fill="x")
         row = tk.Frame(rrg, bg=BG)
         row.pack(anchor="w", padx=6, pady=4)
         tk.Label(row, text="Preset:", bg=BG, fg=FG_GRAY, font=self._sf).grid(row=0, column=0, sticky="w")
@@ -504,9 +505,12 @@ class InstrumentParamsDialog:
         self._rebuild_exit_params()
 
         # ── 2. csoport: Pozícióépítés (külön tengely) ────────────────────────
+        # A kockázatcsökkentés ALATT (nem mellette, mint korábban): annak a sora
+        # Pajzs + Kiszállási jelnél hosszú, mellette ez kilógott az ablakból —
+        # a Backtest-ablakkal EGYEZŐ elrendezés.
         bldg = tk.LabelFrame(ctl, text=" Pozícióépítés (ráépítés a nyerőre) ",
                              bg=BG, fg=FG_BLUE, font=self._sf, labelanchor="nw")
-        bldg.pack(side="left", anchor="n", padx=(12, 0))
+        bldg.pack(anchor="w", fill="x", pady=(6, 0))
         brow = tk.Frame(bldg, bg=BG)
         brow.pack(anchor="w", padx=6, pady=4)
         tk.Label(brow, text="Építés:", bg=BG, fg=FG_GRAY, font=self._sf).pack(side="left")
@@ -1217,6 +1221,20 @@ class InstrumentParamsDialog:
                 self._build_rstep_frame.pack(side="left", padx=(8, 0))
             if trig == self._pb.TRIGGER_R_CONVERGE:
                 self._build_rshrink_frame.pack(side="left", padx=(8, 0))
+        self._refit_width()
+
+    def _refit_width(self):
+        """A törzs szélessége kövesse az ELŐBUKKANÓ vezérlőket: a kockázatcsökkentés
+        sora Pajzs + Kiszállási jelnél jóval szélesebb, mint Ki-nél — különben a jobb
+        széle levágódna. Csak NŐ (nem ugrál vissza), a képernyőre vágva."""
+        try:
+            cv = self._body_canvas
+            cv.update_idletasks()
+            need = self._body.winfo_reqwidth()
+            cap  = int(cv.winfo_toplevel().winfo_screenwidth() * 0.95)
+            cv.config(width=max(int(cv.cget("width")), min(need, cap)))
+        except Exception:
+            pass
 
     def _rebuild_exit_params(self):
         """Az exit-indikátor SZERKESZTHETŐ paraméter-mezőinek újraépítése (a kiválasztott
